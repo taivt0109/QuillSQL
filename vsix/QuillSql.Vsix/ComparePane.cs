@@ -42,10 +42,12 @@ namespace QuillSql.Vsix
         {
             try
             {
-                CompareTheme.Background = (System.Windows.Media.Brush)Application.Current.FindResource(EnvironmentColors.ToolWindowBackgroundBrushKey);
-                CompareTheme.Foreground = (System.Windows.Media.Brush)Application.Current.FindResource(EnvironmentColors.ToolWindowTextBrushKey);
-                CompareTheme.Panel = (System.Windows.Media.Brush)Application.Current.FindResource(EnvironmentColors.CommandBarGradientBeginBrushKey);
-                CompareTheme.Border = (System.Windows.Media.Brush)Application.Current.FindResource(EnvironmentColors.ToolWindowBorderBrushKey);
+                System.Windows.Media.Color color(object key) => ((System.Windows.Media.SolidColorBrush)Application.Current.FindResource(key)).Color;
+                var background = color(EnvironmentColors.ToolWindowBackgroundBrushKey);
+                var text = color(EnvironmentColors.ToolWindowTextBrushKey);
+                var accent = color(EnvironmentColors.SystemHighlightBrushKey);
+                var dark = (0.2126 * background.R + 0.7152 * background.G + 0.0722 * background.B) / 255 < 0.5;
+                CompareTheme.Use(dark, accent, background, text);
             }
             catch (ResourceReferenceKeyNotFoundException)
             {

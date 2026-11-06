@@ -8,31 +8,6 @@ using System.Windows.Media;
 
 namespace QuillSql.Compare
 {
-    /// <summary>Colors of the Compare windows; SSMS replaces them with its theme's.</summary>
-    public static class CompareTheme
-    {
-        public static Brush Background = SystemColors.WindowBrush;
-        public static Brush Panel = new SolidColorBrush(Color.FromRgb(0xF3, 0xF3, 0xF3));
-        public static Brush Foreground = SystemColors.WindowTextBrush;
-        public static Brush Muted = Brushes.Gray;
-        public static Brush Border = new SolidColorBrush(Color.FromRgb(0xD0, 0xD0, 0xD0));
-        public static Brush Accent = new SolidColorBrush(Color.FromRgb(0x2B, 0x5F, 0xA6));
-        public static Brush AccentText = Brushes.White;
-        public static Brush Added = new SolidColorBrush(Color.FromArgb(0x40, 0x2E, 0xA0, 0x43));
-        public static Brush Removed = new SolidColorBrush(Color.FromArgb(0x40, 0xD0, 0x3A, 0x2F));
-        public static Brush Changed = new SolidColorBrush(Color.FromArgb(0x50, 0xE3, 0xA0, 0x08));
-        public static Brush High = new SolidColorBrush(Color.FromRgb(0xC4, 0x2B, 0x1C));
-        public static Brush Medium = new SolidColorBrush(Color.FromRgb(0xB8, 0x6E, 0x00));
-        public static FontFamily Code = new FontFamily("Consolas");
-
-        /// <summary>Applies the colors to a root element (and lets children inherit the foreground).</summary>
-        public static void Apply(Control c)
-        {
-            c.Background = Background;
-            c.Foreground = Foreground;
-        }
-    }
-
     /// <summary>What the window needs from the program it lives in.</summary>
     public interface ICompareHost
     {
@@ -43,9 +18,19 @@ namespace QuillSql.Compare
         Window Owner { get; }
     }
 
+    /// <summary>Segoe Fluent Icons code points.</summary>
+    internal static class Glyph
+    {
+        public const string Add = "", Open = "", Save = "", SaveAs = "", Edit = "", Play = "",
+            Stop = "", Upload = "", Refresh = "", Switch = "", Forward = "", Back = "",
+            Copy = "", Search = "", Settings = "", Connect = "", List = "", People = "",
+            Delete = "", Warning = "", Info = "", Help = "", Chevron = "", Document = "",
+            Check = "", Recent = "", Next = "", Previous = "", Code = "", Server = "";
+    }
+
     internal static class Ui
     {
-        public static TextBlock Text(string text, double size = 12, bool bold = false, Brush brush = null, TextWrapping wrap = TextWrapping.NoWrap)
+        public static TextBlock Text(string text, double size = 13, bool bold = false, Brush brush = null, TextWrapping wrap = TextWrapping.NoWrap)
         {
             var t = new TextBlock { Text = text, FontSize = size, TextWrapping = wrap, VerticalAlignment = VerticalAlignment.Center };
             if (bold) t.FontWeight = FontWeights.SemiBold;
@@ -53,18 +38,101 @@ namespace QuillSql.Compare
             return t;
         }
 
-        public static Button Button(string text, Action click, bool primary = false, double minWidth = 80)
+        /// <summary>A page or card title.</summary>
+        public static TextBlock Title(string text, double size = 20)
         {
-            var b = new Button { Content = text, Padding = new Thickness(12, 4, 12, 4), Margin = new Thickness(4, 0, 0, 0), MinWidth = minWidth };
-            if (primary)
+            var t = Text(text, size, bold: true);
+            t.TextTrimming = TextTrimming.CharacterEllipsis;
+            return t;
+        }
+
+        public static TextBlock Icon(string glyph, double size = 16, Brush brush = null)
+        {
+            var t = new TextBlock { Text = glyph, FontFamily = CompareTheme.Icons, FontSize = size, VerticalAlignment = VerticalAlignment.Center };
+            if (brush != null) t.Foreground = brush;
+            return t;
+        }
+
+        /// <summary>An icon and a label, for buttons and navigation.</summary>
+        public static StackPanel IconText(string glyph, string text, double gap = 8)
+        {
+            var p = new StackPanel { Orientation = Orientation.Horizontal };
+            var icon = Icon(glyph, 15);
+            icon.Margin = new Thickness(0, 0, text == null ? 0 : gap, 0);
+            p.Children.Add(icon);
+            if (text != null) p.Children.Add(Text(text));
+            return p;
+        }
+
+        public static Button Button(string text, Action click, bool primary = false, double minWidth = 80, string glyph = null)
+        {
+            var b = new Button
             {
-                b.Background = CompareTheme.Accent;
-                b.Foreground = CompareTheme.AccentText;
-                b.FontWeight = FontWeights.SemiBold;
-                b.IsDefault = false;
-            }
+                Content = glyph != null ? (object)IconText(glyph, text) : text,
+                Margin = new Thickness(8, 0, 0, 0),
+                MinWidth = minWidth,
+            };
+            if (primary) b.Style = CompareTheme.Style("Q.AccentButton");
             b.Click += (s, e) => click();
             return b;
+        }
+
+        /// <summary>A command bar button: icon and label, no fill until pointed at.</summary>
+        public static Button Command(string glyph, string text, Action click, string tip = null)
+        {
+            var b = new Button { Content = IconText(glyph, text), Style = CompareTheme.Style("Q.SubtleButton"), ToolTip = tip, Margin = new Thickness(2, 0, 2, 0) };
+            b.Click += (s, e) => click();
+            return b;
+        }
+
+        /// <summary>A square icon-only button.</summary>
+        public static Button IconButton(string glyph, string tip, Action click, bool subtle = true)
+        {
+            var b = new Button { Content = Icon(glyph, 14), ToolTip = tip, Width = 36, Height = 32, Padding = new Thickness(0), MinHeight = 0 };
+            if (subtle) b.Style = CompareTheme.Style("Q.SubtleButton");
+            b.Click += (s, e) => click();
+            return b;
+        }
+
+        /// <summary>A command bar button that opens a menu below it.</summary>
+        public static Button MenuButton(string glyph, string text, ContextMenu menu)
+        {
+            var content = IconText(glyph, text);
+            var chevron = Icon(Glyph.Chevron, 9);
+            chevron.Margin = new Thickness(8, 1, 0, 0);
+            content.Children.Add(chevron);
+            var b = new Button { Content = content, Style = CompareTheme.Style("Q.SubtleButton"), Margin = new Thickness(2, 0, 2, 0) };
+            CompareTheme.Attach(menu);
+            b.Click += (s, e) =>
+            {
+                menu.PlacementTarget = b;
+                menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+                menu.IsOpen = true;
+            };
+            return b;
+        }
+
+        public static MenuItem MenuItem(string text, Action click, string glyph = null, string hint = null)
+        {
+            var m = new MenuItem { Header = text, InputGestureText = hint ?? "" };
+            if (glyph != null) m.Icon = Icon(glyph, 14);
+            m.Click += (s, e) => click();
+            return m;
+        }
+
+        /// <summary>A rounded surface that groups related content.</summary>
+        public static Border Card(UIElement child, double padding = 16)
+        {
+            var b = new Border { Child = child, CornerRadius = new CornerRadius(8), BorderThickness = new Thickness(1), Padding = new Thickness(padding) };
+            b.SetResourceReference(Border.BackgroundProperty, "Q.Layer");
+            b.SetResourceReference(Border.BorderBrushProperty, "Q.CardStroke");
+            return b;
+        }
+
+        /// <summary>A small rounded label: "3 different".</summary>
+        public static Border Badge(string text, Brush fill, Brush ink)
+        {
+            return new Border { Child = Text(text, 12, brush: ink), Background = fill, CornerRadius = new CornerRadius(10), Padding = new Thickness(9, 2, 9, 3), Margin = new Thickness(0, 0, 6, 0) };
         }
 
         public static StackPanel Row(params UIElement[] children)
@@ -81,36 +149,29 @@ namespace QuillSql.Compare
             return p;
         }
 
-        /// <summary>A label column and a control column.</summary>
-        public static Grid Form(params Tuple<string, UIElement>[] rows)
+        /// <summary>Fields with their labels above them, as in Windows 11 forms.</summary>
+        public static StackPanel Form(params Tuple<string, UIElement>[] rows)
         {
-            var g = new Grid();
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(130) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            for (var i = 0; i < rows.Length; i++)
+            var p = new StackPanel();
+            foreach (var row in rows)
             {
-                g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-                if (rows[i].Item1 != null)
+                if (row.Item1 != null)
                 {
-                    var label = Text(rows[i].Item1);
-                    label.Margin = new Thickness(0, 4, 8, 4);
-                    Grid.SetRow(label, i);
-                    g.Children.Add(label);
+                    var label = Text(row.Item1, brush: CompareTheme.Muted);
+                    label.Margin = new Thickness(0, 0, 0, 4);
+                    p.Children.Add(label);
                 }
-                var control = rows[i].Item2;
-                if (control is FrameworkElement fe) fe.Margin = new Thickness(0, 3, 0, 3);
-                Grid.SetRow(control, i);
-                Grid.SetColumn(control, 1);
-                g.Children.Add(control);
+                if (row.Item2 is FrameworkElement fe) fe.Margin = new Thickness(0, 0, 0, 12);
+                p.Children.Add(row.Item2);
             }
-            return g;
+            return p;
         }
 
         public static Tuple<string, UIElement> Field(string label, UIElement control) => Tuple.Create(label, control);
 
         public static CheckBox Check(string text, bool value, Action<bool> changed = null)
         {
-            var c = new CheckBox { Content = text, IsChecked = value, Margin = new Thickness(0, 3, 12, 3), VerticalAlignment = VerticalAlignment.Center };
+            var c = new CheckBox { Content = text, IsChecked = value, Margin = new Thickness(0, 2, 16, 2), VerticalAlignment = VerticalAlignment.Center };
             if (changed != null)
             {
                 c.Checked += (s, e) => changed(true);
@@ -119,12 +180,16 @@ namespace QuillSql.Compare
             return c;
         }
 
+        /// <summary>A search or filter box with a hint shown while it is empty.</summary>
+        public static TextBox SearchBox(string hint, double width) => new TextBox { Tag = hint, Width = width, VerticalAlignment = VerticalAlignment.Center };
+
         public static TextBox Code(bool readOnly = true)
         {
             return new TextBox
             {
+                Style = CompareTheme.Style("Q.CodeBox"),
                 FontFamily = CompareTheme.Code,
-                FontSize = 12,
+                FontSize = 12.5,
                 IsReadOnly = readOnly,
                 AcceptsReturn = true,
                 AcceptsTab = true,
@@ -134,18 +199,102 @@ namespace QuillSql.Compare
             };
         }
 
-        public static void Error(Window owner, string message)
+        /// <summary>A check box column that ticks with one click.</summary>
+        public static DataGridTemplateColumn CheckColumn(string header, string path, double width)
         {
-            if (owner != null) MessageBox.Show(owner, message, "QuillSQL Compare", MessageBoxButton.OK, MessageBoxImage.Warning);
-            else MessageBox.Show(message, "QuillSQL Compare", MessageBoxButton.OK, MessageBoxImage.Warning);
+            var box = new FrameworkElementFactory(typeof(CheckBox));
+            box.SetBinding(System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty, new System.Windows.Data.Binding(path)
+            {
+                Mode = System.Windows.Data.BindingMode.TwoWay,
+                UpdateSourceTrigger = System.Windows.Data.UpdateSourceTrigger.PropertyChanged,
+            });
+            box.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            return new DataGridTemplateColumn { Header = header, Width = width, CellTemplate = new DataTemplate { VisualTree = box } };
         }
 
-        public static bool Confirm(Window owner, string message)
+        /// <summary>Right-aligned text, for counts.</summary>
+        public static Style RightAligned()
         {
-            var r = owner != null
-                ? MessageBox.Show(owner, message, "QuillSQL Compare", MessageBoxButton.YesNo, MessageBoxImage.Question)
-                : MessageBox.Show(message, "QuillSQL Compare", MessageBoxButton.YesNo, MessageBoxImage.Question);
-            return r == MessageBoxResult.Yes;
+            var s = new Style(typeof(TextBlock));
+            s.Setters.Add(new Setter(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Right));
+            return s;
+        }
+
+        public enum Tone { Info, Warning, Question }
+
+        /// <summary>A Windows 11 style dialog: icon, message, and buttons in a footer. Returns the index of the button pressed, or -1.</summary>
+        public static int Message(Window owner, string title, string message, Tone tone, params string[] buttons)
+        {
+            var result = -1;
+            var w = Dialog(owner, title, null, 0, 0);
+            w.SizeToContent = SizeToContent.WidthAndHeight;
+            w.ResizeMode = ResizeMode.NoResize;
+            w.MinWidth = 400;
+            w.MaxWidth = 580;
+            var icon = Icon(tone == Tone.Warning ? Glyph.Warning : tone == Tone.Question ? Glyph.Help : Glyph.Info, 22, tone == Tone.Warning ? CompareTheme.Medium : CompareTheme.Accent);
+            icon.VerticalAlignment = VerticalAlignment.Top;
+            icon.Margin = new Thickness(0, 0, 14, 0);
+            var text = Text(message, wrap: TextWrapping.Wrap);
+            text.MaxWidth = 460;
+            text.VerticalAlignment = VerticalAlignment.Top;
+            var body = new DockPanel { Margin = new Thickness(24, 24, 24, 24) };
+            DockPanel.SetDock(icon, Dock.Left);
+            body.Children.Add(icon);
+            body.Children.Add(text);
+            var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            for (var i = 0; i < buttons.Length; i++)
+            {
+                var index = i;
+                var b = Button(buttons[i], () => { result = index; w.Close(); }, primary: i == 0, minWidth: 100);
+                if (i == 0) b.IsDefault = true;
+                if (i == buttons.Length - 1) b.IsCancel = true;
+                row.Children.Add(b);
+            }
+            w.Content = WithFooter(body, row);
+            w.ShowDialog();
+            return result;
+        }
+
+        /// <summary>Content above a footer band that holds the buttons.</summary>
+        public static DockPanel WithFooter(UIElement content, UIElement buttons)
+        {
+            var footer = new Border { Child = buttons, Padding = new Thickness(24, 16, 24, 16), BorderThickness = new Thickness(0, 1, 0, 0) };
+            footer.SetResourceReference(Border.BackgroundProperty, "Q.Layer");
+            footer.SetResourceReference(Border.BorderBrushProperty, "Q.Divider");
+            var root = new DockPanel();
+            DockPanel.SetDock(footer, Dock.Bottom);
+            root.Children.Add(footer);
+            root.Children.Add(content);
+            return root;
+        }
+
+        public static void Error(Window owner, string message) => Message(owner, "QuillSQL Compare", message, Tone.Warning, "OK");
+
+        public static bool Confirm(Window owner, string message) => Message(owner, "QuillSQL Compare", message, Tone.Question, "Yes", "No") == 0;
+
+        /// <summary>Asks for one line of text; null when cancelled.</summary>
+        public static string Prompt(Window owner, string title, string label, string value)
+        {
+            string result = null;
+            var w = Dialog(owner, title, null, 460, 0);
+            w.SizeToContent = SizeToContent.Height;
+            w.ResizeMode = ResizeMode.NoResize;
+            var box = new TextBox { Text = value ?? "" };
+            var heading = Title(title, 18);
+            heading.Margin = new Thickness(0, 0, 0, 16);
+            var body = Column(heading, Form(Field(label, box)));
+            body.Margin = new Thickness(24, 22, 24, 10);
+            var ok = Button("OK", () => { result = box.Text; w.Close(); }, primary: true, minWidth: 100);
+            ok.IsDefault = true;
+            var cancel = Button("Cancel", () => w.Close(), minWidth: 100);
+            cancel.IsCancel = true;
+            var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            row.Children.Add(ok);
+            row.Children.Add(cancel);
+            w.Content = WithFooter(body, row);
+            w.Loaded += (s, e) => { box.Focus(); box.SelectAll(); };
+            w.ShowDialog();
+            return result;
         }
 
         /// <summary>Runs work and reports failures in a message box; returns null on failure.</summary>
@@ -172,14 +321,15 @@ namespace QuillSql.Compare
             {
                 Title = title,
                 Content = content,
-                Width = width,
-                Height = height,
-                WindowStartupLocation = owner != null ? WindowStartupLocation.CenterOwner : WindowStartupLocation.CenterScreen,
+                WindowStartupLocation = owner != null && owner.IsLoaded ? WindowStartupLocation.CenterOwner : WindowStartupLocation.CenterScreen,
                 ShowInTaskbar = false,
-                Background = CompareTheme.Background,
                 Foreground = CompareTheme.Foreground,
             };
-            if (owner != null) w.Owner = owner;
+            if (width > 0) w.Width = width;
+            if (height > 0) w.Height = height;
+            CompareTheme.Attach(w);
+            Backdrop.Apply(w);
+            if (owner != null && owner.IsLoaded) w.Owner = owner;
             w.KeyDown += (s, e) => { if (e.Key == Key.Escape) w.Close(); };
             return w;
         }
