@@ -25,7 +25,8 @@ namespace QuillSql.Compare
             Stop = "", Upload = "", Refresh = "", Switch = "", Forward = "", Back = "",
             Copy = "", Search = "", Settings = "", Connect = "", List = "", People = "",
             Delete = "", Warning = "", Info = "", Help = "", Chevron = "", Document = "",
-            Check = "", Recent = "", Next = "", Previous = "", Code = "", Server = "";
+            Check = "", Recent = "", Next = "", Previous = "", Code = "", Server = "",
+            Up = "\uE70E", Down = "\uE70D", Filter = "\uE71C", Report = "\uE9F9", Export = "\uEDE1", Folder = "\uE8B7", View = "\uE890";
     }
 
     internal static class Ui
@@ -89,6 +90,7 @@ namespace QuillSql.Compare
         public static Button IconButton(string glyph, string tip, Action click, bool subtle = true)
         {
             var b = new Button { Content = Icon(glyph, 14), ToolTip = tip, Width = 36, Height = 32, Padding = new Thickness(0), MinHeight = 0 };
+            System.Windows.Automation.AutomationProperties.SetName(b, tip);
             if (subtle) b.Style = CompareTheme.Style("Q.SubtleButton");
             b.Click += (s, e) => click();
             return b;

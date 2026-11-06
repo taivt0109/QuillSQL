@@ -4,6 +4,7 @@
 pub mod compare;
 pub mod mapping;
 pub mod options;
+pub mod report;
 pub mod saved;
 pub mod store;
 pub mod sync;

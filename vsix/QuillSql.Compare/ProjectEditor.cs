@@ -23,6 +23,8 @@ namespace QuillSql.Compare
         private readonly ObservableCollection<OwnerMappingRow> _ownerMappings = new ObservableCollection<OwnerMappingRow>();
         private readonly ObservableCollection<DataTableRow> _dataTables = new ObservableCollection<DataTableRow>();
         private readonly Dictionary<string, CheckBox> _optionBoxes = new Dictionary<string, CheckBox>();
+        /// <summary>Columns of each target table, from Load tables.</summary>
+        private readonly Dictionary<string, List<string>> _targetColumns = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         private TextBlock _optionHelp, _dataStatus;
 
         public ProjectEditor(CompareSession session, Action compareNow, Action cancel)
@@ -168,8 +170,30 @@ namespace QuillSql.Compare
                 _tableMappings.Add(new TableMappingRow { Source = QName(t.Obj("source")), Target = QName(t.Obj("target")), Columns = string.Join(", ", cols) });
             }
             const string help = "Tables are paired by schema and name. Map a table to a differently named one here; columns pair by name, and similar columns are paired automatically unless that option is off. Write column pairs as old=new, separated by commas.";
+            var detect = Ui.Button("Detect renames", async () => await DetectRenames(), minWidth: 120, glyph: Glyph.Search);
+            detect.ToolTip = "Find tables only in one database that look like a renamed table of the other";
             return MappingGrid("Table mapping", help, _tableMappings, new[] { ("Table in source", "Source", 220.0), ("Table in target", "Target", 220.0), ("Column pairs", "Columns", 300.0) },
-                () => _tableMappings.Add(new TableMappingRow { Source = "[dbo].[]", Target = "[dbo].[]" }));
+                () => _tableMappings.Add(new TableMappingRow { Source = "[dbo].[]", Target = "[dbo].[]" }), detect);
+        }
+
+        /// <summary>Reads both databases and offers the tables that look renamed as mappings.</summary>
+        private async System.Threading.Tasks.Task DetectRenames()
+        {
+            Collect();
+            var renames = await Ui.Try(_session.Host.Owner, async () => await _session.Engine.Request("schema_renames", new JsonObject { ["project"] = _session.WithPasswords() }) as List<object>);
+            if (renames == null) return;
+            if (renames.Count == 0)
+            {
+                Ui.Message(_session.Host.Owner, "Table mapping", "No tables look renamed.", Ui.Tone.Info, "OK");
+                return;
+            }
+            var chosen = Dialogs.ConfirmRenames(_session.Host.Owner, renames.OfType<JsonObject>().ToList());
+            if (chosen == null) return;
+            foreach (var r in chosen)
+            {
+                var row = new TableMappingRow { Source = QName(r.Obj("source")), Target = QName(r.Obj("target")) };
+                if (!_tableMappings.Any(m => string.Equals(m.Source, row.Source, StringComparison.OrdinalIgnoreCase))) _tableMappings.Add(row);
+            }
         }
 
         private UIElement OwnerMapping()
@@ -184,7 +208,7 @@ namespace QuillSql.Compare
                 () => _ownerMappings.Add(new OwnerMappingRow { Source = "dbo", Target = "dbo" }));
         }
 
-        private static UIElement MappingGrid<T>(string title, string help, ObservableCollection<T> rows, (string, string, double)[] columns, Action add)
+        private static UIElement MappingGrid<T>(string title, string help, ObservableCollection<T> rows, (string, string, double)[] columns, Action add, UIElement extra = null)
         {
             var grid = new DataGrid
             {
@@ -199,6 +223,7 @@ namespace QuillSql.Compare
             var buttons = Ui.Row(
                 Ui.Button("Add", add, glyph: Glyph.Add),
                 Ui.Button("Remove", () => { if (grid.SelectedItem is T item) rows.Remove(item); }, glyph: Glyph.Delete));
+            if (extra != null) buttons.Children.Insert(0, extra);
             return Page(title, help, grid, buttons);
         }
 
@@ -216,6 +241,10 @@ namespace QuillSql.Compare
             public string Problem { get; set; }
             public string Columns { get; set; }
             public string ExcludedColumns { get; set; }
+            /// <summary>`old=new, …`: source columns paired with differently named target columns.</summary>
+            public string ColumnMap { get; set; }
+            public List<string> SourceColumns { get; set; } = new List<string>();
+            public List<string> TargetColumns { get; set; } = new List<string>();
         }
 
         private UIElement TablesAndViews()
@@ -230,7 +259,7 @@ namespace QuillSql.Compare
             };
             grid.Columns.Add(Ui.CheckColumn("Compare", "Include", 76));
             grid.Columns.Add(new DataGridTextColumn { Header = "Source", Binding = new Binding("Source"), IsReadOnly = true, Width = 200 });
-            grid.Columns.Add(new DataGridTextColumn { Header = "Target", Binding = new Binding("Target"), IsReadOnly = true, Width = 200 });
+            grid.Columns.Add(new DataGridTextColumn { Header = "Target", Binding = new Binding("Target") { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = 200 });
             var key = new DataGridComboBoxColumn
             {
                 Header = "Comparison key (index, or col, col)",
@@ -246,16 +275,33 @@ namespace QuillSql.Compare
             grid.Columns.Add(new DataGridTextColumn { Header = "WHERE (source)", Binding = new Binding("Where1"), Width = 160 });
             grid.Columns.Add(new DataGridTextColumn { Header = "WHERE (target)", Binding = new Binding("Where2"), Width = 160 });
             grid.Columns.Add(new DataGridTextColumn { Header = "Columns left out", Binding = new Binding("ExcludedColumns"), Width = 160 });
+            grid.Columns.Add(new DataGridTextColumn { Header = "Column mapping (old=new)", Binding = new Binding("ColumnMap"), Width = 180 });
             grid.Columns.Add(new DataGridTextColumn { Header = "Problem", Binding = new Binding("Problem"), IsReadOnly = true, Width = 260 });
 
             var all = Ui.Button("All", () => { foreach (var r in _dataTables) r.Include = true; grid.Items.Refresh(); }, minWidth: 60);
             var none = Ui.Button("None", () => { foreach (var r in _dataTables) r.Include = false; grid.Items.Refresh(); }, minWidth: 60);
             var load = Ui.Button("Load tables", async () => await LoadTables(), primary: true, minWidth: 110, glyph: Glyph.Refresh);
+            var map = Ui.Button("Columns…", () =>
+            {
+                if (!(grid.SelectedItem is DataTableRow r)) return;
+                grid.CommitEdit(DataGridEditingUnit.Row, true);
+                if (r.SourceColumns.Count == 0)
+                {
+                    Ui.Error(_session.Host.Owner, "Load the tables first, to see their columns.");
+                    return;
+                }
+                var targetColumns = _targetColumns.TryGetValue(r.Target ?? "", out var tc) ? tc : r.TargetColumns;
+                var result = Dialogs.MapColumns(_session.Host.Owner, r.Source, r.SourceColumns, targetColumns, r.ColumnMap);
+                if (result == null) return;
+                r.ColumnMap = result;
+                grid.Items.Refresh();
+            }, minWidth: 90, glyph: Glyph.Edit);
+            map.ToolTip = "Pair the selected table's columns with differently named target columns";
             var content = new DockPanel();
             DockPanel.SetDock(_dataStatus, Dock.Top);
             content.Children.Add(_dataStatus);
             content.Children.Add(grid);
-            var panel = Page("Tables & views", "Choose the tables to compare, the key that pairs their rows, and filters.", content, Ui.Row(load, all, none));
+            var panel = Page("Tables & views", "Choose the tables to compare, the key that pairs their rows, and filters. Type another target table to compare a table with a differently named one.", content, Ui.Row(load, map, all, none));
             // Rows the project already describes are shown before the tables are loaded.
             var mappings = _project.Obj("dataMappings") ?? new JsonObject();
             foreach (var t in mappings.List("tables").OfType<JsonObject>())
@@ -274,6 +320,7 @@ namespace QuillSql.Compare
             Where1 = t.Str("where1"),
             Where2 = t.Str("where2"),
             ExcludedColumns = string.Join(", ", t.Strings("excludedColumns")),
+            ColumnMap = string.Join(", ", t.List("columns").OfType<List<object>>().Where(p => p.Count == 2).Select(p => p[0] + "=" + p[1])),
         };
 
         private static string KeyText(List<string> key)
@@ -292,7 +339,13 @@ namespace QuillSql.Compare
                 _dataStatus.Text = "Could not load the tables.";
                 return;
             }
-            var previous = _dataTables.ToDictionary(r => r.Source, StringComparer.OrdinalIgnoreCase);
+            var previous = _dataTables.GroupBy(r => r.Source, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            _targetColumns.Clear();
+            if (result.Obj("targetColumns") is JsonObject targets)
+            {
+                foreach (var kv in targets) _targetColumns[kv.Key] = (kv.Value as List<object> ?? new List<object>()).OfType<string>().ToList();
+            }
+            var sourceColumns = result.Obj("sourceColumns") ?? new JsonObject();
             _dataTables.Clear();
             foreach (var t in result.List("tables").OfType<JsonObject>())
             {
@@ -308,9 +361,13 @@ namespace QuillSql.Compare
                     Where1 = old?.Where1 ?? t.Str("where1"),
                     Where2 = old?.Where2 ?? t.Str("where2"),
                     ExcludedColumns = old?.ExcludedColumns,
+                    ColumnMap = old?.ColumnMap,
                     Problem = t.Str("problem"),
                     Columns = string.Join(", ", t.List("columns").OfType<JsonObject>().Select(c => c.Str("source"))),
+                    SourceColumns = (sourceColumns[source] as List<object> ?? new List<object>()).OfType<string>().ToList(),
+                    TargetColumns = t.List("columns").OfType<JsonObject>().Select(c => c.Str("target")).ToList(),
                 };
+                if (old != null && !string.IsNullOrWhiteSpace(old.Target) && !string.Equals(old.Target, t.Str("target"), StringComparison.OrdinalIgnoreCase)) row.Target = old.Target;
                 row.KeyChoices.AddRange(t.Strings("keyCandidates"));
                 _dataTables.Add(row);
             }
@@ -536,6 +593,9 @@ namespace QuillSql.Compare
                     }
                     if (!string.IsNullOrWhiteSpace(r.Where1)) o["where1"] = r.Where1;
                     if (!string.IsNullOrWhiteSpace(r.Where2)) o["where2"] = r.Where2;
+                    var pairs = (r.ColumnMap ?? "").Split(',').Select(p => p.Split('=')).Where(p => p.Length == 2 && p[0].Trim() != "" && p[1].Trim() != "")
+                        .Select(p => (object)new List<object> { p[0].Trim().Trim('[', ']'), p[1].Trim().Trim('[', ']') }).ToList();
+                    if (pairs.Count > 0) o["columns"] = pairs;
                     if (!string.IsNullOrWhiteSpace(r.ExcludedColumns))
                     {
                         o["excludedColumns"] = r.ExcludedColumns.Split(',').Select(c => (object)c.Trim().Trim('[', ']')).Where(c => (string)c != "").ToList();
@@ -557,10 +617,11 @@ namespace QuillSql.Compare
         private readonly CompareSession _session;
         private readonly string _key;
         private ComboBox _type, _server, _auth, _database;
-        private TextBox _user, _snapshot;
+        private TextBox _user, _snapshot, _folder, _revision;
         private PasswordBox _password;
         private CheckBox _remember, _encrypt, _trust;
-        private StackPanel _live, _file;
+        private StackPanel _live, _file, _scripts, _revisionField;
+        private TextBlock _empty;
         private TextBlock _status;
 
         public JsonObject Side { get; private set; }
@@ -575,7 +636,12 @@ namespace QuillSql.Compare
             badge.SetResourceReference(Border.BackgroundProperty, "Q.Accent");
             var names = Ui.Column(Ui.Title(title, 17), Ui.Text(key == "source" ? "Database 1" : "Database 2", 12, brush: CompareTheme.Muted));
             names.Margin = new Thickness(12, 0, 0, 0);
-            _type = new ComboBox { ItemsSource = new[] { "Database", "Snapshot" }, Width = 130, VerticalAlignment = VerticalAlignment.Center };
+            _type = new ComboBox { Width = 150, VerticalAlignment = VerticalAlignment.Center };
+            // SQL Compare's other kinds of data source are listed but not available yet.
+            foreach (var (name, enabled) in new[] { ("Database", true), ("Snapshot", !session.IsData), ("Empty database", !session.IsData && key == "target"), ("Backup", false), ("Scripts folder", !session.IsData), ("Source control", !session.IsData) })
+            {
+                _type.Items.Add(new ComboBoxItem { Content = name, IsEnabled = enabled, ToolTip = enabled ? null : name == "Snapshot" || name == "Empty database" || ((name == "Scripts folder" || name == "Source control") && session.IsData) ? "Not available for this side or kind of comparison" : "Not available yet" });
+            }
             _type.SelectionChanged += (s, e) => ShowType();
             var header = new DockPanel { Margin = new Thickness(0, 0, 0, 18) };
             DockPanel.SetDock(badge, Dock.Left);
@@ -617,34 +683,62 @@ namespace QuillSql.Compare
             var browse = Ui.Button("Browse…", glyph: Glyph.Open, click: () =>
             {
                 var d = new OpenFileDialog { Filter = "QuillSQL snapshots (*.json)|*.json|All files|*.*" };
-                if (d.ShowDialog() == true) _snapshot.Text = d.FileName;
+                if (Dialogs.Show(d, null) == true) _snapshot.Text = d.FileName;
             });
             var fileRow = new DockPanel();
             DockPanel.SetDock(browse, Dock.Right);
             fileRow.Children.Add(browse);
             fileRow.Children.Add(_snapshot);
             _file = Ui.Column(Ui.Form(Ui.Field("Snapshot file", fileRow)), Ui.Text("Make a snapshot with quill schema /makesnapshot or Tools > Save snapshot.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
+            _empty = Ui.Text("An empty database: every object of the source is created. The changes can only be scripted, and the script can then run on a new database.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
             Children.Add(_live);
+            // A scripts folder in SQL Compare's layout, or a revision of it in git, Mercurial or Subversion.
+            _folder = new TextBox();
+            var browseFolder = Ui.Button("Browse…", glyph: Glyph.Folder, click: () =>
+            {
+                var f = Dialogs.PickFolder(_session.Host.Owner, _folder.Text, "Open scripts folder");
+                if (f != null) _folder.Text = f;
+            });
+            var folderRow = new DockPanel();
+            DockPanel.SetDock(browseFolder, Dock.Right);
+            folderRow.Children.Add(browseFolder);
+            folderRow.Children.Add(_folder);
+            _revision = Ui.SearchBox("HEAD", 0);
+            _revision.Width = double.NaN;
+            _revision.ToolTip = "A source control revision of the folder: HEAD, a commit, a tag or a revision number";
+            _revisionField = Ui.Form(Ui.Field("Revision", _revision));
+            _scripts = Ui.Column(Ui.Form(Ui.Field("Scripts folder (in a git, Mercurial or Subversion working copy for source control)", folderRow)), _revisionField,
+                Ui.Text("Deploying to a scripts folder rewrites the files of the objects deployed; a revision can only be compared or scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
             Children.Add(_file);
+            Children.Add(_empty);
+            Children.Add(_scripts);
             Load(session.Project.Obj(key) ?? new JsonObject(), session.Passwords.TryGetValue(key, out var p) ? p : null);
         }
 
         private void ShowType()
         {
-            var snapshot = _type.SelectedIndex == 1;
-            if (_session.IsData && snapshot)
+            if (_type.SelectedItem is ComboBoxItem item && !item.IsEnabled)
             {
                 _type.SelectedIndex = 0;
                 return;
             }
-            _live.Visibility = snapshot ? Visibility.Collapsed : Visibility.Visible;
+            var snapshot = _type.SelectedIndex == 1;
+            var empty = _type.SelectedIndex == 2;
+            // Source control is a scripts folder in git, Mercurial or Subversion at a revision.
+            var control = _type.SelectedIndex == 5;
+            var scripts = _type.SelectedIndex == 4 || control;
+            _revisionField.Visibility = control ? Visibility.Visible : Visibility.Collapsed;
+            if (control && _revision.Text.Trim().Length == 0) _revision.Text = "HEAD";
+            _live.Visibility = snapshot || empty || scripts ? Visibility.Collapsed : Visibility.Visible;
+            _scripts.Visibility = scripts ? Visibility.Visible : Visibility.Collapsed;
             _file.Visibility = snapshot ? Visibility.Visible : Visibility.Collapsed;
+            _empty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         }
 
         public void Load(JsonObject side, string password)
         {
             Side = side;
-            _type.SelectedIndex = side.Str("type") == "snapshot" ? 1 : 0;
+            _type.SelectedIndex = side.Str("type") == "snapshot" ? 1 : side.Str("type") == "empty" ? 2 : side.Str("type") == "scripts" ? (string.IsNullOrEmpty(side.Str("revision")) ? 4 : 5) : 0;
             _server.Text = side.Str("server") ?? "";
             var auth = side.Str("authentication");
             _auth.SelectedIndex = auth == "sql" ? 1 : auth == "entra" ? 2 : 0;
@@ -654,13 +748,15 @@ namespace QuillSql.Compare
             _encrypt.IsChecked = !side.ContainsKey("encrypt") || side.Bool("encrypt");
             _trust.IsChecked = side.Bool("trustServerCertificate");
             _database.Text = side.Str("database") ?? "";
-            _snapshot.Text = side.Str("path") ?? "";
+            _snapshot.Text = side.Str("type") == "snapshot" ? side.Str("path") ?? "" : "";
+            _folder.Text = side.Str("type") == "scripts" ? side.Str("path") ?? "" : "";
+            _revision.Text = side.Str("revision") ?? "";
             ShowType();
         }
 
         public void Save()
         {
-            Side["type"] = _type.SelectedIndex == 1 ? "snapshot" : "database";
+            Side["type"] = _type.SelectedIndex == 1 ? "snapshot" : _type.SelectedIndex == 2 ? "empty" : _type.SelectedIndex >= 4 ? "scripts" : "database";
             Side["server"] = _server.Text.Trim();
             Side["authentication"] = _auth.SelectedIndex == 1 ? "sql" : _auth.SelectedIndex == 2 ? "entra" : "windows";
             Side["user"] = _user.Text.Trim();
@@ -668,7 +764,9 @@ namespace QuillSql.Compare
             Side["encrypt"] = _encrypt.IsChecked == true;
             Side["trustServerCertificate"] = _trust.IsChecked == true;
             Side["database"] = _database.Text.Trim();
-            Side["path"] = _snapshot.Text.Trim();
+            Side["path"] = _type.SelectedIndex >= 4 ? _folder.Text.Trim() : _snapshot.Text.Trim();
+            if (_type.SelectedIndex == 5 && _revision.Text.Trim().Length > 0) Side["revision"] = _revision.Text.Trim();
+            else Side.Remove("revision");
             _session.Project[_key] = Side;
             _session.Passwords[_key] = _password.Password;
             if (_auth.SelectedIndex == 1 && _remember.IsChecked == true && _password.Password.Length > 0)

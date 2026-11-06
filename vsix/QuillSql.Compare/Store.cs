@@ -102,6 +102,11 @@ namespace QuillSql.Compare
         public List<string> MyDataDefaults { get; set; }
         /// <summary>Open the last project when the window opens.</summary>
         public bool ReopenLast { get; set; } = true;
+        /// <summary>Show My projects when the window opens.</summary>
+        public bool ShowMyProjects { get; set; }
+        public bool ViewReport { get; set; } = true;
+        /// <summary>The folder My projects last looked in.</summary>
+        public string ProjectsFolder { get; set; }
 
         public static CompareSettings Load()
         {
@@ -115,6 +120,9 @@ namespace QuillSql.Compare
                     if (o.ContainsKey("mySchemaDefaults")) s.MySchemaDefaults = o.Strings("mySchemaDefaults");
                     if (o.ContainsKey("myDataDefaults")) s.MyDataDefaults = o.Strings("myDataDefaults");
                     if (o.ContainsKey("reopenLast")) s.ReopenLast = o.Bool("reopenLast");
+                    s.ShowMyProjects = o.Bool("showMyProjects");
+                    if (o.ContainsKey("viewReport")) s.ViewReport = o.Bool("viewReport");
+                    s.ProjectsFolder = o.Str("projectsFolder");
                 }
             }
             catch (Exception ex) when (ex is IOException || ex is FormatException || ex is UnauthorizedAccessException)
@@ -133,9 +141,12 @@ namespace QuillSql.Compare
                     ["recent"] = Recent,
                     ["recentServers"] = RecentServers,
                     ["reopenLast"] = ReopenLast,
+                    ["showMyProjects"] = ShowMyProjects,
+                    ["viewReport"] = ViewReport,
                 };
                 if (MySchemaDefaults != null) o["mySchemaDefaults"] = MySchemaDefaults;
                 if (MyDataDefaults != null) o["myDataDefaults"] = MyDataDefaults;
+                if (ProjectsFolder != null) o["projectsFolder"] = ProjectsFolder;
                 File.WriteAllText(FilePath, Json.Indented(o));
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)

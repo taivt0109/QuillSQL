@@ -703,6 +703,11 @@ fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &s
     Ok(())
 }
 
+/// The same CSV files for the Compare window's Export: rows of the given kinds (`RowKind::ALL` order).
+pub fn export_csv(result: &DataComparison, kinds: [bool; 4], dir: &Path, db1: &str, db2: &str) -> std::io::Result<()> {
+    export(result, &Rules { include: Vec::new(), exclude: Vec::new(), kinds, identical_allowed: false }, dir, db1, db2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
