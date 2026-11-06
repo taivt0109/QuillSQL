@@ -369,10 +369,9 @@ impl Reader {
                 data_type.xml_collection = text(&r, 16);
                 data_type.xml_document = flag(&r, 15);
             }
-            let character = matches!(
-                s(&r, 5).as_str(),
-                "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "sysname"
-            );
+            // Alias types carry their own collation; COLLATE cannot be written on them.
+            let character = data_type.schema.is_none()
+                && matches!(s(&r, 5).as_str(), "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "sysname");
             let column = Column {
                 name: s(&r, 2),
                 ordinal: i(&r, 1) as u32,
@@ -926,6 +925,11 @@ impl Reader {
             t.foreign_keys.sort_by(|a, b| a.name.cmp(&b.name));
             t.check_constraints.sort_by(|a, b| a.name.cmp(&b.name));
             t.triggers.sort_by(|a, b| a.name.cmp(&b.name));
+            if let Some(temporal) = t.temporal.as_mut() {
+                let period = |kind: &str| t.columns.iter().find(|c| c.generated_always.as_deref() == Some(kind)).map(|c| c.name.clone());
+                temporal.period_start = period("ROW START").unwrap_or_default();
+                temporal.period_end = period("ROW END").unwrap_or_default();
+            }
             // TEXTIMAGE_ON only matters when there is a LOB column.
             if !t.columns.iter().any(is_lob) {
                 t.text_filegroup = None;
