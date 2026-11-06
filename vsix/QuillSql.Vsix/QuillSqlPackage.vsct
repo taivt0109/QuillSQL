@@ -383,6 +383,15 @@
           <LocCanonicalName>.QuillSQL.FormatAllTabs</LocCanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidQuillSqlCmdSet" id="TabColorCommandId" priority="0x012C" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="TabGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>Tab Color for This Connection...</ButtonText>
+          <CanonicalName>.QuillSQL.TabColor</CanonicalName>
+          <LocCanonicalName>.QuillSQL.TabColor</LocCanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidQuillSqlCmdSet" id="DuplicateTabCommandId" priority="0x012D" type="Button">
         <Parent guid="guidQuillSqlCmdSet" id="TabGroup" />
         <CommandFlag>TextChanges</CommandFlag>
@@ -555,6 +564,7 @@
       <IDSymbol name="LogFolderCommandId" value="0x0135" />
       <IDSymbol name="ShowCardCommandId" value="0x0136" />
       <IDSymbol name="AiChatCommandId" value="0x0137" />
+      <IDSymbol name="TabColorCommandId" value="0x0138" />
       <IDSymbol name="TextGroup" value="0x1030" />
       <IDSymbol name="RunGroup" value="0x1031" />
       <IDSymbol name="TabGroup" value="0x1032" />

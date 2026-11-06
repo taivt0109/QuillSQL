@@ -348,7 +348,7 @@ namespace QuillSql.Vsix
             ["The question's default answer is Cancel, so pressing Enter by mistake does not run the query."] = "Câu hỏi mặc định chọn Hủy, nên lỡ nhấn Enter cũng không chạy query.",
             ["Run part of a script"] = "Chạy một phần script",
             ["Execute Current Statement (Ctrl+B, Ctrl+E) runs the statement at the caret; Execute Current Batch (Ctrl+B, Ctrl+B) runs the batch between GO lines."] = "Chạy câu lệnh tại con trỏ (Ctrl+B, Ctrl+E); chạy batch giữa các dòng GO tại con trỏ (Ctrl+B, Ctrl+B).",
-            ["Query windows whose \"server / database\" contains the text get a colored document tab and a colored bar above the editor. The first matching row wins."] = "Cửa sổ query có \"server / database\" chứa đoạn chữ này sẽ được tô màu tab và thanh trên đầu editor. Dòng khớp đầu tiên được dùng.",
+            ["Query windows whose \"server / database\" contains the text get a colored document tab and a colored bar above the editor. The most specific match wins: a database before its server, a server before a word. Tip: right-click a server or database in Object Explorer to color it."] = "Cửa sổ query có \"server / database\" chứa đoạn chữ này sẽ được tô màu tab và thanh trên đầu editor. Dòng khớp cụ thể nhất được dùng: database trước server, server trước một từ. Mẹo: chuột phải vào server hoặc database trong Object Explorer để đặt màu.",
             ["Server or database contains"] = "Server hoặc database chứa",
             ["Color (#RRGGBB)"] = "Màu (#RRGGBB)",
             ["Label"] = "Nhãn",
@@ -557,6 +557,27 @@ namespace QuillSql.Vsix
             ["Insert into editor"] = "Chèn vào editor",
             ["Insert at the caret of the query window, selected so you can review it. Undo removes it."] = "Chèn tại con trỏ của cửa sổ query và bôi đen để bạn xem lại. Undo để bỏ.",
             ["copied."] = "đã copy.",
+
+            // Tab color dialog
+            ["Tab Color"] = "Màu tab",
+            ["Tab Color for This Connection..."] = "Màu tab cho kết nối này...",
+            ["QuillSQL: Tab Color..."] = "QuillSQL: Màu tab...",
+            ["Color the query windows of"] = "Tô màu các cửa sổ query của",
+            ["Only database {0}"] = "Chỉ database {0}",
+            ["Every database on this server"] = "Mọi database trên server này",
+            ["Production"] = "Production",
+            ["Staging"] = "Staging",
+            ["UAT"] = "UAT",
+            ["Development"] = "Development",
+            ["Test"] = "Test",
+            ["Other"] = "Khác",
+            ["Gray"] = "Xám",
+            ["The label shows in the bar above the editor. Other rules are in Options > Tab colors."] = "Nhãn hiện trên thanh màu phía trên editor. Các quy tắc khác nằm trong Options > Tab colors.",
+            ["No color"] = "Bỏ màu",
+            ["Save"] = "Lưu",
+            ["open a connected query window first."] = "mở một cửa sổ query đã kết nối trước.",
+            ["could not read the server of this node."] = "không đọc được server của node này.",
+            ["tab color saved; open query windows update in a moment."] = "đã lưu màu tab; các cửa sổ query đang mở sẽ đổi màu trong giây lát.",
         };
 
         /// <summary>An analysis message, `Title` or `Title: detail`, in the chosen language.</summary>

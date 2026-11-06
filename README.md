@@ -254,14 +254,19 @@ step. Optional settings in
 ### Safety at a glance
 
 - **Colored tabs**: query windows connected to servers you mark get a colored document tab and a
-  colored bar above the editor. Create `%USERPROFILE%\.quillsql-colors.json`:
+  colored bar above the editor. Right-click a server or a database in Object Explorer and choose
+  **QuillSQL: Tab Color...** (or use **Tab Color for This Connection...** in the QuillSQL menu),
+  pick Production, Staging, UAT, Development, Test or any color, for that database or for every
+  database on the server. Options > Tab colors also colors servers by a word in their name, and
+  adds the usual environments in one click. Rules are kept in `%USERPROFILE%\.quillsql-colors.json`:
 
   ```json
   [{ "match": "prod", "color": "#C62828", "label": "PRODUCTION" },
    { "match": "test", "color": "#2E7D32" }]
   ```
 
-  `match` is looked for in "server / database", ignoring case; the first match wins.
+  `match` is looked for in "server / database", ignoring case; the most specific (longest)
+  match wins, so a database's color beats its server's, which beats a word.
 - **Object cards**: rest the mouse on a table, view, procedure or function (or press Ctrl+B,
   Ctrl+K) for a card with its row count, size, columns (keys, identity, defaults, foreign keys),
   indexes and where they are stored, and a **Script** tab with Copy and Open buttons. A

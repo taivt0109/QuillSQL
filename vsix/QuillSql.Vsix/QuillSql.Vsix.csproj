@@ -50,6 +50,8 @@
     <Compile Include="PlanCapture.cs" />
     <Compile Include="QueryHistory.cs" />
     <Compile Include="TabColorizer.cs" />
+    <Compile Include="TabColorDialog.cs" />
+    <Compile Include="ObjectExplorerMenu.cs" />
     <Compile Include="Theme.cs" />
     <Compile Include="Updater.cs" />
     <Compile Include="CardPopup.cs" />

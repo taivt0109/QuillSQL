@@ -21,7 +21,7 @@ namespace QuillSql.Vsix
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.3.2";
+        public const string Version = "0.3.3";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
@@ -70,6 +70,7 @@ namespace QuillSql.Vsix
         private const int LogFolderCommandId = 0x0135;
         private const int ShowCardCommandId = 0x0136;
         private const int AiChatCommandId = 0x0137;
+        private const int TabColorCommandId = 0x0138;
 
         private EditorWatcher _watcher;
 
@@ -95,6 +96,7 @@ namespace QuillSql.Vsix
             add(InvalidObjectsCommandId, () => Commands.FindInvalidObjects(this));
             add(HistoryCommandId, QueryHistory.ShowWindow);
             add(AiChatCommandId, () => AiChatPane.Open(this));
+            add(TabColorCommandId, TabColorDialog.ForActiveWindow);
             add(AskAiCommandId, () => AiAssistant.AskForSql(this));
             add(ExplainAiCommandId, () => AiAssistant.Explain(this));
             add(ReviewAiCommandId, () => AiAssistant.Review(this));
@@ -143,6 +145,7 @@ namespace QuillSql.Vsix
                     QueryHistory.Start(dte);
                 }
                 TabColorizer.Start();
+                ObjectExplorerMenu.Start();
                 Updater.Start(this, false);
             }
             catch (Exception ex)

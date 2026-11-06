@@ -598,7 +598,7 @@ namespace QuillSql.Vsix
                 }
             };
             return Stack(
-                Note("Query windows whose \"server / database\" contains the text get a colored document tab and a colored bar above the editor. The first matching row wins."),
+                Note("Query windows whose \"server / database\" contains the text get a colored document tab and a colored bar above the editor. The most specific match wins: a database before its server, a server before a word. Tip: right-click a server or database in Object Explorer to color it."),
                 presets,
                 grid,
                 Note("Examples: prod #C62828 PRODUCTION · uat #EF6C00 UAT · test #2E7D32 TEST. Delete a row with the Delete key."));

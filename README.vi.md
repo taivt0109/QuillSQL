@@ -260,14 +260,14 @@ Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ 
 
 ### Nhận biết nhanh
 
-- **Tô màu tab:** cửa sổ query kết nối tới server bạn đánh dấu sẽ có tab và thanh trên đầu editor được tô màu. Tạo file `%USERPROFILE%\.quillsql-colors.json`:
+- **Tô màu tab:** cửa sổ query kết nối tới server bạn đánh dấu sẽ có tab và thanh trên đầu editor được tô màu. Chuột phải vào server hoặc database trong Object Explorer, chọn **QuillSQL: Màu tab...** (hoặc **Màu tab cho kết nối này...** trong menu QuillSQL), chọn Production, Staging, UAT, Development, Test hoặc màu bất kỳ, áp cho riêng database đó hoặc mọi database trên server. Options > Tab colors còn tô màu theo một từ trong tên server, và có nút thêm sẵn các môi trường thường dùng. Các quy tắc lưu trong `%USERPROFILE%\.quillsql-colors.json`:
 
   ```json
   [{ "match": "prod", "color": "#C62828", "label": "PRODUCTION" },
    { "match": "test", "color": "#2E7D32" }]
   ```
 
-  `match` được tìm trong chuỗi "server / database", không phân biệt hoa thường; quy tắc khớp đầu tiên được dùng.
+  `match` được tìm trong chuỗi "server / database", không phân biệt hoa thường; quy tắc khớp cụ thể nhất (dài nhất) được dùng, nên màu của một database thắng màu của server, và màu server thắng màu theo từ.
 - **Thẻ object:** rê chuột lên bảng, view, procedure hoặc function (hoặc nhấn Ctrl+B, Ctrl+K) để xem thẻ gồm số dòng, dung lượng, các cột (khóa, identity, default, khóa ngoại), index và nơi lưu, cùng tab **Script** có nút Sao chép và Mở. Bảng có partition được ghi rõ ở đầu thẻ: cột partition, partition function, `RANGE LEFT`/`RIGHT`, scheme, và tab **Partition** liệt kê khoảng giá trị, số dòng và filegroup của từng partition. **F12** mở script trong cửa sổ mới, gồm cả partition function và scheme.
 - **Chạy an toàn:** chạy `DELETE` hoặc `UPDATE` không có `WHERE` sẽ được hỏi lại trước, mặc định là Hủy. Có thể bật thêm cho `TRUNCATE TABLE` và `DROP` trong Options.
 - **Tô sáng:** mọi chỗ dùng biến, alias hoặc tên tại con trỏ được tô sáng.

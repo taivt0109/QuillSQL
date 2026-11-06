@@ -472,7 +472,12 @@ namespace QuillSql.Vsix
                 Log.Error("reading " + Path, ex);
                 _rules = new ColorRule[0];
             }
-            return description == null ? null : _rules.FirstOrDefault(r => !string.IsNullOrEmpty(r.Match) && description.IndexOf(r.Match, StringComparison.OrdinalIgnoreCase) >= 0);
+            // The most specific rule wins: the longest text found in "server / database", so a rule
+            // for one database beats one for its server, which beats one matching a word like "prod".
+            return description == null ? null : _rules
+                .Where(r => !string.IsNullOrEmpty(r.Match) && description.IndexOf(r.Match, StringComparison.OrdinalIgnoreCase) >= 0)
+                .OrderByDescending(r => r.Match.Length)
+                .FirstOrDefault();
         }
     }
 
