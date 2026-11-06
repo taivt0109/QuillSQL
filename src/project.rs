@@ -117,6 +117,10 @@ impl SourceSpec {
     }
 }
 
+fn is_disabled(b: &crate::schema::backup::BackupOptions) -> bool {
+    !b.enabled
+}
+
 /// An object left out of deployment in the results grid.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -143,6 +147,9 @@ pub struct Project {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub deselected: Vec<Deselected>,
+    /// Back up target before deployment (SQL Compare's `SC_DeploymentOptions/BackupOptions`).
+    #[serde(skip_serializing_if = "is_disabled")]
+    pub backup: crate::schema::backup::BackupOptions,
     pub note: String,
     /// The filter of an imported SQL Compare project (its `ProjectFilter` XML).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -388,6 +395,27 @@ pub fn import_redgate(bytes: &[u8], kind: ProjectKind) -> Result<Project, String
     {
         p.redgate_filter = Some(text[f.range()].to_string());
     }
+    // Back up target before deployment; the password is not imported.
+    if let Some(b) = child(root, "SC_DeploymentOptions").and_then(|d| child(d, "BackupOptions")).filter(|b| b.attribute("isNull") != Some("1")) {
+        let truth = |name: &str| text_of(b, name).eq_ignore_ascii_case("true");
+        let number = |name: &str| text_of(b, name).trim().parse::<u8>().unwrap_or(0);
+        p.backup = crate::schema::backup::BackupOptions {
+            enabled: truth("BackupEnabled"),
+            provider: if text_of(b, "BackupProvider").eq_ignore_ascii_case("Sqb") { "sqb".into() } else { "native".into() },
+            differential: text_of(b, "TypeOfBackup").eq_ignore_ascii_case("Differential"),
+            folder: text_of(b, "Folder"),
+            file: text_of(b, "Filename"),
+            name_automatically: truth("NameFileAutomatically"),
+            overwrite: truth("OverwriteIfExists"),
+            compression_level: number("CompressionLevel"),
+            encryption: text_of(b, "EncryptionLevel").to_ascii_lowercase(),
+            thread_count: number("ThreadCount"),
+            password: None,
+        };
+        if p.backup.encryption.is_empty() {
+            p.backup.encryption = "none".into();
+        }
+    }
     Ok(p)
 }
 
@@ -599,7 +627,29 @@ pub fn export_redgate(p: &Project, last_compared: &str) -> Vec<u8> {
     x.value("SessionSettings", if identical_records { "15" } else { "14" });
     x.value("DCGroupingStyle", "0");
     x.open("SC_DeploymentOptions", " version=\"1\" type=\"SC_DeploymentOptions\"");
-    x.line("<BackupOptions version=\"1\" type=\"ProjectBackupOptions\" isNull=\"1\" />");
+    let b = &p.backup;
+    if b.enabled || *b != crate::schema::backup::BackupOptions::default() {
+        x.open("BackupOptions", " version=\"1\" type=\"ProjectBackupOptions\"");
+        x.value("BackupProvider", if b.sqb() { "Sqb" } else { "Native" });
+        x.value("TypeOfBackup", if b.differential { "Differential" } else { "Full" });
+        x.value("Folder", &b.folder);
+        x.value("Filename", &b.file);
+        x.value("SqbLicenseType", "None");
+        x.value("SqbVersion", "0");
+        x.value("DefaultNativeFolder", "");
+        x.value("DefaultSqbFolder", "");
+        // Passwords are never written.
+        x.value("Password", "");
+        x.value("NameFileAutomatically", bool_text(b.name_automatically));
+        x.value("OverwriteIfExists", bool_text(b.overwrite));
+        x.value("CompressionLevel", &b.compression_level.to_string());
+        x.value("EncryptionLevel", match b.encryption.as_str() { "aes128" => "Aes128", "aes256" => "Aes256", _ => "None" });
+        x.value("ThreadCount", &b.thread_count.to_string());
+        x.value("BackupEnabled", bool_text(b.enabled));
+        x.close("BackupOptions");
+    } else {
+        x.line("<BackupOptions version=\"1\" type=\"ProjectBackupOptions\" isNull=\"1\" />");
+    }
     x.close("SC_DeploymentOptions");
     x.close("Project");
     [0xFF, 0xFE].into_iter().chain(x.out.encode_utf16().flat_map(u16::to_le_bytes)).collect()
