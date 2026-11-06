@@ -316,10 +316,15 @@ pub fn import_redgate(bytes: &[u8], kind: ProjectKind) -> Result<Project, String
                         }
                     }
                 }
-                "MapOwners" => p.schema_mappings.schemas.push((text_of(ev, "Owner1"), text_of(ev, "Owner2"))),
+                "MapOwners" => match kind {
+                    ProjectKind::Schema => p.schema_mappings.schemas.push((text_of(ev, "Owner1"), text_of(ev, "Owner2"))),
+                    ProjectKind::Data => p.data_mappings.schemas.push((text_of(ev, "Owner1"), text_of(ev, "Owner2"))),
+                },
                 "MapColumn" => {
                     let (Some(t1), c1, c2) = (split_name(&text_of(ev, "Table1")), text_of(ev, "Column1"), text_of(ev, "Column2")) else { continue };
-                    if let Some(m) = p.schema_mappings.tables.iter_mut().find(|m| m.source == t1) {
+                    if kind == ProjectKind::Data {
+                        entry(&mut p.data_mappings, &t1).columns.push((c1, c2));
+                    } else if let Some(m) = p.schema_mappings.tables.iter_mut().find(|m| m.source == t1) {
                         m.columns.push((c1, c2));
                     }
                 }
@@ -443,6 +448,8 @@ mod tests {
   <TableActions type="ArrayList" version="1">
     <value version="1" type="SelectTableEvent"><action>SetLeftWhereClause</action><TableName>[dbo].[T]</TableName><IndexName>Id &gt; 5</IndexName></value>
     <value version="1" type="SelectTableEvent"><action>SelectColumnAsKey</action><TableName>[dbo].[T]</TableName><ColumnName>Code</ColumnName></value>
+    <value version="1" type="SelectTableEvent"><action>MapOwners</action><Owner1>dev</Owner1><Owner2>dbo</Owner2></value>
+    <value version="1" type="SelectTableEvent"><action>MapColumn</action><Table1>[dbo].[T]</Table1><Column1>Amount</Column1><Column2>Total</Column2></value>
   </TableActions>
 </Project>"#;
         let p = import_redgate(sdc.as_bytes(), ProjectKind::Data).unwrap();
@@ -451,5 +458,7 @@ mod tests {
         }
         let t = &p.data_mappings.tables[0];
         assert_eq!((t.where1.as_deref(), t.key.as_slice()), (Some("Id > 5"), &["Code".to_string()][..]));
+        assert_eq!(t.columns, [("Amount".to_string(), "Total".to_string())]);
+        assert_eq!(p.data_mappings.schemas, [("dev".to_string(), "dbo".to_string())]);
     }
 }

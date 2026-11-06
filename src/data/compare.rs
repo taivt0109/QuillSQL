@@ -8,12 +8,12 @@ use futures_util::{StreamExt, TryStreamExt};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use super::mapping::{self, DataMappings, TablePair};
+use super::mapping::{self, ColumnPair, DataMappings, TablePair};
 use super::options::{DataOpt, DataOptions};
 use super::store::{RowKind, Session, StoredRow, TableWriter};
-use super::value::{Equality, Value, cmp_key, same};
+use super::value::{Equality, Fold, Value, Variant, cmp_key, same};
 use crate::catalog::{DataType, Database, ObjectName};
-use crate::db::{self, ConnectionSpec, quote};
+use crate::db::{self, ConnectionSpec, literal, quote};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +30,10 @@ pub struct TableResult {
     pub by_checksum: bool,
     /// The key is not unique in the data on one side.
     pub repeated_keys: bool,
+    /// IDENT_CURRENT of each side, read for "Reseed identity columns".
+    pub identity_current: (Option<i128>, Option<i128>),
+    /// Per compared column, the number of Different rows in which it differs.
+    pub column_differences: Vec<u64>,
 }
 
 impl TableResult {
@@ -47,11 +51,32 @@ pub struct DataComparison {
     pub tables: Vec<TableResult>,
     pub only_in_1: Vec<ObjectName>,
     pub only_in_2: Vec<ObjectName>,
+    /// Enabled database DDL triggers of database 2 (read for "Disable DDL triggers").
+    pub ddl_triggers: Vec<String>,
 }
 
 impl DataComparison {
     pub fn identical(&self) -> bool {
         self.tables.iter().all(TableResult::identical)
+    }
+}
+
+/// Values above this many bytes are compared by length and hash on the server.
+pub const LARGE: i64 = 1 << 20;
+
+/// What the server can do, from its version.
+#[derive(Clone, Copy)]
+struct Server {
+    /// TRANSLATE (SQL Server 2017).
+    translate: bool,
+    /// HASHBYTES over more than 8000 bytes (SQL Server 2016).
+    hash: bool,
+}
+
+impl Server {
+    fn of(db: &Database) -> Server {
+        let v = if db.server.is_azure_sql_database() { 99 } else { db.server.major_version };
+        Server { translate: v >= 14, hash: v >= 13 }
     }
 }
 
@@ -71,23 +96,31 @@ pub fn compare(
     let (pairs, only_in_1, only_in_2) = mapping::map_tables(db1, db2, opts, user);
     let pairs: Vec<TablePair> = pairs.into_iter().filter(|p| include(p)).collect();
     let session = Session::create().map_err(|e| format!("cannot create the results folder: {e}"))?;
+    let (s1, s2) = (Server::of(db1), Server::of(db2));
+    let server = Server { translate: s1.translate && s2.translate, hash: s1.hash && s2.hash };
     let rt = db::runtime()?;
-    let tables = rt.block_on(async {
+    let (tables, ddl_triggers) = rt.block_on(async {
         let jobs = pairs.into_iter().enumerate().map(|(i, pair)| {
             let path = session.table_path(i);
-            async move { compare_table(spec1, spec2, pair, opts, path).await }
+            async move { compare_table(spec1, spec2, pair, opts, server, path).await }
         });
         let mut done: Vec<TableResult> = futures_util::stream::iter(jobs).buffered(parallel.max(1)).collect().await;
         for r in &done {
             progress(&r.pair, r);
         }
         done.sort_by(|a, b| a.pair.source.cmp(&b.pair.source));
-        done
-    });
-    Ok(DataComparison { session, tables, only_in_1, only_in_2 })
+        let mut triggers = Vec::new();
+        if opts.has(DataOpt::DisableDdlTriggers) {
+            let mut c = db::connect_async(spec2).await?;
+            let rows = db::query(&mut c, "SELECT name FROM sys.triggers WHERE parent_class = 0 AND is_disabled = 0 AND is_ms_shipped = 0 ORDER BY name").await?;
+            triggers = rows.iter().filter_map(|r| r.get::<&str, _>(0).map(str::to_string)).collect();
+        }
+        Ok::<_, String>((done, triggers))
+    })?;
+    Ok(DataComparison { session, tables, only_in_1, only_in_2, ddl_triggers })
 }
 
-async fn compare_table(spec1: &ConnectionSpec, spec2: &ConnectionSpec, pair: TablePair, opts: &DataOptions, path: PathBuf) -> TableResult {
+async fn compare_table(spec1: &ConnectionSpec, spec2: &ConnectionSpec, pair: TablePair, opts: &DataOptions, server: Server, path: PathBuf) -> TableResult {
     let mut result = TableResult {
         pair,
         counts: [0; 4],
@@ -96,44 +129,168 @@ async fn compare_table(spec1: &ConnectionSpec, spec2: &ConnectionSpec, pair: Tab
         error: None,
         by_checksum: false,
         repeated_keys: false,
+        identity_current: (None, None),
+        column_differences: Vec::new(),
     };
     if let Some(p) = &result.pair.problem {
         result.error = Some(p.clone());
         return result;
     }
-    if let Err(e) = run(spec1, spec2, opts, &mut result).await {
+    if let Err(e) = run(spec1, spec2, opts, server, &mut result).await {
         result.error = Some(e);
+    }
+    if opts.has(DataOpt::ReseedIdentity) && result.pair.columns.iter().any(|c| c.identity && c.source_identity) {
+        let (a, b) = tokio::join!(ident_current(spec1, &result.pair.source), ident_current(spec2, &result.pair.target));
+        result.identity_current = (a, b);
     }
     result
 }
 
-/// The expression a key column is ordered and matched by. Strings are compared after trailing
-/// spaces are removed (as SQL Server does) and, for case-insensitive columns, upper-cased; both
-/// servers order them by code point so the client can merge them exactly.
-fn sort_expr(column: &str, t: &DataType, case_insensitive: bool) -> String {
-    let c = quote(column);
-    if matches!(t.name.as_str(), "char" | "varchar" | "nchar" | "nvarchar" | "sysname") {
-        let mut e = format!("RTRIM(CAST({c} AS nvarchar(4000)))");
-        if case_insensitive {
-            e = format!("UPPER({e})");
-        }
-        format!("{e} COLLATE Latin1_General_100_BIN2")
-    } else {
-        c
+async fn ident_current(spec: &ConnectionSpec, table: &ObjectName) -> Option<i128> {
+    let mut c = db::connect_async(spec).await.ok()?;
+    let rows = db::query(&mut c, &format!("SELECT CAST(IDENT_CURRENT({}) AS decimal(38, 0))", literal(&table.quoted()))).await.ok()?;
+    match Value::read(rows.first()?, 0) {
+        Value::Decimal(v, _) => Some(v),
+        Value::Int(v) => Some(v as i128),
+        _ => None,
     }
 }
 
-fn value_expr(column: &str, t: &DataType) -> String {
-    let c = quote(column);
-    if t.schema.is_some() || matches!(t.name.as_str(), "hierarchyid" | "geography" | "geometry") {
-        format!("CAST({c} AS varbinary(max))")
-    } else {
-        c
+fn family(t: &DataType) -> &'static str {
+    match t.name.as_str() {
+        "char" | "varchar" | "nchar" | "nvarchar" | "sysname" | "text" | "ntext" => "string",
+        "tinyint" | "smallint" | "int" | "bigint" => "int",
+        "date" | "time" | "datetime" | "smalldatetime" | "datetime2" | "datetimeoffset" => "date",
+        "uniqueidentifier" => "guid",
+        _ => "",
     }
+}
+
+fn is_clr(t: &DataType) -> bool {
+    t.schema.is_some() || matches!(t.name.as_str(), "hierarchyid" | "geometry" | "geography")
+}
+
+fn is_lob(t: &DataType) -> bool {
+    matches!(t.name.as_str(), "text" | "ntext" | "image" | "xml") || (matches!(t.name.as_str(), "varchar" | "nvarchar" | "varbinary") && t.length == Some(-1))
+}
+
+/// The string folding a key column gets on both servers.
+fn key_fold(c: &ColumnPair, opts: &DataOptions) -> Fold {
+    if opts.has(DataOpt::ForceBinaryCollation) {
+        return Fold::default();
+    }
+    let mut f = Fold::of(c.collation());
+    if !c.case_insensitive {
+        f.case = false;
+    }
+    // A guid compared with text ignores case.
+    if family(&c.source_type) == "guid" || family(&c.target_type) == "guid" {
+        f.case = true;
+    }
+    f
+}
+
+/// The expression a key column is ordered and matched by. Strings are compared after trailing
+/// spaces are removed (as SQL Server does) and folded as the collation ignores case, accents,
+/// kana and width; both servers order them by code point so the client can merge them exactly.
+/// Keys whose types differ between the databases are brought to a common form.
+fn sort_expr(column: &str, this: &DataType, other: &DataType, fold: Fold, server: Server) -> String {
+    let c = quote(column);
+    let (f1, f2) = (family(this), family(other));
+    let text = f1 == "string" || (f2 == "string" && matches!(f1, "int" | "guid"));
+    if text {
+        let mut e = format!("RTRIM(CAST({c} AS nvarchar(4000)))");
+        if fold.case {
+            e = format!("UPPER({e})");
+        }
+        e = format!("{e} COLLATE Latin1_General_100_BIN2");
+        let (from, to) = Fold { case: false, ..fold }.table();
+        if server.translate && !from.is_empty() {
+            e = format!("TRANSLATE({e}, {}, {}) COLLATE Latin1_General_100_BIN2", literal(&from), literal(&to));
+        }
+        e
+    } else if f1 == "date" && f2 == "date" && this.name != other.name {
+        format!("CAST({c} AS datetime2(7))")
+    } else {
+        value_exprs(column, this, false).0.remove(0)
+    }
+}
+
+/// How a column's value is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// One value.
+    Plain,
+    /// sql_variant: base type, precision, scale, max length, collation, text.
+    Variant,
+    /// CLR: bytes and text.
+    Clr,
+    /// LOB: length, value when small, hash when large.
+    Lob,
+}
+
+impl Shape {
+    fn width(self) -> usize {
+        match self {
+            Shape::Plain => 1,
+            Shape::Clr => 2,
+            Shape::Lob => 3,
+            Shape::Variant => 6,
+        }
+    }
+}
+
+/// The select-list expressions for a value, and how to read them back.
+fn value_exprs(column: &str, t: &DataType, hash: bool) -> (Vec<String>, Shape) {
+    let c = quote(column);
+    let plain = match t.name.as_str() {
+        "money" => format!("CAST({c} AS decimal(19, 4))"),
+        "smallmoney" => format!("CAST({c} AS decimal(10, 4))"),
+        "xml" => format!("CONVERT(nvarchar(max), {c}, 1)"),
+        _ => c.clone(),
+    };
+    if t.schema.is_none() && t.name == "sql_variant" {
+        let p = |n: &str| format!("SQL_VARIANT_PROPERTY({c}, '{n}')");
+        let base = p("BaseType");
+        let text = format!(
+            "CASE WHEN {c} IS NULL THEN NULL \
+             WHEN {base} IN ('date', 'time', 'datetime', 'smalldatetime', 'datetime2', 'datetimeoffset') THEN CONVERT(nvarchar(4000), {c}, 121) \
+             WHEN {base} IN ('float', 'real') THEN CONVERT(nvarchar(4000), {c}, 3) \
+             WHEN {base} IN ('money', 'smallmoney') THEN CONVERT(nvarchar(4000), {c}, 2) \
+             WHEN {base} IN ('binary', 'varbinary') THEN CONVERT(nvarchar(4000), CAST({c} AS varbinary(8000)), 1) \
+             ELSE CONVERT(nvarchar(4000), {c}) END"
+        );
+        let ints = ["Precision", "Scale", "MaxLength"].map(|n| format!("CAST({} AS int)", p(n)));
+        return (
+            vec![format!("CAST({base} AS nvarchar(128))"), ints[0].clone(), ints[1].clone(), ints[2].clone(), format!("CAST({} AS nvarchar(128))", p("Collation")), text],
+            Shape::Variant,
+        );
+    }
+    if is_clr(t) {
+        return (vec![format!("CAST({c} AS varbinary(max))"), format!("{c}.ToString()")], Shape::Clr);
+    }
+    if is_lob(t) && hash {
+        let bytes = match t.name.as_str() {
+            "xml" => format!("CAST(CONVERT(nvarchar(max), {c}, 1) AS varbinary(max))"),
+            "text" => format!("CAST(CAST({c} AS varchar(max)) AS varbinary(max))"),
+            "ntext" => format!("CAST(CAST({c} AS nvarchar(max)) AS varbinary(max))"),
+            _ => format!("CAST({c} AS varbinary(max))"),
+        };
+        let len = format!("CAST(DATALENGTH({c}) AS bigint)");
+        return (
+            vec![
+                len.clone(),
+                format!("CASE WHEN {len} <= {LARGE} THEN {plain} END"),
+                format!("CASE WHEN {len} > {LARGE} THEN HASHBYTES('SHA2_256', {bytes}) END"),
+            ],
+            Shape::Lob,
+        );
+    }
+    (vec![plain], Shape::Plain)
 }
 
 /// ` WHERE <filter>` from a user filter written with or without the WHERE keyword.
-fn where_clause(filter: &Option<String>) -> String {
+pub fn where_clause(filter: &Option<String>) -> String {
     let Some(w) = filter.as_deref().map(str::trim).filter(|w| !w.is_empty()) else { return String::new() };
     let w = match w.get(..5) {
         Some(head) if head.eq_ignore_ascii_case("where") && w[5..].starts_with(char::is_whitespace) => w[5..].trim(),
@@ -142,58 +299,118 @@ fn where_clause(filter: &Option<String>) -> String {
     format!(" WHERE {w}")
 }
 
-fn select_sql(pair: &TablePair, side: u8, opts: &DataOptions) -> String {
+/// The SELECT for one side, and the shape of each compared column.
+fn select_sql(pair: &TablePair, side: u8, opts: &DataOptions, server: Server) -> (String, Vec<Shape>) {
     let table = if side == 1 { pair.source.quoted() } else { pair.target.quoted() };
     let name = |i: usize| if side == 1 { &pair.columns[i].source } else { &pair.columns[i].target };
     let ty = |i: usize| if side == 1 { &pair.columns[i].source_type } else { &pair.columns[i].target_type };
-    let ci = |i: usize| pair.columns[i].case_insensitive && !opts.has(DataOpt::ForceBinaryCollation);
-    let mut list: Vec<String> = pair.key.iter().map(|&k| sort_expr(name(k), ty(k), ci(k))).collect();
-    list.extend((0..pair.columns.len()).map(|i| value_expr(name(i), ty(i))));
+    let other = |i: usize| if side == 1 { &pair.columns[i].target_type } else { &pair.columns[i].source_type };
+    let mut list: Vec<String> = pair.key.iter().map(|&k| sort_expr(name(k), ty(k), other(k), key_fold(&pair.columns[k], opts), server)).collect();
+    let mut shapes = Vec::new();
+    for i in 0..pair.columns.len() {
+        let (exprs, shape) = value_exprs(name(i), ty(i), server.hash);
+        list.extend(exprs);
+        shapes.push(shape);
+    }
     let filter = where_clause(if side == 1 { &pair.where1 } else { &pair.where2 });
     let order: Vec<String> = (1..=pair.key.len()).map(|i| i.to_string()).collect();
-    format!("SELECT {} FROM {table} WITH (NOLOCK){filter} ORDER BY {}", list.join(", "), order.join(", "))
+    (format!("SELECT {} FROM {table} WITH (NOLOCK){filter} ORDER BY {}", list.join(", "), order.join(", ")), shapes)
 }
 
-/// Types BINARY_CHECKSUM skips, which would make a checksum miss differences.
-fn checksum_blind(t: &DataType) -> bool {
-    t.schema.is_some() || matches!(t.name.as_str(), "text" | "ntext" | "image" | "xml" | "hierarchyid" | "geography" | "geometry" | "sql_variant")
+/// Reads a row: the key values, then one value per compared column.
+fn read_row(row: &tiberius::Row, keys: usize, shapes: &[Shape]) -> Vec<Value> {
+    let mut out: Vec<Value> = (0..keys).map(|i| Value::read(row, i)).collect();
+    let mut i = keys;
+    for &shape in shapes {
+        let v = match shape {
+            Shape::Plain => Value::read(row, i),
+            Shape::Clr => match Value::read(row, i) {
+                Value::Bytes(b) => Value::Clr(b, match Value::read(row, i + 1) {
+                    Value::Str(s) => Some(s),
+                    _ => None,
+                }),
+                _ => Value::Null,
+            },
+            Shape::Lob => match (Value::read(row, i), Value::read(row, i + 1), Value::read(row, i + 2)) {
+                (Value::Null, _, _) => Value::Null,
+                (Value::Int(n), _, Value::Bytes(h)) if n > LARGE => Value::Large(n, h),
+                (_, v, _) => v,
+            },
+            Shape::Variant => match Value::read(row, i) {
+                Value::Str(base_type) => {
+                    let int = |k: usize| match Value::read(row, i + k) {
+                        Value::Int(n) => n,
+                        _ => 0,
+                    };
+                    let text = |k: usize| match Value::read(row, i + k) {
+                        Value::Str(s) => Some(s),
+                        _ => None,
+                    };
+                    Value::Variant(Box::new(Variant {
+                        base_type,
+                        precision: int(1) as u8,
+                        scale: int(2) as u8,
+                        max_length: int(3) as i32,
+                        collation: text(4),
+                        text: text(5).unwrap_or_default(),
+                    }))
+                }
+                _ => Value::Null,
+            },
+        };
+        out.push(v);
+        i += shape.width();
+    }
+    out
 }
 
-async fn checksum(conn: &mut db::Connection, pair: &TablePair, side: u8) -> Result<(i64, i64), String> {
-    let table = if side == 1 { pair.source.quoted() } else { pair.target.quoted() };
-    let cols: Vec<String> =
-        pair.columns.iter().map(|c| quote(if side == 1 { &c.source } else { &c.target })).collect();
-    let filter = where_clause(if side == 1 { &pair.where1 } else { &pair.where2 });
-    let rows = db::query(
-        conn,
-        &format!("SELECT COUNT_BIG(*), ISNULL(CHECKSUM_AGG(BINARY_CHECKSUM({})), 0) FROM {table} WITH (NOLOCK){filter}", cols.join(", ")),
-    )
-    .await?;
-    let r = rows.first().ok_or("no checksum returned")?;
-    let n = match Value::read(r, 0) {
-        Value::Int(n) => n,
-        _ => 0,
-    };
-    let c = match Value::read(r, 1) {
-        Value::Int(n) => n,
-        _ => 0,
-    };
-    Ok((n, c))
+/// Each side's own checksum and row count from sp_table_validation; `None` when the procedure
+/// cannot run (the rows are then compared).
+async fn checksum(spec: &ConnectionSpec, table: &ObjectName) -> Option<(String, i64)> {
+    let mut conn = db::connect_async(spec).await.ok()?;
+    let sql = format!(
+        "DECLARE @c decimal(38, 0), @r int; \
+         EXEC sp_table_validation @table = {}, @owner = {}, @rowcount_only = 2, @full_or_fast = 0, @expected_checksum = @c OUTPUT, @expected_rowcount = @r OUTPUT; \
+         SELECT CAST(@c AS nvarchar(50)), CAST(@r AS bigint)",
+        literal(&table.name),
+        literal(&table.schema)
+    );
+    let rows = db::query(&mut conn, &sql).await.ok()?;
+    let r = rows.first()?;
+    match (Value::read(r, 0), Value::read(r, 1)) {
+        (Value::Str(c), Value::Int(n)) => Some((c, n)),
+        _ => None,
+    }
 }
 
 const CHUNK: usize = 512;
+const CHUNK_BYTES: usize = 4 << 20;
 
-async fn produce(spec: &ConnectionSpec, sql: String, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
+fn size(v: &Value) -> usize {
+    match v {
+        Value::Str(s) => s.len(),
+        Value::Bytes(b) | Value::Clr(b, _) => b.len(),
+        _ => 16,
+    }
+}
+
+async fn produce(spec: &ConnectionSpec, sql: String, keys: usize, shapes: Vec<Shape>, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
     let run = async {
         let mut conn = db::connect_async(spec).await?;
         db::execute(&mut conn, "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED").await?;
         let mut stream = conn.simple_query(&sql).await.map_err(|e| e.to_string())?.into_row_stream();
         let mut chunk = Vec::with_capacity(CHUNK);
+        let mut bytes = 0;
         while let Some(row) = stream.try_next().await.map_err(|e| e.to_string())? {
-            let width = row.len();
-            chunk.push((0..width).map(|i| Value::read(&row, i)).collect());
-            if chunk.len() == CHUNK && tx.send(Ok(std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK)))).await.is_err() {
+            let values = read_row(&row, keys, &shapes);
+            bytes += values.iter().map(size).sum::<usize>();
+            chunk.push(values);
+            // Rows go in chunks of a bounded count and size, so large values are not piled up.
+            if (chunk.len() == CHUNK || bytes >= CHUNK_BYTES) && tx.send(Ok(std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK)))).await.is_err() {
                 return Ok(());
+            }
+            if chunk.is_empty() {
+                bytes = 0;
             }
         }
         if !chunk.is_empty() {
@@ -231,37 +448,45 @@ fn cmp_keys(a: &[Value], b: &[Value], n: usize) -> Ordering {
     (0..n).map(|i| cmp_key(&a[i], &b[i])).find(|o| o.is_ne()).unwrap_or(Ordering::Equal)
 }
 
-async fn run(spec1: &ConnectionSpec, spec2: &ConnectionSpec, opts: &DataOptions, result: &mut TableResult) -> Result<(), String> {
+fn equality(c: &ColumnPair, opts: &DataOptions) -> Equality {
+    let char_type = |t: &DataType| matches!(t.name.as_str(), "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "sysname");
+    Equality {
+        binary: opts.has(DataOpt::ForceBinaryCollation),
+        fold: Fold::of(c.collation()),
+        trim_trailing_spaces: opts.has(DataOpt::TrimTrailingSpaces),
+        empty_is_null: opts.has(DataOpt::TreatEmptyStringAsNull) && char_type(&c.target_type),
+        full_precision: opts.has(DataOpt::UseFullPrecisionForComparison),
+        real: c.source_type.name == "real" || c.target_type.name == "real",
+        xml: (c.source_type.name == "xml", c.target_type.name == "xml"),
+    }
+}
+
+async fn run(spec1: &ConnectionSpec, spec2: &ConnectionSpec, opts: &DataOptions, server: Server, result: &mut TableResult) -> Result<(), String> {
     let pair = &result.pair;
     let keys = pair.key.len();
     let width = pair.columns.len();
-    if opts.has(DataOpt::UseChecksumComparison) && !pair.columns.iter().any(|c| checksum_blind(&c.source_type) || checksum_blind(&c.target_type)) {
-        let (mut c1, mut c2) = tokio::try_join!(db::connect_async(spec1), db::connect_async(spec2))?;
-        let (a, b) = tokio::try_join!(checksum(&mut c1, pair, 1), checksum(&mut c2, pair, 2))?;
-        if a == b {
-            result.counts[RowKind::Identical as usize] = a.0 as u64;
+    // The checksum shortcut (live databases only, never with identical rows shown).
+    if opts.has(DataOpt::UseChecksumComparison) && !opts.has(DataOpt::IncludeIdenticalRecords) && pair.where1 == pair.where2 {
+        let (a, b) = tokio::join!(checksum(spec1, &pair.source), checksum(spec2, &pair.target));
+        if let (Some(a), Some(b)) = (a, b)
+            && a == b
+        {
+            result.counts[RowKind::Identical as usize] = a.1 as u64;
             result.by_checksum = true;
             return Ok(());
         }
     }
     let (tx1, rx1) = mpsc::channel(4);
     let (tx2, rx2) = mpsc::channel(4);
-    let p1 = produce(spec1, select_sql(pair, 1, opts), tx1);
-    let p2 = produce(spec2, select_sql(pair, 2, opts), tx2);
-    let mut writer = TableWriter::create(&result.path).map_err(|e| e.to_string())?;
+    let (sql1, shapes1) = select_sql(pair, 1, opts, server);
+    let (sql2, shapes2) = select_sql(pair, 2, opts, server);
+    let p1 = produce(spec1, sql1, keys, shapes1, tx1);
+    let p2 = produce(spec2, sql2, keys, shapes2, tx2);
+    let mut writer = TableWriter::create(&result.path, opts.has(DataOpt::CompressTemporaryFiles)).map_err(|e| e.to_string())?;
     let store_identical = opts.has(DataOpt::IncludeIdenticalRecords);
-    let eq: Vec<Equality> = pair
-        .columns
-        .iter()
-        .map(|c| Equality {
-            binary: opts.has(DataOpt::ForceBinaryCollation),
-            case_insensitive_column: c.case_insensitive,
-            trim_trailing_spaces: opts.has(DataOpt::TrimTrailingSpaces),
-            empty_is_null: opts.has(DataOpt::TreatEmptyStringAsNull),
-            full_precision: opts.has(DataOpt::UseFullPrecisionForComparison),
-        })
-        .collect();
+    let eq: Vec<Equality> = pair.columns.iter().map(|c| equality(c, opts)).collect();
     let mut counts = [0u64; 4];
+    let mut column_differences = vec![0u64; width];
     let mut repeated = false;
     let consume = async {
         let mut r1 = Rows { rx: rx1, buf: Vec::new().into_iter() };
@@ -312,7 +537,10 @@ async fn run(spec1: &ConnectionSpec, spec2: &ConnectionSpec, opts: &DataOptions,
                     let (x, y) = (a.take().unwrap(), b.take().unwrap());
                     check(&last1, &x, 1, &mut repeated)?;
                     check(&last2, &y, 2, &mut repeated)?;
-                    let differs: Vec<bool> = (0..width).map(|i| !same(&x[keys + i], &y[keys + i], eq[i])).collect();
+                    let differs: Vec<bool> = (0..width).map(|i| !pair.key.contains(&i) && !same(&x[keys + i], &y[keys + i], eq[i])).collect();
+                    for (n, d) in column_differences.iter_mut().zip(&differs) {
+                        *n += *d as u64;
+                    }
                     let kind = if differs.iter().any(|d| *d) { RowKind::Different } else { RowKind::Identical };
                     counts[kind as usize] += 1;
                     if kind == RowKind::Different || store_identical {
@@ -332,18 +560,93 @@ async fn run(spec1: &ConnectionSpec, spec2: &ConnectionSpec, opts: &DataOptions,
     merged?;
     result.offsets = writer.finish().map_err(|e| e.to_string())?;
     result.counts = counts;
+    result.column_differences = column_differences;
     result.repeated_keys = repeated;
     Ok(())
+}
+
+/// Reads the full value of column `column` of a database 1 row whose stored values are
+/// `values` (for a value that was compared by hash).
+pub fn fetch_value(spec: &ConnectionSpec, pair: &TablePair, column: usize, values: &[Value]) -> Result<Value, String> {
+    let c = &pair.columns[column];
+    let (exprs, _) = value_exprs(&c.source, &c.source_type, false);
+    let wheres: Vec<String> = pair
+        .key
+        .iter()
+        .map(|&k| {
+            let kc = &pair.columns[k];
+            let lit = super::value::Literal {
+                source: &kc.source_type,
+                target: &kc.source_type,
+                source_collation: kc.source_collation.as_deref(),
+                target_collation: kc.source_collation.as_deref(),
+                clr_as_text: false,
+                graph_table: None,
+            };
+            match &values[k] {
+                Value::Null => format!("{} IS NULL", quote(&kc.source)),
+                v => format!("{} = {}", quote(&kc.source), v.sql(&lit)),
+            }
+        })
+        .collect();
+    let sql = format!("SELECT TOP (1) {} FROM {} WHERE {}", exprs[0], pair.source.quoted(), wheres.join(" AND "));
+    let rt = db::runtime()?;
+    rt.block_on(async {
+        let mut conn = db::connect_async(spec).await?;
+        let rows = db::query(&mut conn, &sql).await?;
+        Ok(rows.first().map_or(Value::Null, |r| Value::read(r, 0)))
+    })
+}
+
+/// Every row of database 1's table as INSERT statements, in key order (for `/makescripts`).
+pub fn script_rows(spec: &ConnectionSpec, db: &Database, pair: &TablePair) -> Result<String, String> {
+    let server = Server { hash: false, ..Server::of(db) };
+    let (sql, shapes) = select_sql(pair, 1, &DataOptions::none(), server);
+    let keys = pair.key.len();
+    let writable: Vec<usize> = (0..pair.columns.len()).filter(|&c| !pair.columns[c].read_only).collect();
+    let identity = pair.columns.iter().any(|c| c.identity);
+    let name = pair.source.quoted();
+    let cols = writable.iter().map(|&c| quote(&pair.columns[c].source)).collect::<Vec<_>>().join(", ");
+    let rt = db::runtime()?;
+    rt.block_on(async {
+        let mut conn = db::connect_async(spec).await?;
+        let mut stream = conn.simple_query(&sql).await.map_err(|e| e.to_string())?.into_row_stream();
+        let mut out = String::new();
+        while let Some(row) = stream.try_next().await.map_err(|e| e.to_string())? {
+            let values = read_row(&row, keys, &shapes);
+            if out.is_empty() && identity {
+                out.push_str(&format!("SET IDENTITY_INSERT {name} ON\r\n"));
+            }
+            let list: Vec<String> = writable
+                .iter()
+                .map(|&c| {
+                    let col = &pair.columns[c];
+                    let lit = super::value::Literal {
+                        source: &col.source_type,
+                        target: &col.source_type,
+                        source_collation: col.source_collation.as_deref(),
+                        target_collation: col.source_collation.as_deref(),
+                        clr_as_text: false,
+                        graph_table: col.graph.as_deref().filter(|g| matches!(*g, "$node_id" | "$edge_id")).map(|_| pair.source.name.as_str()),
+                    };
+                    values[keys + c].sql(&lit)
+                })
+                .collect();
+            out.push_str(&format!("INSERT INTO {name} ({cols}) VALUES ({})\r\n", list.join(", ")));
+        }
+        if !out.is_empty() && identity {
+            out.push_str(&format!("SET IDENTITY_INSERT {name} OFF\r\n"));
+        }
+        Ok(out)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::mapping::ColumnPair;
 
-    #[test]
-    fn select_statements() {
-        let col = |n: &str, t: &str, ci: bool| ColumnPair {
+    fn col(n: &str, t: &str, ci: bool) -> ColumnPair {
+        ColumnPair {
             source: n.into(),
             target: n.into(),
             source_type: DataType { name: t.into(), ..Default::default() },
@@ -352,23 +655,43 @@ mod tests {
             identity: false,
             case_insensitive: ci,
             nullable: true,
-        };
+            source_collation: ci.then(|| "Latin1_General_CI_AS".into()),
+            target_collation: None,
+            source_identity: false,
+            graph: None,
+        }
+    }
+
+    #[test]
+    fn select_statements() {
         let pair = TablePair {
             source: ObjectName::new("dbo", "T"),
             target: ObjectName::new("dbo", "T"),
-            columns: vec![col("Code", "varchar", true), col("Id", "int", false), col("Name", "nvarchar", true)],
+            columns: vec![col("Code", "varchar", true), col("Id", "int", false), col("Name", "nvarchar", true), col("V", "sql_variant", false)],
             key: vec![1, 0],
             key_name: Some("PK".into()),
+            target_key_name: None,
             where1: Some("WHERE Id > 5".into()),
             where2: None,
             problem: None,
             is_view: false,
+            notes: Vec::new(),
         };
-        assert_eq!(
-            select_sql(&pair, 1, &DataOptions::default_set()),
-            "SELECT [Id], UPPER(RTRIM(CAST([Code] AS nvarchar(4000)))) COLLATE Latin1_General_100_BIN2, [Code], [Id], [Name] FROM [dbo].[T] WITH (NOLOCK) WHERE Id > 5 ORDER BY 1, 2"
-        );
+        let old = Server { translate: false, hash: false };
+        let (sql, shapes) = select_sql(&pair, 1, &DataOptions::default_set(), old);
+        assert!(sql.starts_with("SELECT [Id], UPPER(RTRIM(CAST([Code] AS nvarchar(4000)))) COLLATE Latin1_General_100_BIN2, [Code], [Id], [Name], CAST(SQL_VARIANT_PROPERTY([V], 'BaseType') AS nvarchar(128)),"), "{sql}");
+        assert!(sql.ends_with(" FROM [dbo].[T] WITH (NOLOCK) WHERE Id > 5 ORDER BY 1, 2"), "{sql}");
+        assert_eq!(shapes, [Shape::Plain, Shape::Plain, Shape::Plain, Shape::Variant]);
         let binary = DataOptions::default_set().with(DataOpt::ForceBinaryCollation);
-        assert!(select_sql(&pair, 2, &binary).contains("RTRIM(CAST([Code] AS nvarchar(4000))) COLLATE"));
+        assert!(select_sql(&pair, 2, &binary, old).0.contains("RTRIM(CAST([Code] AS nvarchar(4000))) COLLATE"));
+        let new = Server { translate: true, hash: true };
+        assert!(select_sql(&pair, 1, &DataOptions::default_set(), new).0.contains("TRANSLATE(UPPER(RTRIM(CAST([Code] AS nvarchar(4000)))) COLLATE Latin1_General_100_BIN2, N'"));
+        // Keys of different types meet in a common form.
+        let mixed = DataType { name: "nvarchar".into(), length: Some(10), ..Default::default() };
+        assert_eq!(sort_expr("K", &DataType { name: "int".into(), ..Default::default() }, &mixed, Fold::default(), old), "RTRIM(CAST([K] AS nvarchar(4000))) COLLATE Latin1_General_100_BIN2");
+        assert_eq!(sort_expr("K", &DataType { name: "date".into(), ..Default::default() }, &DataType { name: "datetime".into(), ..Default::default() }, Fold::default(), old), "CAST([K] AS datetime2(7))");
+        let (lob, shape) = value_exprs("B", &DataType { name: "varbinary".into(), length: Some(-1), ..Default::default() }, true);
+        assert_eq!(shape, Shape::Lob);
+        assert_eq!(lob[2], "CASE WHEN CAST(DATALENGTH([B]) AS bigint) > 1048576 THEN HASHBYTES('SHA2_256', CAST([B] AS varbinary(max))) END");
     }
 }

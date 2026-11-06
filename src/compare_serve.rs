@@ -9,7 +9,9 @@
 //! - `schema_compare` {project} → session with differences; `schema_object_sql` {session, index};
 //!   `schema_script` {session, selected:[index], project}; `deploy` {session} runs the last script.
 //! - `data_tables` {project} previews table pairs and keys; `data_compare` {project} → session;
-//!   `data_rows` {session, table, kind, start, count}; `data_script` {session, kinds, tables}.
+//!   `data_rows` {session, table, kind, start, count}; `data_script` {session, kinds, tables,
+//!   selections, isolationLevel, maxTransactionSizeMB} (see `selections`);
+//!   `data_session_save` {session, path} / `data_session_load` {path} → session.
 //! - `snapshot` {source, path} writes a schema snapshot.
 
 use std::collections::HashMap;
@@ -20,6 +22,7 @@ use serde_json::{Value, json};
 use crate::catalog::{self, Database, ObjectName};
 use crate::data::compare::DataComparison;
 use crate::data::store::{self, RowKind};
+use crate::data::sync::RowSelection;
 use crate::data::{DataOpt, DataOptions};
 use crate::project::{Project, SourceSpec};
 use crate::schema::compare::{Comparison, DiffKind, ObjectType};
@@ -35,6 +38,7 @@ struct SchemaSession {
 }
 
 struct DataSession {
+    source_name: String,
     db2: Database,
     result: DataComparison,
     project: Project,
@@ -229,7 +233,11 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         "data_tables" => {
             let project: Project = field(request, "project")?;
-            let opts = data_options(&project)?;
+            let mut opts = data_options(&project)?;
+            // Views and checksums need both sides live.
+            if project.source.is_snapshot() || project.target.is_snapshot() {
+                opts = opts.without(DataOpt::IncludeViews).without(DataOpt::UseChecksumComparison);
+            }
             let db1 = load_side(&project.source, 1, progress)?;
             let db2 = load_side(&project.target, 2, progress)?;
             let (pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
@@ -244,18 +252,24 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                         "source": p.source.to_string(), "sourceSchema": p.source.schema, "sourceName": p.source.name,
                         "target": p.target.to_string(), "isView": p.is_view, "keyName": p.key_name, "problem": p.problem,
                         "key": p.key.iter().map(|&k| p.columns[k].source.clone()).collect::<Vec<_>>(),
-                        "columns": p.columns.iter().map(|c| json!({"source": c.source, "target": c.target, "type": c.source_type.sql()})).collect::<Vec<_>>(),
+                        "columns": p.columns.iter().map(|c| json!({"source": c.source, "target": c.target, "type": c.source_type.sql(), "targetType": c.target_type.sql()})).collect::<Vec<_>>(),
                         "where1": p.where1, "where2": p.where2, "keyCandidates": candidates,
+                        "notes": notes_json(p),
                     })
                 })
                 .collect();
             let all_columns: HashMap<String, Vec<String>> =
                 db1.tables.iter().map(|t| (t.object_name().to_string(), t.columns.iter().map(|c| c.name.clone()).collect())).collect();
+            let target_columns: HashMap<String, Vec<String>> =
+                db2.tables.iter().map(|t| (t.object_name().to_string(), t.columns.iter().map(|c| c.name.clone()).collect())).collect();
             Ok(json!({
                 "tables": tables,
                 "onlyIn1": only1.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "onlyIn2": only2.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "sourceColumns": all_columns,
+                "targetColumns": target_columns,
+                "sourceSchemas": db1.schemas.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+                "targetSchemas": db2.schemas.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
             }))
         }
         "data_compare" => {
@@ -277,33 +291,12 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 &project.data_mappings,
                 |p| !deselected.contains(&p.source),
                 4,
-                |p, _| progress(&format!("Compared {}", p.source)),
+                |p, _| progress(&progress_text(p, opts.has(DataOpt::UseChecksumComparison))),
             )?;
-            let tables: Vec<Value> = result
-                .tables
-                .iter()
-                .enumerate()
-                .map(|(i, t)| {
-                    json!({
-                        "index": i, "source": t.pair.source.to_string(), "target": t.pair.target.to_string(),
-                        "isView": t.pair.is_view, "counts": t.counts, "error": t.error, "byChecksum": t.by_checksum,
-                        "repeatedKeys": t.repeated_keys,
-                        "columns": t.pair.columns.iter().map(|c| c.source.clone()).collect::<Vec<_>>(),
-                        "key": t.pair.key,
-                    })
-                })
-                .collect();
             state.next += 1;
             let id = state.next;
-            let reply = json!({
-                "session": id,
-                "sourceName": db1.name,
-                "targetName": db2.name,
-                "tables": tables,
-                "onlyIn1": result.only_in_1.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                "onlyIn2": result.only_in_2.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            });
-            state.data.insert(id, DataSession { db2, result, project, script: None });
+            let reply = data_session_json(id, &db1.name, &db2.name, &result);
+            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None });
             Ok(reply)
         }
         "data_rows" => {
@@ -334,17 +327,38 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let kinds: [bool; 4] = field(request, "kinds").unwrap_or([false, true, true, true]);
             let tables: Option<Vec<usize>> = request.get("tables").and_then(|v| serde_json::from_value(v.clone()).ok());
             let opts = data_options(&s.project)?;
-            let settings = crate::data::sync::SyncSettings {
-                source: s.project.source.describe(),
-                target: s.project.target.describe(),
-                target_database: s.db2.name.clone(),
-                transaction_isolation_level: request.get("isolationLevel").and_then(Value::as_str).unwrap_or("SERIALIZABLE").to_ascii_uppercase(),
-                kinds,
-                tables: tables.map(|ix| ix.iter().filter_map(|&i| s.result.tables.get(i)).map(|t| t.pair.source.clone()).collect()),
-            };
+            let side = |p: &crate::project::SourceSpec, name: &str| format!("{}.{}", p.server, if name.is_empty() { &p.database } else { name });
+            let mut settings = crate::data::sync::SyncSettings::new(&side(&s.project.source, &s.source_name), &side(&s.project.target, &s.db2.name), &s.db2.name);
+            settings.transaction_isolation_level = request.get("isolationLevel").and_then(Value::as_str).unwrap_or("SERIALIZABLE").to_ascii_uppercase();
+            settings.kinds = kinds;
+            settings.tables = tables.map(|ix| ix.iter().filter_map(|&i| s.result.tables.get(i)).map(|t| t.pair.source.clone()).collect());
+            settings.selections = selections(request, &s.result)?;
+            settings.max_transaction_bytes = request.get("maxTransactionSizeMB").and_then(Value::as_u64).filter(|&m| m > 0).map(|m| m * 1_048_576);
+            settings.source_connection = s.project.source.connection(1).ok();
             let script = crate::data::sync::generate(&s.result, &s.db2, &opts, &settings)?;
             let reply = script_json(&script);
             s.script = Some(script);
+            Ok(reply)
+        }
+        // Saves an open data comparison to a file, and opens one again as a new session.
+        "data_session_save" => {
+            let s = state.data.get(&session(request)?).ok_or("the comparison is no longer open")?;
+            let path: String = field(request, "path")?;
+            let extra = json!({"project": s.project, "db2": s.db2, "sourceName": s.source_name});
+            crate::data::saved::save(&s.result, extra, std::path::Path::new(&path))?;
+            Ok(json!(true))
+        }
+        "data_session_load" => {
+            let path: String = field(request, "path")?;
+            let (result, extra) = crate::data::saved::load(std::path::Path::new(&path))?;
+            let project: Project = serde_json::from_value(extra["project"].clone()).map_err(|e| format!("{path}: {e}"))?;
+            let db2: Database = serde_json::from_value(extra["db2"].clone()).map_err(|e| format!("{path}: {e}"))?;
+            let source_name = extra["sourceName"].as_str().unwrap_or_default().to_string();
+            state.next += 1;
+            let id = state.next;
+            let mut reply = data_session_json(id, &source_name, &db2.name, &result);
+            reply["project"] = serde_json::to_value(&project).map_err(|e| e.to_string())?;
+            state.data.insert(id, DataSession { source_name, db2, result, project, script: None });
             Ok(reply)
         }
         "deploy" => {
@@ -372,6 +386,82 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         other => Err(format!("unknown op '{other}'")),
     }
+}
+
+fn notes_json(p: &crate::data::mapping::TablePair) -> Vec<Value> {
+    p.notes.iter().map(|n| json!({"code": n.code, "severity": format!("{:?}", n.severity), "text": n.text, "notCompared": n.not_compared()})).collect()
+}
+
+/// "Comparing [t]" or "Performing checksum comparison of [t] to [u]".
+fn progress_text(p: &crate::data::mapping::TablePair, checksum: bool) -> String {
+    let what = if checksum { "Performing checksum comparison of" } else { "Comparing" };
+    if p.source == p.target { format!("{what} {}", p.source) } else { format!("{what} {} to {}", p.source, p.target) }
+}
+
+/// The reply describing a data comparison session.
+fn data_session_json(id: u64, source: &str, target: &str, result: &DataComparison) -> Value {
+    let tables: Vec<Value> = result
+        .tables
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            json!({
+                "index": i, "source": t.pair.source.to_string(), "target": t.pair.target.to_string(),
+                "isView": t.pair.is_view, "counts": t.counts, "error": t.error, "byChecksum": t.by_checksum,
+                "repeatedKeys": t.repeated_keys,
+                "columns": t.pair.columns.iter().map(|c| c.source.clone()).collect::<Vec<_>>(),
+                "targetColumns": t.pair.columns.iter().map(|c| c.target.clone()).collect::<Vec<_>>(),
+                "key": t.pair.key,
+                "columnDifferences": t.column_differences,
+                "notes": notes_json(&t.pair),
+            })
+        })
+        .collect();
+    json!({
+        "session": id,
+        "sourceName": source,
+        "targetName": target,
+        "tables": tables,
+        "onlyIn1": result.only_in_1.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "onlyIn2": result.only_in_2.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    })
+}
+
+/// `selections` of `data_script`: per table (index), the kinds deployed and row choices.
+/// `{"table": 0, "kinds": [false, true, false, true], "rows": {"different": {"exclude": [3]}, "onlyIn1": {"include": [0, 1]}}}`;
+/// a kind may also be given as `{"included": bool, "toggled": [..]}`.
+fn selections(request: &Value, result: &DataComparison) -> Result<HashMap<ObjectName, [RowSelection; 4]>, String> {
+    let mut out = HashMap::new();
+    let Some(list) = request.get("selections").and_then(Value::as_array) else { return Ok(out) };
+    for item in list {
+        let index = item.get("table").and_then(Value::as_u64).ok_or("selections: 'table' is missing")? as usize;
+        let t = result.tables.get(index).ok_or_else(|| format!("selections: no table {index}"))?;
+        let mut sel: [RowSelection; 4] = Default::default();
+        if let Some(kinds) = item.get("kinds") {
+            let kinds: [bool; 4] = serde_json::from_value(kinds.clone()).map_err(|e| format!("selections: 'kinds': {e}"))?;
+            for (k, on) in kinds.iter().enumerate() {
+                sel[k].included = *on;
+            }
+        }
+        if let Some(rows) = item.get("rows") {
+            for (name, kind) in [("different", RowKind::Different), ("onlyIn1", RowKind::OnlyIn1), ("onlyIn2", RowKind::OnlyIn2)] {
+                let Some(r) = rows.get(name) else { continue };
+                let list = |key: &str| -> Result<Option<std::collections::BTreeSet<u64>>, String> {
+                    r.get(key).map(|v| serde_json::from_value(v.clone()).map_err(|e| format!("selections: '{name}.{key}': {e}"))).transpose()
+                };
+                let s = &mut sel[kind as usize];
+                if let Some(rows) = list("include")? {
+                    *s = RowSelection { included: false, toggled: rows };
+                } else if let Some(rows) = list("exclude")? {
+                    *s = RowSelection { included: true, toggled: rows };
+                } else {
+                    *s = serde_json::from_value(r.clone()).map_err(|e| format!("selections: '{name}': {e}"))?;
+                }
+            }
+        }
+        out.insert(t.pair.source.clone(), sel);
+    }
+    Ok(out)
 }
 
 fn difference_json(i: usize, d: &crate::schema::Difference) -> Value {

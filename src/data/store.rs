@@ -1,11 +1,12 @@
 //! Comparison results on disk: one append-only file of differing rows per table, plus the
 //! offsets of each kind of row, so a page of any kind can be read without loading the table.
+//! With "Compress temporary files" each row is stored compressed when that makes it smaller.
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::value::Value;
+use super::value::{Value, Variant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RowKind {
@@ -59,7 +60,10 @@ impl Session {
             }
         }
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        let dir = root.join(format!("{stamp}-{}", std::process::id()));
+        // Sessions made in the same millisecond by one process get different folders.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = root.join(format!("{stamp}-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir)?;
         Ok(Session { dir, keep: false })
     }
@@ -85,11 +89,15 @@ pub struct TableWriter {
     file: BufWriter<File>,
     offset: u64,
     pub offsets: [Vec<u64>; 4],
+    compress: bool,
 }
 
+/// The high bit of a row's length marks a compressed row.
+const COMPRESSED: u32 = 0x8000_0000;
+
 impl TableWriter {
-    pub fn create(path: &Path) -> std::io::Result<TableWriter> {
-        Ok(TableWriter { file: BufWriter::with_capacity(1 << 20, File::create(path)?), offset: 0, offsets: Default::default() })
+    pub fn create(path: &Path, compress: bool) -> std::io::Result<TableWriter> {
+        Ok(TableWriter { file: BufWriter::with_capacity(1 << 20, File::create(path)?), offset: 0, offsets: Default::default(), compress })
     }
 
     pub fn write(&mut self, row: &StoredRow) -> std::io::Result<()> {
@@ -99,7 +107,15 @@ impl TableWriter {
         encode_values(&row.target, &mut buf);
         buf.extend_from_slice(&(row.differs.len() as u32).to_le_bytes());
         buf.extend(row.differs.iter().map(|&d| d as u8));
-        self.file.write_all(&(buf.len() as u32).to_le_bytes())?;
+        let mut len = buf.len() as u32;
+        if self.compress && buf.len() > 64 {
+            let packed = lz::compress(&buf);
+            if packed.len() < buf.len() {
+                buf = packed;
+                len = buf.len() as u32 | COMPRESSED;
+            }
+        }
+        self.file.write_all(&len.to_le_bytes())?;
         self.file.write_all(&buf)?;
         self.offsets[row.kind as usize].push(self.offset);
         self.offset += 4 + buf.len() as u64;
@@ -120,8 +136,12 @@ pub fn read_page(path: &Path, offsets: &[u64], start: usize, count: usize) -> st
         f.seek(SeekFrom::Start(off))?;
         let mut len = [0u8; 4];
         f.read_exact(&mut len)?;
-        let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+        let len = u32::from_le_bytes(len);
+        let mut buf = vec![0u8; (len & !COMPRESSED) as usize];
         f.read_exact(&mut buf)?;
+        if len & COMPRESSED != 0 {
+            buf = lz::decompress(&buf).ok_or_else(|| std::io::Error::other("corrupt result file"))?;
+        }
         out.push(decode_row(&buf).ok_or_else(|| std::io::Error::other("corrupt result file"))?);
     }
     Ok(out)
@@ -187,7 +207,38 @@ fn encode(v: &Value, out: &mut Vec<u8>) {
             out.extend_from_slice(&n.to_le_bytes());
             out.extend_from_slice(&o.to_le_bytes());
         }
+        Value::Variant(v) => {
+            out.push(12);
+            encode_str(&v.base_type, out);
+            out.extend([v.precision, v.scale]);
+            out.extend_from_slice(&v.max_length.to_le_bytes());
+            encode_str(v.collation.as_deref().unwrap_or_default(), out);
+            encode_str(&v.text, out);
+        }
+        Value::Clr(b, text) => {
+            out.push(13);
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(b);
+            match text {
+                Some(t) => {
+                    out.push(1);
+                    encode_str(t, out);
+                }
+                None => out.push(0),
+            }
+        }
+        Value::Large(n, hash) => {
+            out.push(14);
+            out.extend_from_slice(&n.to_le_bytes());
+            out.extend_from_slice(&(hash.len() as u32).to_le_bytes());
+            out.extend_from_slice(hash);
+        }
     }
+}
+
+fn encode_str(s: &str, out: &mut Vec<u8>) {
+    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
 }
 
 struct Cursor<'a> {
@@ -218,6 +269,16 @@ impl<'a> Cursor<'a> {
         Some(i128::from_le_bytes(self.take(16)?.try_into().ok()?))
     }
 
+    fn str(&mut self) -> Option<String> {
+        let n = self.u32()? as usize;
+        String::from_utf8(self.take(n)?.to_vec()).ok()
+    }
+
+    fn bytes(&mut self) -> Option<Vec<u8>> {
+        let n = self.u32()? as usize;
+        Some(self.take(n)?.to_vec())
+    }
+
     fn value(&mut self) -> Option<Value> {
         Some(match self.u8()? {
             0 => Value::Null,
@@ -244,6 +305,22 @@ impl<'a> Cursor<'a> {
                 let n = self.i128()?;
                 Value::DateTimeOffset(n, i32::from_le_bytes(self.take(4)?.try_into().ok()?))
             }
+            12 => {
+                let base_type = self.str()?;
+                let (precision, scale) = (self.u8()?, self.u8()?);
+                let max_length = i32::from_le_bytes(self.take(4)?.try_into().ok()?);
+                let collation = Some(self.str()?).filter(|c| !c.is_empty());
+                Value::Variant(Box::new(Variant { base_type, precision, scale, max_length, collation, text: self.str()? }))
+            }
+            13 => {
+                let b = self.bytes()?;
+                let text = if self.u8()? == 1 { Some(self.str()?) } else { None };
+                Value::Clr(b, text)
+            }
+            14 => {
+                let n = self.i64()?;
+                Value::Large(n, self.bytes()?)
+            }
             _ => return None,
         })
     }
@@ -264,20 +341,106 @@ fn decode_row(b: &[u8]) -> Option<StoredRow> {
     Some(StoredRow { kind, source, target, differs })
 }
 
+/// A small LZ77 codec for compressed rows: the unpacked length, then tokens: `0..=127` = that
+/// many + 1 literal bytes follow; `128..=255` = a match of (token - 128 + 4) bytes at the
+/// 16-bit offset that follows.
+mod lz {
+    pub fn compress(input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(input.len() / 2 + 8);
+        out.extend_from_slice(&(input.len() as u32).to_le_bytes());
+        let mut table = vec![0usize; 1 << 12];
+        let (mut i, mut lit) = (0, 0);
+        let flush = |out: &mut Vec<u8>, from: usize, to: usize| {
+            for chunk in input[from..to].chunks(128) {
+                out.push((chunk.len() - 1) as u8);
+                out.extend_from_slice(chunk);
+            }
+        };
+        while i + 4 <= input.len() {
+            let word = u32::from_le_bytes(input[i..i + 4].try_into().unwrap());
+            let h = (word.wrapping_mul(2_654_435_761) >> 20) as usize;
+            let cand = table[h];
+            table[h] = i + 1;
+            if cand > 0 && i - (cand - 1) <= 0xffff && input[cand - 1..cand + 3] == input[i..i + 4] {
+                let c = cand - 1;
+                let mut len = 4;
+                while len < 131 && i + len < input.len() && input[c + len] == input[i + len] {
+                    len += 1;
+                }
+                flush(&mut out, lit, i);
+                out.push((128 + len - 4) as u8);
+                out.extend_from_slice(&((i - c) as u16).to_le_bytes());
+                i += len;
+                lit = i;
+                continue;
+            }
+            i += 1;
+        }
+        flush(&mut out, lit, input.len());
+        out
+    }
+
+    pub fn decompress(input: &[u8]) -> Option<Vec<u8>> {
+        let n = u32::from_le_bytes(input.get(..4)?.try_into().ok()?) as usize;
+        let mut out = Vec::with_capacity(n);
+        let mut i = 4;
+        while i < input.len() {
+            let t = input[i] as usize;
+            i += 1;
+            if t < 128 {
+                out.extend_from_slice(input.get(i..i + t + 1)?);
+                i += t + 1;
+            } else {
+                let off = u16::from_le_bytes(input.get(i..i + 2)?.try_into().ok()?) as usize;
+                i += 2;
+                let start = out.len().checked_sub(off)?;
+                for k in 0..t - 128 + 4 {
+                    out.push(out[start + k]);
+                }
+            }
+        }
+        (out.len() == n).then_some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn compression_round_trip() {
+        let data: Vec<u8> = (0..5000u32).flat_map(|i| (i % 37).to_le_bytes()).chain(b"abcabcabcabcabcabc".iter().copied()).collect();
+        let packed = lz::compress(&data);
+        assert!(packed.len() < data.len() / 2);
+        assert_eq!(lz::decompress(&packed).unwrap(), data);
+        assert_eq!(lz::decompress(&lz::compress(b"xy")).unwrap(), b"xy");
+    }
+
+    #[test]
     fn round_trip_and_pages() {
+        for compress in [false, true] {
+            round_trip(compress);
+        }
+    }
+
+    fn round_trip(compress: bool) {
         let session = Session::create().unwrap();
         let path = session.table_path(0);
-        let mut w = TableWriter::create(&path).unwrap();
+        let mut w = TableWriter::create(&path, compress).unwrap();
         let rows: Vec<StoredRow> = (0..10)
             .map(|i| StoredRow {
                 kind: if i % 2 == 0 { RowKind::Different } else { RowKind::OnlyIn1 },
-                source: vec![Value::Int(i), Value::Str(format!("ü{i}")), Value::Decimal(-12345, 2), Value::Guid([i as u8; 16])],
-                target: if i % 2 == 0 { vec![Value::Int(i), Value::Null, Value::DateTimeOffset(5, -420), Value::Bytes(vec![1, 2])] } else { vec![] },
+                source: vec![Value::Int(i), Value::Str(format!("ü{i}").repeat(30)), Value::Decimal(-12345, 2), Value::Guid([i as u8; 16])],
+                target: if i % 2 == 0 {
+                    vec![
+                        Value::Clr(vec![1], Some("/1/".into())),
+                        Value::Large(5, vec![9; 32]),
+                        Value::DateTimeOffset(5, -420),
+                        Value::Variant(Box::new(Variant { base_type: "int".into(), precision: 10, scale: 0, max_length: 4, collation: None, text: "7".into() })),
+                    ]
+                } else {
+                    vec![]
+                },
                 differs: vec![false, true, true, true],
             })
             .collect();
