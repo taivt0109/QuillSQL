@@ -103,9 +103,15 @@ DECLARE @id int = OBJECT_ID(@name);
 DECLARE @ps int = (SELECT TOP (1) i.data_space_id FROM sys.indexes AS i JOIN sys.partition_schemes AS s ON s.data_space_id = i.data_space_id
                    WHERE i.object_id = @id AND i.index_id IN (0, 1));
 DECLARE @pf int = (SELECT function_id FROM sys.partition_schemes WHERE data_space_id = @ps);
+-- The partition stats give the size cheaply on large tables, when the login may read them.
+DECLARE @kb bigint;
+IF HAS_PERMS_BY_NAME(NULL, 'DATABASE', 'VIEW DATABASE STATE') = 1
+    SET @kb = (SELECT SUM(reserved_page_count) * 8 FROM sys.dm_db_partition_stats WHERE object_id = @id);
+IF @kb IS NULL
+    SET @kb = (SELECT SUM(a.total_pages) * 8 FROM sys.partitions AS p JOIN sys.allocation_units AS a ON a.container_id = p.partition_id WHERE p.object_id = @id);
 SELECT o.type, SCHEMA_NAME(o.schema_id), o.name, OBJECT_DEFINITION(@id), o.create_date, o.modify_date,
     (SELECT SUM(p.rows) FROM sys.partitions AS p WHERE p.object_id = @id AND p.index_id IN (0, 1)),
-    (SELECT SUM(a.total_pages) * 8 FROM sys.partitions AS p JOIN sys.allocation_units AS a ON a.container_id = p.partition_id WHERE p.object_id = @id)
+    @kb
 FROM sys.objects AS o WHERE o.object_id = @id;
 SELECT c.name, TYPE_NAME(c.user_type_id), c.max_length, c.precision, c.scale, c.is_nullable,
     CASE WHEN ic.object_id IS NULL THEN NULL ELSE CONCAT(CAST(ic.seed_value AS nvarchar(40)), ',', CAST(ic.increment_value AS nvarchar(40))) END,
@@ -163,17 +169,27 @@ WHERE p.object_id = @id AND p.index_id IN (0, 1) ORDER BY p.partition_number;
 SELECT name, TYPE_NAME(user_type_id), max_length, precision, scale, is_output
 FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY parameter_id;";
 
-        /// <summary>Catalog details of `schema.name`, cached for two minutes; null if it does not exist.</summary>
+        private static readonly TimeSpan Fresh = TimeSpan.FromMinutes(10);
+
+        /// <summary>Details read in the last ten minutes, without asking the database; null if there are none.</summary>
+        public static ObjectDetails Cached(ConnectionTarget target, string fullName)
+        {
+            lock (Cache)
+            {
+                return Cache.TryGetValue(target.Key + "|" + fullName, out var hit) && DateTime.UtcNow - hit.Item1 < Fresh ? hit.Item2 : null;
+            }
+        }
+
+        /// <summary>Catalog details of `schema.name`, cached for ten minutes; null if it does not exist.</summary>
         public static ObjectDetails Load(ConnectionTarget target, string fullName)
         {
             var key = target.Key + "|" + fullName;
-            lock (Cache)
+            var cached = Cached(target, fullName);
+            if (cached != null)
             {
-                if (Cache.TryGetValue(key, out var hit) && DateTime.UtcNow - hit.Item1 < TimeSpan.FromMinutes(2))
-                {
-                    return hit.Item2;
-                }
+                return cached;
             }
+            var watch = System.Diagnostics.Stopwatch.StartNew();
             var d = new ObjectDetails();
             using (var connection = new SqlConnection(target.ConnectionString))
             using (var command = new SqlCommand(Query, connection) { CommandTimeout = 30 })
@@ -273,6 +289,7 @@ FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY paramete
                 }
             }
             d.Filegroup = d.Indexes.FirstOrDefault()?.Filegroup;
+            Log.Write("details of " + fullName + " read in " + watch.ElapsedMilliseconds + " ms");
             lock (Cache)
             {
                 Cache[key] = Tuple.Create(DateTime.UtcNow, d);
@@ -429,6 +446,19 @@ FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY paramete
                 return Loc.T("Partitioned on " + p.Column + " by " + p.Function + " (RANGE " + p.Range + ", " + (p.Boundaries.Count + 1) + " partitions) through scheme " + p.Scheme);
             }
             return d.IsTable ? Loc.T("Not partitioned; stored on filegroup " + (d.Filegroup ?? "?")) : null;
+        }
+
+        /// <summary>The card's title alone, shown while the details are read.</summary>
+        public static UIElement Loading(string schema, string name, string kind)
+        {
+            var title = new StackPanel { Orientation = Orientation.Horizontal };
+            title.Children.Add(Theme.Badge((kind ?? "object").Replace('_', ' ').ToUpperInvariant(), Theme.Slate, 9.5));
+            title.Children.Add(new TextBlock { Text = schema + ".", FontSize = 14, Opacity = 0.7, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            title.Children.Add(new TextBlock { Text = name, FontSize = 14, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+            var panel = new StackPanel { Margin = new Thickness(4), MinWidth = 360 };
+            panel.Children.Add(title);
+            panel.Children.Add(new TextBlock { Text = Loc.T("Reading the details from the database..."), Opacity = 0.7, Margin = new Thickness(0, 6, 0, 0) });
+            return panel;
         }
 
         /// <summary>A card with the object's columns, indexes, partitions and script.</summary>

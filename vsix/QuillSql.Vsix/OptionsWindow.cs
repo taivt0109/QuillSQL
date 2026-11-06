@@ -575,8 +575,31 @@ namespace QuillSql.Vsix
                 }
             };
             grid.RowEditEnding += (o, e) => refresh.Start();
+            // The usual environments, matched by words that commonly appear in server and database names.
+            var presets = Theme.FlatButton(Loc.T("Add production, staging, development and test"), null);
+            presets.HorizontalAlignment = HorizontalAlignment.Left;
+            presets.Margin = new Thickness(0, 0, 0, 8);
+            presets.Click += (o, e) =>
+            {
+                grid.CommitEdit(DataGridEditingUnit.Row, true);
+                foreach (var rule in new[]
+                {
+                    new ColorRule { Match = "prod", Color = "#C62828", Label = "PRODUCTION" },
+                    new ColorRule { Match = "staging", Color = "#EF6C00", Label = "STAGING" },
+                    new ColorRule { Match = "uat", Color = "#F9A825", Label = "UAT" },
+                    new ColorRule { Match = "dev", Color = "#1565C0", Label = "DEVELOPMENT" },
+                    new ColorRule { Match = "test", Color = "#2E7D32", Label = "TEST" },
+                })
+                {
+                    if (!_colors.Any(c => string.Equals(c.Match, rule.Match, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        _colors.Add(rule);
+                    }
+                }
+            };
             return Stack(
                 Note("Query windows whose \"server / database\" contains the text get a colored document tab and a colored bar above the editor. The first matching row wins."),
+                presets,
                 grid,
                 Note("Examples: prod #C62828 PRODUCTION · uat #EF6C00 UAT · test #2E7D32 TEST. Delete a row with the Delete key."));
         }
@@ -785,6 +808,7 @@ namespace QuillSql.Vsix
                 new[] { "Analyze code", "Ctrl+B, Ctrl+A" },
                 new[] { "Fix code issues", "Ctrl+B, Ctrl+F" },
                 new[] { "Query history", "Ctrl+B, Ctrl+H" },
+                new[] { "AI Chat", "Ctrl+B, Ctrl+I" },
                 new[] { "Ask AI", "Ctrl+B, Ctrl+G" },
                 new[] { "Analyze plan with AI", "Ctrl+B, Ctrl+P" },
                 new[] { "Suggestions", "Ctrl+Space" },

@@ -13,13 +13,15 @@ namespace QuillSql.Vsix
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [InstalledProductRegistration("QuillSQL", "T-SQL formatting, suggestions, refactoring and code analysis with a Rust engine.", Version)]
     [ProvideMenuResource("Menus.ctmenu", 1)]
+    // The AI chat docks on the right, like the tool windows people keep open beside a script.
+    [ProvideToolWindow(typeof(AiChatPane), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057", Orientation = ToolWindowOrientation.Right)]
     // Load with the shell so suggestions work in the first query window.
     [ProvideAutoLoad(Microsoft.VisualStudio.VSConstants.UICONTEXT.ShellInitialized_string, PackageAutoLoadFlags.BackgroundLoad)]
     [Guid("a4d6f0c1-7e2b-4c39-8f15-2b9e6d3a1c74")]
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.3.1";
+        public const string Version = "0.3.2";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
@@ -67,6 +69,7 @@ namespace QuillSql.Vsix
         private const int OptionsCommandId = 0x0134;
         private const int LogFolderCommandId = 0x0135;
         private const int ShowCardCommandId = 0x0136;
+        private const int AiChatCommandId = 0x0137;
 
         private EditorWatcher _watcher;
 
@@ -91,6 +94,7 @@ namespace QuillSql.Vsix
             add(ToggleAnalysisCommandId, CodeAnalysis.ToggleUnderlines);
             add(InvalidObjectsCommandId, () => Commands.FindInvalidObjects(this));
             add(HistoryCommandId, QueryHistory.ShowWindow);
+            add(AiChatCommandId, () => AiChatPane.Open(this));
             add(AskAiCommandId, () => AiAssistant.AskForSql(this));
             add(ExplainAiCommandId, () => AiAssistant.Explain(this));
             add(ReviewAiCommandId, () => AiAssistant.Review(this));

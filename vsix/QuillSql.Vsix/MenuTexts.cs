@@ -52,6 +52,7 @@ namespace QuillSql.Vsix
             [0x0134] = "Options...",
             [0x0135] = "Open Log Folder",
             [0x0136] = "Show Object Card",
+            [0x0137] = "AI Chat",
         };
     }
 }

@@ -49,30 +49,6 @@ namespace QuillSql.Vsix
             "and any explanation as SQL comments. Use only the tables, columns and procedures in the schema you are given; " +
             "if something you need is missing, say so in a comment. Keep the user's style and casing.";
 
-        private const string Explainer =
-            "You explain T-SQL to the database developer who wrote it, inside SQL Server Management Studio. Be concise: " +
-            "what the code does, step by step, then any bugs or risks you notice. Plain text, no Markdown headings.";
-
-        private const string Reviewer =
-            "You review T-SQL for SQL Server for correctness and performance. Reply with T-SQL only, no Markdown: first a " +
-            "block comment listing the problems you found and why, then the improved script. If the script is already good, " +
-            "say so in the comment and repeat it unchanged.";
-
-        private const string PlanAnalyst =
-            "You are a SQL Server performance specialist. You are given a query, the tables it uses with their row counts and " +
-            "existing indexes, and its execution plan (estimated, or actual with measured rows). Reply with T-SQL only, no Markdown: " +
-            "first a block comment that says where the cost goes, citing the plan's operators, estimated against actual rows, " +
-            "warnings and missing-index hints; then the changes you recommend as runnable T-SQL (CREATE INDEX statements, " +
-            "rewritten query, statistics updates), each with a comment explaining why. Never propose an index that already " +
-            "exists or is covered by one; weigh table size and write cost. If the plan is already good, say so.";
-
-        private const string WorkloadAnalyst =
-            "You are a SQL Server performance specialist reviewing a database's most expensive queries from Query Store, with " +
-            "the tables they use, their indexes and the plan of each query's slowest plan. Reply with T-SQL only, no Markdown: " +
-            "first a block comment ranking the problems by impact (cite query_id, durations, reads, plan regressions where a " +
-            "query has several plans of very different speed); then recommended fixes as runnable T-SQL with comments. Never " +
-            "propose an index that already exists. Prefer a few high-impact changes over many small ones.";
-
         /// <summary>claude.exe on PATH or in the usual install folders, or null.</summary>
         public static string FindClaude()
         {
@@ -115,7 +91,7 @@ namespace QuillSql.Vsix
         }
 
         /// <summary>Quotes one argument the way CommandLineToArgvW parses it.</summary>
-        private static string Quote(string arg)
+        internal static string Quote(string arg)
         {
             if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
             {
@@ -228,7 +204,7 @@ namespace QuillSql.Vsix
             return firstLine < 0 || end <= firstLine ? t : t.Substring(firstLine + 1, end - firstLine - 1).Trim();
         }
 
-        private static string Context(EditorContext editor, string key)
+        internal static string Context(EditorContext editor, string key)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var reply = EngineProcess.Shared.Request("schema_context", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(editor.Text));
@@ -313,14 +289,14 @@ namespace QuillSql.Vsix
             });
         });
 
-        private static PlanTarget Target(string key, string sql)
+        internal static PlanTarget Target(string key, string sql)
         {
             var reply = EngineProcess.Shared.Request("plan_target", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(sql));
             var parsed = reply == null ? null : Json.Parse<PlanTargetReply>(reply);
             return parsed?.Result ?? throw new InvalidOperationException(parsed?.Error ?? "the engine did not answer");
         }
 
-        private static string Summarize(IList<string> plans, int maxLines)
+        internal static string Summarize(IList<string> plans, int maxLines)
         {
             if (plans.Count == 0)
             {
@@ -331,147 +307,20 @@ namespace QuillSql.Vsix
             return (reply == null ? null : Json.Parse<TextReply>(reply)?.Result?.Text) ?? "(the plan could not be summarized)";
         }
 
-        /// <summary>
-        /// Reads the indexes and the execution plan of the selection or script and asks Claude where
-        /// the time goes. With `actual`, runs the script (read-only scripts only, after asking).
-        /// </summary>
-        public static void AnalyzePlan(AsyncPackage package, bool actual) => Commands.Run("Analyze plan with AI", () =>
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            var editor = EditorContext.Active();
-            var connection = ConnectionResolver.TryGetActive();
-            if (editor == null || connection == null || !connection.CanQuery)
-            {
-                EditorContext.Status("open a query window connected with Windows or SQL Server authentication first.");
-                return;
-            }
-            var key = Commands.MetadataKey(out _);
-            var sql = editor.HasSelection ? editor.Text.Substring(editor.SelectionStart, editor.SelectionEnd - editor.SelectionStart) : editor.Text;
-            var target = Target(key, sql);
-            if (actual)
-            {
-                if (target.WriteReason != null)
-                {
-                    EditorContext.Status("not run for an actual plan because " + target.WriteReason + "; use Analyze Plan with AI (estimated) instead.");
-                    return;
-                }
-                var run = EditorContext.Confirm("Analyze Actual Plan with AI",
-                    Loc.T("Run the query on " + connection.Description + " to measure its actual plan?") + "\n\n"
-                    + Loc.T("The results are discarded. The script only reads, but it uses the server like any query."), "Run");
-                if (!run)
-                {
-                    return;
-                }
-            }
-            var schema = Context(editor, key);
-            var description = connection.Description;
-            Start(package, actual ? "analyze the actual plan" : "analyze the plan", () =>
-            {
-                var errors = new List<string>();
-                var indexes = PlanCapture.Indexes(connection, target.Objects ?? new string[0]);
-                var plans = PlanCapture.Plans(connection, target.Batches ?? new string[0], actual, errors);
-                var plan = Summarize(plans, 150);
-                var facts = "Server and database: " + description + "\n\nSchema:\n" + schema
-                    + "\nTables, row counts and indexes:\n" + indexes
-                    + "\n" + (actual ? "Actual" : "Estimated") + " execution plan:\n" + plan
-                    + (errors.Count == 0 ? "" : "\n\nErrors while getting the plan:\n" + string.Join("\n", errors));
-                ThreadHelper.JoinableTaskFactory.Run(async () =>
-                {
-                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                    Commands.WriteOutput(new[] { "Sent to Claude for plan analysis:", facts });
-                });
-                return StripFence(Ask(PlanAnalyst, "Analyze the performance of this SQL.\n\nSQL:\n" + sql + "\n\n" + facts));
-            }, answer =>
-            {
-                ThreadHelper.ThrowIfNotOnUIThread();
-                EditorContext.OpenInNewQuery(answer + Environment.NewLine);
-                EditorContext.Status("Claude's plan analysis opened in a new window; what it was given is in the Output window.");
-            });
-        });
+        /// <summary>Analyzes the plan of the selection or script in the AI chat; `actual` runs it first, after asking.</summary>
+        public static void AnalyzePlan(AsyncPackage package, bool actual) => AiChatPane.Start(package,
+            actual ? "Analyze the actual execution plan of this query: where does the time go, and what should I change?"
+                   : "Analyze the execution plan of this query: where does the cost go, and what should I change?",
+            ChatAttach.Query | ChatAttach.Schema | (actual ? ChatAttach.ActualPlan : ChatAttach.EstimatedPlan));
 
-        /// <summary>Query Store's most expensive queries of the last week, with their plans, reviewed by Claude.</summary>
-        public static void ReviewSlowQueries(AsyncPackage package) => Commands.Run("Find slow queries with AI", () =>
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            var connection = ConnectionResolver.TryGetActive();
-            if (connection == null || !connection.CanQuery)
-            {
-                EditorContext.Status("open a query window connected with Windows or SQL Server authentication first.");
-                return;
-            }
-            var key = Commands.MetadataKey(out _);
-            var description = connection.Description;
-            Start(package, "review the slowest queries", () =>
-            {
-                var queries = PlanCapture.QueryStore(connection, 7, 10);
-                if (queries.Count == 0)
-                {
-                    throw new InvalidOperationException("Query Store has no queries from the last 7 days.");
-                }
-                var all = string.Join("\n;\n", queries.Select(q => q.Text));
-                var target = Target(key, all);
-                var indexes = PlanCapture.Indexes(connection, target.Objects ?? new string[0]);
-                var report = new StringBuilder("Server and database: " + description + "\n\nMost expensive queries of the last 7 days (Query Store):\n");
-                for (var i = 0; i < queries.Count; i++)
-                {
-                    report.Append("\n").Append(i + 1).Append(". ").Append(PlanCapture.Describe(queries[i])).Append('\n');
-                    if (i < 3 && queries[i].WorstPlanXml != null)
-                    {
-                        report.Append("Slowest plan of this query:\n").Append(Summarize(new[] { queries[i].WorstPlanXml }, 40)).Append('\n');
-                    }
-                }
-                report.Append("\nTables, row counts and indexes:\n").Append(indexes);
-                var facts = report.ToString();
-                ThreadHelper.JoinableTaskFactory.Run(async () =>
-                {
-                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                    Commands.WriteOutput(new[] { "Sent to Claude for workload review:", facts });
-                });
-                return StripFence(Ask(WorkloadAnalyst, facts));
-            }, answer =>
-            {
-                ThreadHelper.ThrowIfNotOnUIThread();
-                EditorContext.OpenInNewQuery(answer + Environment.NewLine);
-                EditorContext.Status("Claude's review of the slowest queries opened in a new window; the data is in the Output window.");
-            });
-        });
+        /// <summary>Query Store's most expensive queries of the last week, discussed in the AI chat.</summary>
+        public static void ReviewSlowQueries(AsyncPackage package) => AiChatPane.Start(package,
+            "Which queries cost the most in the last 7 days, and what should I fix first?", ChatAttach.QueryStore);
 
-        public static void Explain(AsyncPackage package) => Commands.Run("Explain with AI", () =>
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            var editor = EditorContext.Active();
-            if (editor == null)
-            {
-                EditorContext.Status("open a query window first.");
-                return;
-            }
-            var sql = editor.HasSelection ? editor.Text.Substring(editor.SelectionStart, editor.SelectionEnd - editor.SelectionStart) : editor.Text;
-            var input = "Explain this SQL.\n\nSchema:\n" + Context(editor, Commands.MetadataKey(out _)) + "\nSQL:\n" + sql;
-            Start(package, "explain the SQL", () => Ask(Explainer, input), answer =>
-            {
-                ThreadHelper.ThrowIfNotOnUIThread();
-                Commands.WriteOutput(new[] { "Claude's explanation:", answer.Trim() });
-                EditorContext.Status("explanation is in the Output window.");
-            });
-        });
+        public static void Explain(AsyncPackage package) => AiChatPane.Start(package,
+            "Explain what this query does, step by step, and any risks you see.", ChatAttach.Query | ChatAttach.Schema);
 
-        public static void Review(AsyncPackage package) => Commands.Run("Review with AI", () =>
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            var editor = EditorContext.Active();
-            if (editor == null)
-            {
-                EditorContext.Status("open a query window first.");
-                return;
-            }
-            var sql = editor.HasSelection ? editor.Text.Substring(editor.SelectionStart, editor.SelectionEnd - editor.SelectionStart) : editor.Text;
-            var input = "Review and improve this SQL.\n\nSchema:\n" + Context(editor, Commands.MetadataKey(out _)) + "\nSQL:\n" + sql;
-            Start(package, "review the SQL", () => StripFence(Ask(Reviewer, input)), answer =>
-            {
-                ThreadHelper.ThrowIfNotOnUIThread();
-                EditorContext.OpenInNewQuery(answer + Environment.NewLine);
-                EditorContext.Status("Claude's review opened in a new window.");
-            });
-        });
+        public static void Review(AsyncPackage package) => AiChatPane.Start(package,
+            "Review this query for correctness and performance, and suggest an improved version.", ChatAttach.Query | ChatAttach.Schema);
     }
 }

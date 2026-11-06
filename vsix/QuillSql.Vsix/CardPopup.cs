@@ -87,24 +87,12 @@ namespace QuillSql.Vsix
                 await TaskScheduler.Default;
                 var at = EngineProcess.Shared.Request("object_at", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + position);
                 var found = at == null ? null : Json.Parse<ObjectAtReply>(at)?.Result;
-                ObjectDetails details = null;
-                if (found != null)
-                {
-                    try
-                    {
-                        details = ObjectScripts.Load(target, found.Schema + "." + found.Name);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error("reading object details", ex);
-                    }
-                }
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                 if (view.IsClosed || view.TextSnapshot != snapshot)
                 {
                     return;
                 }
-                if (details == null)
+                if (found == null)
                 {
                     notFound();
                     return;
@@ -119,18 +107,45 @@ namespace QuillSql.Vsix
                 {
                     end++;
                 }
+                // Show the title at once; a large table or a remote server can take a while to describe.
+                var fullName = found.Schema + "." + found.Name;
+                var details = ObjectScripts.Cached(target, fullName);
+                var frame = Open(view, details != null ? ObjectScripts.Card(details) : ObjectScripts.Loading(found.Schema, found.Name, found.Kind), new Span(start, end - start), mouse);
+                if (details == null)
+                {
+                    await TaskScheduler.Default;
+                    try
+                    {
+                        details = ObjectScripts.Load(target, fullName);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error("reading object details", ex);
+                    }
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    if (frame == null || _open?.Child != frame)
+                    {
+                        return;
+                    }
+                    if (details == null)
+                    {
+                        Close();
+                        notFound();
+                        return;
+                    }
+                    frame.Child = ObjectScripts.Card(details);
+                }
                 Log.Verbose("object card: " + details.FullName + "; " + ObjectScripts.StorageLine(details));
-                Open(view, ObjectScripts.Card(details), new Span(start, end - start), mouse);
             }).FileAndForget("quillsql/objectcard");
         }
 
-        private static void Open(IWpfTextView view, UIElement card, Span span, bool mouse)
+        private static Border Open(IWpfTextView view, UIElement card, Span span, bool mouse)
         {
             Close();
             var line = view.TextViewLines?.GetTextViewLineContainingBufferPosition(new SnapshotPoint(view.TextSnapshot, span.Start));
             if (line == null)
             {
-                return;
+                return null;
             }
             var left = mouse ? line.GetCharacterBounds(new SnapshotPoint(view.TextSnapshot, span.Start)).Left : view.Caret.Left;
             var frame = new Border { Child = card, BorderThickness = new Thickness(1), Padding = new Thickness(10, 8, 10, 8) };
@@ -193,6 +208,7 @@ namespace QuillSql.Vsix
             _open = popup;
             _openSpan = span;
             popup.IsOpen = true;
+            return frame;
         }
     }
 }

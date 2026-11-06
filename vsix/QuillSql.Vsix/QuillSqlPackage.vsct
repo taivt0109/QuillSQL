@@ -191,6 +191,18 @@
           <LocCanonicalName>.QuillSQL.QueryHistory</LocCanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidQuillSqlCmdSet" id="AiChatCommandId" priority="0x0090" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <Icon guid="ImageCatalogGuid" id="Comment" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <CommandFlag>IconAndText</CommandFlag>
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>AI Chat</ButtonText>
+          <CanonicalName>.QuillSQL.AIChat</CanonicalName>
+          <LocCanonicalName>.QuillSQL.AIChat</LocCanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidQuillSqlCmdSet" id="AskAiCommandId" priority="0x0100" type="Button">
         <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
         <CommandFlag>TextChanges</CommandFlag>
@@ -471,6 +483,9 @@
     <CommandPlacement guid="guidQuillSqlCmdSet" id="HistoryCommandId" priority="0x0100">
       <Parent guid="guidQuillSqlCmdSet" id="ToolbarGroup" />
     </CommandPlacement>
+    <CommandPlacement guid="guidQuillSqlCmdSet" id="AiChatCommandId" priority="0x0200">
+      <Parent guid="guidQuillSqlCmdSet" id="ToolbarGroup" />
+    </CommandPlacement>
   </CommandPlacements>
 
   <KeyBindings>
@@ -492,6 +507,7 @@
     <KeyBinding guid="guidQuillSqlCmdSet" id="AnalyzeCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="A" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="FixIssuesCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="F" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="HistoryCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="H" mod2="Control" />
+    <KeyBinding guid="guidQuillSqlCmdSet" id="AiChatCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="I" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="AskAiCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="G" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="PlanAiCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="P" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="FormatCommandId" editor="guidVSStd97" key1="K" mod1="Control" key2="Y" mod2="Control" />
@@ -538,6 +554,7 @@
       <IDSymbol name="OptionsCommandId" value="0x0134" />
       <IDSymbol name="LogFolderCommandId" value="0x0135" />
       <IDSymbol name="ShowCardCommandId" value="0x0136" />
+      <IDSymbol name="AiChatCommandId" value="0x0137" />
       <IDSymbol name="TextGroup" value="0x1030" />
       <IDSymbol name="RunGroup" value="0x1031" />
       <IDSymbol name="TabGroup" value="0x1032" />

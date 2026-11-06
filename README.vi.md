@@ -100,6 +100,7 @@ SSMS không cho thay extension khi đang chạy, nên bản cập nhật đượ
 | Ctrl+B, Ctrl+S | Chèn snippet |
 | Ctrl+B, Ctrl+A / Ctrl+B, Ctrl+F | Phân tích code / sửa lỗi code |
 | Ctrl+B, Ctrl+H | Lịch sử query |
+| Ctrl+B, Ctrl+I | Khung chat AI |
 | Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Hỏi AI / phân tích plan bằng AI |
 | Ctrl+B, Ctrl+O | Tùy chọn |
 
@@ -239,14 +240,21 @@ Mỗi rule có một mã cố định; tiền tố cho biết loại rule:
 
 Các lệnh này dùng Claude Code CLI trên máy bạn. Mọi tool của Claude đều bị tắt, nên Claude chỉ có thể trả lời, không làm gì khác trên máy.
 
-- **Ask AI...:** viết SQL từ một yêu cầu ("10 khách hàng có tổng đơn hàng cao nhất năm nay"), hoặc viết lại đoạn đang chọn ("thêm phân trang"). Kết quả được chèn vào và chọn sẵn; một lần Undo là bỏ.
-- **Explain with AI:** giải thích đoạn đang chọn hoặc cả script, hiện trong cửa sổ Output.
-- **Review with AI:** liệt kê vấn đề và đưa ra script đã cải thiện, trong một cửa sổ mới.
-- **Analyze Plan with AI:** đọc số dòng, dung lượng, index và ngày cập nhật statistics của các bảng mà query dùng, cùng estimated execution plan (chỉ biên dịch, không chạy query). Sau đó hỏi Claude chi phí nằm ở đâu và nên sửa gì.
-- **Analyze Actual Plan with AI (runs the query)...:** như trên nhưng dùng số liệu đo thật (số dòng, số lần đọc, thời gian của từng bước). Lệnh này chạy query rồi bỏ kết quả, nên chỉ nhận script chỉ đọc và hỏi bạn trước khi chạy.
-- **Find Slow Queries with AI (Query Store):** lấy 10 query tốn nhất trong 7 ngày qua, plan của các query chậm nhất và index của các bảng liên quan, rồi nhờ Claude đề xuất những thay đổi có tác động lớn nhất.
+**AI Chat** (Ctrl+B, Ctrl+I, hoặc nút trên toolbar Standard) là khung nằm cạnh cửa sổ query để trò chuyện theo từng chủ đề: hỏi rồi hỏi tiếp, Claude nhớ những gì đã nói.
 
-Các lệnh phân tích plan hiện toàn bộ dữ liệu gửi cho Claude trong cửa sổ Output.
+- Dưới ô nhập, chọn thứ cần gửi kèm câu hỏi: **query** (hoặc đoạn đang chọn), **cấu trúc bảng**, **plan ước tính** hoặc **plan thực tế** (kèm số dòng và index), hoặc **query chậm** từ Query Store. Bấm **Xem dữ liệu đã gửi** dưới tin nhắn của bạn để thấy chính xác Claude nhận được gì.
+- Câu trả lời hiện dần trong lúc Claude viết. Mỗi khối SQL có nút **Chèn vào editor** (tại con trỏ, bôi đen sẵn, một lần Undo là bỏ), **Mở cửa sổ mới** và **Copy**. Dưới câu trả lời cuối có các câu hỏi gợi ý; bấm vào là hỏi.
+- **Chat mới** mở chủ đề khác; **Lịch sử** mở lại cuộc trò chuyện cũ để hỏi tiếp. Lịch sử chat lưu trong `%LOCALAPPDATA%\QuillSQL\chats`.
+- Enter để gửi, Shift+Enter xuống dòng, Esc để dừng câu trả lời.
+
+Các lệnh dưới đây mở chủ đề mới trong khung chat, gửi kèm sẵn dữ liệu phù hợp, để bạn hỏi tiếp:
+
+- **Explain with AI** và **Review with AI:** đoạn đang chọn hoặc cả script, cùng các bảng nó dùng.
+- **Analyze Plan with AI:** số dòng, dung lượng, index và ngày cập nhật statistics của các bảng mà query dùng, cùng estimated execution plan (chỉ biên dịch, không chạy query).
+- **Analyze Actual Plan with AI (runs the query)...:** như trên nhưng dùng số liệu đo thật (số dòng, số lần đọc, thời gian của từng bước). Lệnh này chạy query rồi bỏ kết quả, nên chỉ nhận script chỉ đọc và hỏi bạn trước khi chạy.
+- **Find Slow Queries with AI (Query Store):** 10 query tốn nhất trong 7 ngày qua, plan của các query chậm nhất và index của các bảng liên quan.
+
+**Ask AI...** (Ctrl+B, Ctrl+G) viết SQL từ một yêu cầu ("10 khách hàng có tổng đơn hàng cao nhất năm nay"), hoặc viết lại đoạn đang chọn ("thêm phân trang"), chèn thẳng vào editor và bôi đen sẵn; một lần Undo là bỏ.
 
 Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ `{ "model": "sonnet", "language": "Vietnamese" }`. `language` là ngôn ngữ của phần giải thích và comment.
 

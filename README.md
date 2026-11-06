@@ -91,6 +91,7 @@ daily check off, create `%LOCALAPPDATA%\QuillSQL\settings.json` containing
 | Ctrl+B, Ctrl+S | Insert snippet |
 | Ctrl+B, Ctrl+A / Ctrl+B, Ctrl+F | Analyze code / fix code issues |
 | Ctrl+B, Ctrl+H | Query history |
+| Ctrl+B, Ctrl+I | AI Chat |
 | Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Ask AI / analyze the plan with AI |
 | Ctrl+B, Ctrl+O | Options |
 
@@ -216,22 +217,37 @@ execution issue, MI miscellaneous, PE performance, ST style, SC script. `RULES` 
 ### AI with Claude
 
 These commands use the Claude Code CLI on your machine, with all of Claude's tools turned off so
-it can only answer:
+it can only answer.
 
-- **Ask AI...**: write SQL from a request ("top 10 customers by order total this year"), or
-  rewrite the selection ("add paging"). The result is inserted and selected, as one Undo step.
-- **Explain with AI**: an explanation of the selection or script in the Output window.
-- **Review with AI**: problems found and an improved script, in a new window.
-- **Analyze Plan with AI**: reads the row counts, sizes, indexes and statistics dates of the
-  tables the query uses, and its estimated execution plan (compiled, never run), then asks Claude
-  where the cost goes and what to change.
+**AI Chat** (Ctrl+B, Ctrl+I, or the button on the Standard toolbar) is a panel beside the query
+windows for a conversation on one topic: ask, then keep asking, and Claude remembers what was said.
+
+- Under the box, choose what to send with the question: the **query** (or the selection),
+  **table definitions**, the **estimated plan** or the **actual plan** (with row counts and
+  indexes), or the **slow queries** from Query Store. **Show what was sent** under your message
+  shows exactly what Claude received.
+- Answers stream in as they are written. Each SQL block has **Insert into editor** (at the caret,
+  selected, one Undo step), **Open in new window** and **Copy**. Suggested next questions appear
+  under the last answer; click one to ask it.
+- **New chat** starts another topic; **History** reopens an earlier one to continue it. Chats
+  are kept in `%LOCALAPPDATA%\QuillSQL\chats`.
+- Enter sends, Shift+Enter starts a new line, Esc stops an answer.
+
+The commands below start a new topic in the chat with the right context, so you can ask follow-up
+questions:
+
+- **Explain with AI** and **Review with AI**: the selection or script and its tables.
+- **Analyze Plan with AI**: the row counts, sizes, indexes and statistics dates of the tables the
+  query uses, and its estimated execution plan (compiled, never run).
 - **Analyze Actual Plan with AI (runs the query)...**: the same with measured rows, reads and time
   per operator. It runs the query and discards the results, so it only accepts read-only scripts
   and asks you first.
 - **Find Slow Queries with AI (Query Store)**: the 10 most expensive queries of the last 7 days,
-  the plans of the slowest, and their tables' indexes, reviewed for the fixes with most impact.
+  the plans of the slowest, and their tables' indexes.
 
-The plan commands show everything they send in the Output window. Optional settings in
+**Ask AI...** (Ctrl+B, Ctrl+G) writes SQL from a request ("top 10 customers by order total this
+year"), or rewrites the selection ("add paging"), straight into the editor, selected, as one Undo
+step. Optional settings in
 `%LOCALAPPDATA%\QuillSQL\ai.json`: `{ "model": "sonnet", "language": "English" }`, where
 `language` is the language of explanations and comments.
 
