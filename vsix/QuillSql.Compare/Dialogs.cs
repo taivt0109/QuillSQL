@@ -52,6 +52,37 @@ namespace QuillSql.Compare
             }
             return owner != null ? d.ShowDialog(owner) : d.ShowDialog();
         }
+        private static readonly List<WeakReference<ContextMenu>> Menus = new List<WeakReference<ContextMenu>>();
+        private static System.Windows.Threading.DispatcherTimer _menuTimer;
+
+        /// <summary>
+        /// A context menu UI tests can use without a mouse or keyboard: with QUILL_TEST_DIALOGS set,
+        /// the text of `menu.txt` in that folder names a menu item to click (the file is removed).
+        /// </summary>
+        public static void RegisterMenu(ContextMenu menu)
+        {
+            var folder = Environment.GetEnvironmentVariable("QUILL_TEST_DIALOGS");
+            if (string.IsNullOrEmpty(folder)) return;
+            Menus.Add(new WeakReference<ContextMenu>(menu));
+            if (_menuTimer != null) return;
+            _menuTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _menuTimer.Tick += (s, e) =>
+            {
+                var file = Path.Combine(folder, "menu.txt");
+                if (!File.Exists(file)) return;
+                var name = File.ReadAllText(file).Trim();
+                File.Delete(file);
+                foreach (var weak in Menus)
+                {
+                    if (!weak.TryGetTarget(out var m) || !(m.PlacementTarget is UIElement target ? target.IsVisible : true)) continue;
+                    var item = m.Items.OfType<MenuItem>().FirstOrDefault(i => (i.Header as string) == name && i.IsEnabled);
+                    if (item == null) continue;
+                    item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    return;
+                }
+            };
+            _menuTimer.Start();
+        }
         /// <summary>A folder chosen through a save dialog (WPF has no folder picker).</summary>
         public static string PickFolder(Window owner, string start, string title)
         {
@@ -497,6 +528,7 @@ namespace QuillSql.Compare
             menu.Items.Add(Ui.MenuItem("Compare now", () => finish(true), Glyph.Play));
             menu.Items.Add(Ui.MenuItem("Edit project", () => finish(false), Glyph.Edit));
             grid.ContextMenu = menu;
+            RegisterMenu(menu);
             CompareTheme.Attach(menu);
             var newMenu = new ContextMenu();
             newMenu.Items.Add(Ui.MenuItem("Schema comparison", () => { choice = new ProjectChoice { NewData = false }; w.Close(); }, Glyph.List));

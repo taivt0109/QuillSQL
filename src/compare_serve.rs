@@ -447,6 +447,12 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 "targetSchemas": db2.schemas.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
             }))
         }
+        // The Table mapping and Owner mapping tabs: what pairs with what, what the user mapped,
+        // and what is left on each side. An empty target in a mapping unmaps a default pair.
+        "mapping_preview" => {
+            let project: Project = field(request, "project")?;
+            mapping_preview(&project, progress)
+        }
         "data_compare" => {
             let project: Project = field(request, "project")?;
             let opts = data_options(&project)?;
@@ -757,6 +763,88 @@ fn backup_into(request: &Value, target: &SourceSpec, script: &mut DeploymentScri
     }
     schema::backup::Plan { options: &o, database: &spec.database, utc: schema::backup::utc_stamp(), caps: &caps }.add_to(script);
     Ok(())
+}
+
+fn mapping_preview(project: &Project, progress: &dyn Fn(&str)) -> Result<Value, String> {
+    let data = project.kind == crate::project::ProjectKind::Data;
+    let (decrypt, case_sensitive) = if data {
+        (false, data_options(project)?.has(DataOpt::CaseSensitiveObjectDefinition))
+    } else {
+        let o = schema_options(project)?;
+        (o.has(Opt::DecryptPost2kEncryptedObjects), o.has(Opt::CaseSensitiveObjectDefinition))
+    };
+    let db1 = load_side(&project.source, 1, decrypt, progress)?;
+    let db2 = if project.target.is_empty_database() { Database::default() } else { load_side(&project.target, 2, decrypt, progress)? };
+    let key = |s: &str| if case_sensitive { s.to_string() } else { s.to_lowercase() };
+    let same = |a: &str, b: &str| key(a) == key(b);
+
+    // Owners: the user's mappings, then by name.
+    let user_schemas = if data { &project.data_mappings.schemas } else { &project.schema_mappings.schemas };
+    let (left, right): (Vec<&str>, Vec<&str>) = (db1.schemas.iter().map(|s| s.name.as_str()).collect(), db2.schemas.iter().map(|s| s.name.as_str()).collect());
+    let mut used = vec![false; right.len()];
+    let mut owners = Vec::new();
+    let mut owners1 = Vec::new();
+    for l in &left {
+        let user = user_schemas.iter().find(|(a, _)| same(a, l));
+        let want = user.map(|(_, b)| b.as_str()).unwrap_or(l);
+        match right.iter().position(|r| !want.is_empty() && same(r, want)) {
+            Some(j) if !used[j] => {
+                used[j] = true;
+                owners.push(json!({"source": l, "target": right[j], "user": user.is_some()}));
+            }
+            _ => owners1.push(json!(l)),
+        }
+    }
+    let owners2: Vec<Value> = right.iter().enumerate().filter(|(j, _)| !used[*j]).map(|(_, r)| json!(r)).collect();
+    let target_schema = |s: &str| user_schemas.iter().find(|(a, _)| same(a, s)).map(|(_, b)| b.clone()).unwrap_or_else(|| s.to_string());
+
+    let columns_of = |db: &Database, n: &ObjectName| db.table(&n.schema, &n.name).map(|t| t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    let mut tables = Vec::new();
+    let (only1, only2): (Vec<ObjectName>, Vec<ObjectName>);
+    if data {
+        let opts = data_options(project)?;
+        let (pairs, o1, o2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
+        for p in &pairs {
+            let user = project.data_mappings.tables.iter().any(|t| t.source == p.source && t.target.as_ref().is_some_and(|x| !x.name.is_empty()));
+            let explicit = project.data_mappings.tables.iter().find(|t| t.source == p.source).map(|t| t.columns.clone()).unwrap_or_default();
+            let cols: Vec<Value> = p.columns.iter().map(|c| json!({"source": c.source, "target": c.target, "auto": !explicit.iter().any(|(a, _)| a == &c.source) && !c.source.eq_ignore_ascii_case(&c.target)})).collect();
+            tables.push(json!({"source": p.source, "target": p.target, "user": user, "isView": p.is_view, "columns": cols,
+                "sourceColumns": columns_of(&db1, &p.source), "targetColumns": columns_of(&db2, &p.target)}));
+        }
+        (only1, only2) = (o1, o2);
+    } else {
+        // As schema::compare pairs tables, with the columns "Auto-map similar columns" pairs.
+        let auto = schema::compare(&db1, &db2, &schema_options(project)?, &project.schema_mappings).auto_mapped_columns;
+        let mut matched = vec![false; db2.tables.len()];
+        let mut alone = Vec::new();
+        for t1 in db1.tables.iter().filter(|t| !t.history_table) {
+            let n1 = t1.object_name();
+            let mapping = project.schema_mappings.tables.iter().find(|m| same(&m.source.schema, &t1.schema) && same(&m.source.name, &t1.name));
+            let (schema, name) = match mapping {
+                Some(m) => (m.target.schema.clone(), m.target.name.clone()),
+                None => (target_schema(&t1.schema), t1.name.clone()),
+            };
+            let found = db2.tables.iter().position(|t| !name.is_empty() && !t.history_table && same(&t.schema, &schema) && same(&t.name, &name));
+            match found {
+                Some(j) => {
+                    matched[j] = true;
+                    let n2 = db2.tables[j].object_name();
+                    let explicit = mapping.map(|m| m.columns.clone()).unwrap_or_default();
+                    let mut cols: Vec<Value> = explicit.iter().map(|(a, b)| json!({"source": a, "target": b, "auto": false})).collect();
+                    cols.extend(auto.iter().filter(|(t, _, _)| *t == n1).map(|(_, a, b)| json!({"source": a, "target": b, "auto": true})));
+                    tables.push(json!({"source": n1, "target": n2, "user": mapping.is_some(), "columns": cols,
+                        "sourceColumns": columns_of(&db1, &n1), "targetColumns": columns_of(&db2, &n2)}));
+                }
+                None => alone.push(n1),
+            }
+        }
+        only1 = alone;
+        only2 = db2.tables.iter().enumerate().filter(|(j, t)| !matched[*j] && !t.history_table).map(|(_, t)| t.object_name()).collect();
+    }
+    Ok(json!({
+        "owners": {"mapped": owners, "only1": owners1, "only2": owners2},
+        "tables": {"mapped": tables, "only1": only1, "only2": only2},
+    }))
 }
 
 /// The `data_rows` kind that lists every stored row.
@@ -1281,6 +1369,29 @@ mod tests {
         handle(&mut state, &json!({"op": "project_export", "path": scp, "project": filtered_project}), &none).unwrap();
         let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
         assert!(back["filter"].as_str().unwrap().contains("Cust%"));
+
+        // Mapping tabs: the default pairs, then a user mapping and an unmapped default pair.
+        let m = handle(&mut state, &json!({"op": "mapping_preview", "project": project}), &none).unwrap();
+        assert_eq!(m["tables"]["mapped"].as_array().unwrap().len(), 1, "{m}");
+        assert_eq!(m["tables"]["mapped"][0]["user"], false);
+        assert_eq!(m["tables"]["only1"][0]["name"], "Customer");
+        let mut remapped = project.clone();
+        remapped["schemaMappings"] = json!({"tables": [
+            {"source": {"schema": "dbo", "name": "Customer"}, "target": {"schema": "dbo", "name": "Customers"}},
+            {"source": {"schema": "dbo", "name": "Orders"}, "target": {"schema": "", "name": ""}},
+        ]});
+        let m = handle(&mut state, &json!({"op": "mapping_preview", "project": remapped}), &none).unwrap();
+        assert_eq!(m["tables"]["mapped"][0]["target"]["name"], "Customers");
+        assert_eq!(m["tables"]["mapped"][0]["user"], true);
+        assert_eq!((m["tables"]["only1"][0]["name"].as_str(), m["tables"]["only2"][0]["name"].as_str()), (Some("Orders"), Some("Orders")));
+        let r = handle(&mut state, &json!({"op": "schema_compare", "project": remapped}), &none).unwrap();
+        let kinds: Vec<&str> = r["differences"].as_array().unwrap().iter().filter(|d| d["name"] == "Orders").map(|d| d["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["OnlyIn1", "OnlyIn2"]);
+        handle(&mut state, &json!({"op": "project_export", "path": scp, "project": remapped}), &none).unwrap();
+        let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
+        let tables = back["schemaMappings"]["tables"].as_array().unwrap();
+        assert!(tables.iter().any(|t| t["source"]["name"] == "Customer" && t["target"]["name"] == "Customers"), "{back}");
+        assert!(tables.iter().any(|t| t["source"]["name"] == "Orders" && t["target"]["name"] == ""), "{back}");
         std::fs::remove_dir_all(dir).ok();
     }
 

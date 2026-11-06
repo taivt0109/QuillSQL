@@ -330,11 +330,36 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
                     let (_, b) = side(&text_of(ev, "Table2"));
                     if let (Some(a), Some(b)) = (a, b) {
                         match kind {
-                            ProjectKind::Schema => p.schema_mappings.tables.push(TableMapping { source: a, target: b, columns: Vec::new() }),
-                            ProjectKind::Data => {
-                                p.data_mappings.tables.push(TableOverride { source: a, target: Some(b), ..Default::default() })
+                            ProjectKind::Schema => {
+                                p.schema_mappings.tables.retain(|m| m.source != a);
+                                p.schema_mappings.tables.push(TableMapping { source: a, target: b, columns: Vec::new() })
+                            }
+                            ProjectKind::Data => entry(&mut p.data_mappings, &a).target = Some(b),
+                        }
+                    }
+                }
+                // A default pair broken up: the source table is left unmapped (an empty target).
+                "UnmapTables" => {
+                    let (Some(a), _) = side(&text_of(ev, "val")) else { continue };
+                    match kind {
+                        ProjectKind::Schema => {
+                            if !p.schema_mappings.tables.iter().any(|m| m.source == a) {
+                                p.schema_mappings.tables.push(TableMapping { source: a, target: ObjectName::default(), columns: Vec::new() });
                             }
                         }
+                        ProjectKind::Data => {
+                            let e = entry(&mut p.data_mappings, &a);
+                            if e.target.is_none() {
+                                e.target = Some(ObjectName::default());
+                            }
+                        }
+                    }
+                }
+                "UnmapOwners" => {
+                    let owner = text_of(ev, "val");
+                    let list = if kind == ProjectKind::Schema { &mut p.schema_mappings.schemas } else { &mut p.data_mappings.schemas };
+                    if !owner.is_empty() && !list.iter().any(|(a, _)| *a == owner) {
+                        list.push((owner, String::new()));
                     }
                 }
                 "MapOwners" => match kind {
@@ -567,10 +592,24 @@ pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
     x.value("ComparisonOptions", &bits(COMPARISON_BITS, 0));
 
     let mut actions: Vec<Vec<(&str, String)>> = Vec::new();
-    for (a, b) in &p.schema_mappings.schemas {
+    // Unmapping (an empty target) is SQL Compare's UnmapOwners / UnmapTables of the default pair.
+    let owners = if p.kind == ProjectKind::Data { &p.data_mappings.schemas } else { &p.schema_mappings.schemas };
+    for (a, _) in owners.iter().filter(|(_, b)| b.is_empty()) {
+        actions.push(vec![("action", "UnmapOwners".into()), ("val", a.clone())]);
+    }
+    let mapped_schema = |s: &str| owners.iter().find(|(a, _)| a == s).map(|(_, b)| b.clone()).filter(|b| !b.is_empty()).unwrap_or_else(|| s.to_string());
+    let unmap = |n: &ObjectName| vec![("action", "UnmapTables".into()), ("val", format!("{}:{}", quote_name(n), quote_name(&ObjectName::new(&mapped_schema(&n.schema), &n.name))))];
+    for t in p.schema_mappings.tables.iter().filter(|t| t.target.name.is_empty()) {
+        actions.push(unmap(&t.source));
+    }
+    for t in p.data_mappings.tables.iter().filter(|t| t.target.as_ref().is_some_and(|x| x.name.is_empty())) {
+        actions.push(unmap(&t.source));
+    }
+    let data_owners = if p.kind == ProjectKind::Data { p.data_mappings.schemas.as_slice() } else { &[] };
+    for (a, b) in p.schema_mappings.schemas.iter().chain(data_owners).filter(|(_, b)| !b.is_empty()) {
         actions.push(vec![("action", "MapOwners".into()), ("Owner1", a.clone()), ("Owner2", b.clone())]);
     }
-    for t in &p.schema_mappings.tables {
+    for t in p.schema_mappings.tables.iter().filter(|t| !t.target.name.is_empty()) {
         actions.push(vec![("action", "MapTables".into()), ("Table1", format!("{}:null", quote_name(&t.source))), ("Table2", format!("null:{}", quote_name(&t.target)))]);
         for (c1, c2) in &t.columns {
             actions.push(vec![
@@ -584,7 +623,7 @@ pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
     }
     for t in &p.data_mappings.tables {
         let table = quote_name(&t.source);
-        if let Some(target) = &t.target {
+        if let Some(target) = t.target.as_ref().filter(|x| !x.name.is_empty()) {
             actions.push(vec![("action", "MapTables".into()), ("Table1", format!("{table}:null")), ("Table2", format!("null:{}", quote_name(target)))]);
         }
         if t.excluded {
