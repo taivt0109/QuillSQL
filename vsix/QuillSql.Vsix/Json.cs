@@ -40,6 +40,8 @@ namespace QuillSql.Vsix
             return sb.Append('"').ToString();
         }
 
+        public static string Bool(bool value) => value ? "true" : "false";
+
         public static T Parse<T>(string json) where T : class
         {
             var serializer = new DataContractJsonSerializer(typeof(T));
@@ -71,6 +73,8 @@ namespace QuillSql.Vsix
         [DataMember(Name = "insert")] public string Insert { get; set; }
         [DataMember(Name = "kind")] public string Kind { get; set; }
         [DataMember(Name = "detail")] public string Detail { get; set; }
+        /// <summary>A description of a database object, shown next to the list.</summary>
+        [DataMember(Name = "info")] public string Info { get; set; }
     }
 
     [DataContract]
@@ -199,6 +203,88 @@ namespace QuillSql.Vsix
     }
 
     [DataContract]
+    internal sealed class ObjectAtReply
+    {
+        [DataMember(Name = "result")] public ObjectRef Result { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class ObjectRef
+    {
+        [DataMember(Name = "schema")] public string Schema { get; set; }
+        [DataMember(Name = "name")] public string Name { get; set; }
+        [DataMember(Name = "kind")] public string Kind { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class OutlineReply
+    {
+        [DataMember(Name = "result")] public OutlineResult Result { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class OutlineResult
+    {
+        [DataMember(Name = "entries")] public OutlineEntry[] Entries { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class OutlineEntry
+    {
+        [DataMember(Name = "start")] public int Start { get; set; }
+        [DataMember(Name = "line")] public int Line { get; set; }
+        [DataMember(Name = "kind")] public string Kind { get; set; }
+        [DataMember(Name = "summary")] public string Summary { get; set; }
+        public override string ToString() => Line.ToString().PadLeft(5) + "  " + Kind.PadRight(18) + Summary;
+    }
+
+    [DataContract]
+    internal sealed class WarningsReply
+    {
+        [DataMember(Name = "result")] public WarningsResult Result { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class WarningsResult
+    {
+        [DataMember(Name = "warnings")] public string[] Warnings { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class RangeReply
+    {
+        [DataMember(Name = "error")] public string Error { get; set; }
+        [DataMember(Name = "result")] public TextRange2 Result { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class TextRange2
+    {
+        [DataMember(Name = "start")] public int Start { get; set; }
+        [DataMember(Name = "end")] public int End { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class RulesReply
+    {
+        [DataMember(Name = "result")] public RulesResult Result { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class RulesResult
+    {
+        [DataMember(Name = "rules")] public RuleInfo[] Rules { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class RuleInfo
+    {
+        [DataMember(Name = "code")] public string Code { get; set; }
+        [DataMember(Name = "severity")] public string Severity { get; set; }
+        [DataMember(Name = "title")] public string Title { get; set; }
+    }
+
+    [DataContract]
     internal sealed class SnippetsReply
     {
         [DataMember(Name = "result")] public SnippetsResult Result { get; set; }
@@ -215,5 +301,6 @@ namespace QuillSql.Vsix
     {
         [DataMember(Name = "prefix")] public string Prefix { get; set; }
         [DataMember(Name = "description")] public string Description { get; set; }
+        [DataMember(Name = "body")] public string Body { get; set; }
     }
 }

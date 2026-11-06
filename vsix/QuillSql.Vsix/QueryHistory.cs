@@ -80,7 +80,17 @@ namespace QuillSql.Vsix
                     return;
                 }
                 var text = editor.HasSelection ? editor.Text.Substring(editor.SelectionStart, editor.SelectionEnd - editor.SelectionStart) : editor.Text;
-                Add("executed", ConnectionResolver.TryGetActive()?.Description, EditorContext.Dte?.ActiveDocument?.Name, text);
+                var settings = Settings.Current;
+                if (settings.Enabled && settings.ExecutionWarnings && !AllowRun(text, settings))
+                {
+                    cancel = true;
+                    EditorContext.Status("the query was not run.");
+                    return;
+                }
+                if (settings.KeepHistory)
+                {
+                    Add("executed", ConnectionResolver.TryGetActive()?.Description, EditorContext.Dte?.ActiveDocument?.Name, text);
+                }
             }
             catch (Exception ex)
             {
@@ -88,12 +98,29 @@ namespace QuillSql.Vsix
             }
         }
 
+        /// <summary>Asks before running statements that change every row or drop data.</summary>
+        private static bool AllowRun(string text, Settings settings)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var reply = EngineProcess.Shared.Request("execution_warnings",
+                "\"text\":" + Json.Str(text) + ",\"truncate\":" + Json.Bool(settings.WarnTruncate) + ",\"drop\":" + Json.Bool(settings.WarnDrop));
+            var warnings = reply == null ? null : Json.Parse<WarningsReply>(reply)?.Result?.Warnings;
+            if (warnings == null || warnings.Length == 0)
+            {
+                return true;
+            }
+            var server = ConnectionResolver.TryGetActive()?.Description ?? "this server";
+            Log.Write("execution warning: " + string.Join(" | ", warnings));
+            return EditorContext.Confirm("QuillSQL: Run this query?",
+                Loc.T("On " + server + ", this script will:") + "\n\n  • " + string.Join("\n  • ", warnings.Select(Loc.T)) + "\n\n" + Loc.T("Run it anyway?"), "Run anyway", safeDefault: true);
+        }
+
         private static void OnClosing(Document document)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             try
             {
-                if (!document.Name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase) || !(document.Object("TextDocument") is TextDocument text))
+                if (!Settings.Current.KeepHistory || !document.Name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase) || !(document.Object("TextDocument") is TextDocument text))
                 {
                     return;
                 }
@@ -180,59 +207,64 @@ namespace QuillSql.Vsix
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var all = Load();
-            var search = new TextBox { Margin = new Thickness(0, 0, 0, 6) };
-            var list = new ListBox { FontFamily = new System.Windows.Media.FontFamily("Consolas"), FontSize = 12 };
+            var search = new TextBox { MinHeight = 28 };
+            var list = Theme.List(new Thickness(10, 6, 10, 6));
+            list.ItemTemplate = EntryTemplate();
             var preview = new TextBox
             {
                 IsReadOnly = true,
-                FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+                FontFamily = Theme.Mono,
                 FontSize = 12,
+                Padding = new Thickness(6),
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
                 AcceptsReturn = true,
             };
-            var open = new Button { Content = "Open in New Query", MinWidth = 130, Margin = new Thickness(0, 0, 8, 0) };
-            var copy = new Button { Content = "Copy", MinWidth = 80, Margin = new Thickness(0, 0, 8, 0) };
-            var close = new Button { Content = "Close", MinWidth = 80, IsCancel = true };
-            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
-            buttons.Children.Add(open);
-            buttons.Children.Add(copy);
-            buttons.Children.Add(close);
+            var open = Theme.DialogButton(Loc.T("Open in New Query"), isDefault: true);
+            var copy = Theme.DialogButton(Loc.T("Copy"));
+            var close = Theme.DialogButton(Loc.T("Close"), isCancel: true);
+            var count = new TextBlock { Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center };
 
-            var grid = new Grid { Margin = new Thickness(10) };
+            var splitter = new GridSplitter { Height = 8, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Center, Background = System.Windows.Media.Brushes.Transparent, ResizeBehavior = GridResizeBehavior.PreviousAndNext };
+            var grid = new Grid { Margin = new Thickness(16, 16, 16, 12) };
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1.2, GridUnitType.Star), MinHeight = 80 });
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            Grid.SetRow(search, 0);
+            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 60 });
+            var searchBox = Theme.SearchBox(search, Loc.T("Search query text and connections"));
+            searchBox.Margin = new Thickness(0, 0, 0, 10);
+            Grid.SetRow(searchBox, 0);
             Grid.SetRow(list, 1);
-            Grid.SetRow(preview, 2);
-            Grid.SetRow(buttons, 3);
-            preview.Margin = new Thickness(0, 6, 0, 0);
-            grid.Children.Add(search);
+            Grid.SetRow(splitter, 2);
+            Grid.SetRow(preview, 3);
+            grid.Children.Add(searchBox);
             grid.Children.Add(list);
+            grid.Children.Add(splitter);
             grid.Children.Add(preview);
-            grid.Children.Add(buttons);
+            var root = new DockPanel();
+            var footer = Theme.Footer(count, open, copy, close);
+            DockPanel.SetDock(footer, Dock.Bottom);
+            root.Children.Add(footer);
+            root.Children.Add(grid);
 
             void refill()
             {
                 var words = search.Text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                list.ItemsSource = all.Where(e => words.All(w => (e.Text ?? "").IndexOf(w, StringComparison.OrdinalIgnoreCase) >= 0 || (e.Connection ?? "").IndexOf(w, StringComparison.OrdinalIgnoreCase) >= 0)).Take(1000).ToList();
+                var shown = all.Where(e => words.All(w => (e.Text ?? "").IndexOf(w, StringComparison.OrdinalIgnoreCase) >= 0 || (e.Connection ?? "").IndexOf(w, StringComparison.OrdinalIgnoreCase) >= 0)).Take(1000).ToList();
+                list.ItemsSource = shown;
                 list.SelectedIndex = 0;
+                count.Text = shown.Count + " / " + all.Count;
             }
             refill();
             search.TextChanged += (s, e) => refill();
             list.SelectionChanged += (s, e) => preview.Text = (list.SelectedItem as HistoryEntry)?.Text ?? "";
 
-            var window = new Window
-            {
-                Title = "QuillSQL Query History (" + all.Count + ")",
-                Content = grid,
-                Width = 900,
-                Height = 640,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                ShowInTaskbar = false,
-            };
+            var window = Theme.Dialog(Loc.T("QuillSQL Query History (" + all.Count + ")"), true);
+            window.Content = root;
+            window.Width = 920;
+            window.Height = 660;
+            window.MinWidth = 560;
+            window.MinHeight = 420;
             EditorContext.SetOwner(window);
             void openSelected()
             {
@@ -253,8 +285,61 @@ namespace QuillSql.Vsix
                 }
             };
             close.Click += (s, e) => window.Close();
+            search.PreviewKeyDown += (s, e) =>
+            {
+                if (e.Key == System.Windows.Input.Key.Down && list.Items.Count > 0)
+                {
+                    (list.ItemContainerGenerator.ContainerFromIndex(Math.Max(0, list.SelectedIndex)) as ListBoxItem)?.Focus();
+                    e.Handled = true;
+                }
+            };
             window.Loaded += (s, e) => search.Focus();
             window.Show();
         });
+
+        /// <summary>A history row: kind tag, time and connection, then the first line of the query.</summary>
+        private static DataTemplate EntryTemplate()
+        {
+            var executed = Theme.Frozen(Theme.Tint(Theme.Green, 0xC0));
+            var closed = Theme.Frozen(Theme.Tint(Theme.Slate, 0xC0));
+            var panel = new FrameworkElementFactory(typeof(StackPanel));
+
+            var top = new FrameworkElementFactory(typeof(StackPanel));
+            top.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
+            var tag = new FrameworkElementFactory(typeof(Border));
+            tag.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+            tag.SetValue(Border.PaddingProperty, new Thickness(5, 0, 5, 1));
+            tag.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 0, 8, 0));
+            tag.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            tag.SetBinding(Border.BackgroundProperty, new System.Windows.Data.Binding(nameof(HistoryEntry.Kind)) { Converter = new FuncConverter(k => (string)k == "closed" ? closed : executed) });
+            var kind = new FrameworkElementFactory(typeof(TextBlock));
+            kind.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(HistoryEntry.Kind)) { Converter = new FuncConverter(k => Loc.T((string)k == "closed" ? "closed" : "executed")) });
+            kind.SetValue(TextBlock.ForegroundProperty, System.Windows.Media.Brushes.White);
+            kind.SetValue(TextBlock.FontSizeProperty, 10.0);
+            kind.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+            tag.AppendChild(kind);
+            top.AppendChild(tag);
+            foreach (var field in new[] { nameof(HistoryEntry.Time), nameof(HistoryEntry.Connection) })
+            {
+                var text = new FrameworkElementFactory(typeof(TextBlock));
+                text.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(field));
+                text.SetValue(UIElement.OpacityProperty, 0.7);
+                text.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 0, 12, 0));
+                text.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+                top.AppendChild(text);
+            }
+            panel.AppendChild(top);
+
+            var query = new FrameworkElementFactory(typeof(TextBlock));
+            query.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(HistoryEntry.Text))
+            {
+                Converter = new FuncConverter(t => ((string)t ?? "").Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? ""),
+            });
+            query.SetValue(TextBlock.FontFamilyProperty, Theme.Mono);
+            query.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+            query.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 4, 0, 0));
+            panel.AppendChild(query);
+            return new DataTemplate { VisualTree = panel };
+        }
     }
 }

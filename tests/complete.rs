@@ -41,16 +41,14 @@ fn tables_and_views_after_from() {
     let l = labels("select * from |");
     assert!(l.contains(&"Customers".into()) && l.contains(&"Orders".into()) && l.contains(&"ActiveCustomers".into()), "{l:?}");
     assert!(!l.contains(&"usp_GetOrders".into()));
-    assert!(inserts("select * from Ord|").contains(&"sales.Orders".into()));
+    assert!(inserts("select * from Ord|").contains(&"sales.Orders AS o".into()));
 }
 
 #[test]
-fn own_objects_come_before_system_views() {
+fn system_views_appear_once_their_schema_is_typed() {
     let l = labels("select * from |");
-    let own = l.iter().position(|x| x == "Customers").unwrap();
-    let system = l.iter().position(|x| x == "all_objects").unwrap();
-    assert!(own < system, "{l:?}");
-    assert_eq!(inserts("select * from all_o|"), vec!["sys.all_objects"]);
+    assert!(l.contains(&"Customers".into()) && !l.contains(&"all_objects".into()), "{l:?}");
+    assert_eq!(inserts("select * from sys.all_o|"), vec!["all_objects AS ao"]);
 }
 
 #[test]
@@ -146,14 +144,14 @@ fn statement_scope_ignores_other_statements() {
 #[test]
 fn join_suggestions_come_from_foreign_keys() {
     let i = inserts("select * from Customers c join |");
-    assert_eq!(i.first().map(String::as_str), Some("sales.Orders o ON o.CustomerId = c.CustomerId"), "{i:?}");
+    assert_eq!(i.first().map(String::as_str), Some("sales.Orders AS o ON o.CustomerId = c.CustomerId"), "{i:?}");
     let on = inserts("select * from Customers c join sales.Orders o on |");
     assert_eq!(on.first().map(String::as_str), Some("o.CustomerId = c.CustomerId"), "{on:?}");
 }
 
 #[test]
 fn exec_inserts_the_parameter_list() {
-    assert_eq!(inserts("exec usp_G|"), vec!["usp_GetOrders @CustomerId = 0 -- int"]);
+    assert_eq!(inserts("exec usp_G|"), vec!["dbo.usp_GetOrders @CustomerId = 0 -- int"]);
     assert_eq!(inserts("exec usp_GetOrders |").first().map(String::as_str), Some("@CustomerId = 0 -- int"));
     assert_eq!(labels("exec usp_GetOrders @C|"), vec!["@CustomerId"]);
 }
@@ -187,3 +185,39 @@ fn snippet_expansion() {
     assert_eq!((e.text.as_str(), &e.text[e.select_start..e.select_end]), ("DELETE FROM table\nWHERE ", "table"));
 }
 
+
+#[test]
+fn tables_get_an_alias_unless_one_is_written() {
+    assert_eq!(inserts("select * from Cust|").first().map(String::as_str), Some("dbo.Customers AS c"));
+    assert_eq!(inserts("select * from Customers c join sales.Ord|").first().map(String::as_str), Some("Orders AS o"));
+    assert_eq!(inserts("select * from Cust| x").first().map(String::as_str), Some("dbo.Customers"));
+    assert_eq!(inserts("insert into Cust|").first().map(String::as_str), Some("dbo.Customers"));
+    let text = "select * from Cust";
+    let plain = quillsql::complete::CompleteOptions { assign_aliases: false, qualify_object_names: false, ..Default::default() };
+    let c = quillsql::complete::complete_full(text, text.len(), Some(&schema()), &[], plain);
+    assert_eq!(c.items[0].insert, "Customers");
+    let short = quillsql::complete::CompleteOptions { alias_with_as: false, ..Default::default() };
+    let c = quillsql::complete::complete_full(text, text.len(), Some(&schema()), &[], short);
+    assert_eq!(c.items[0].insert, "dbo.Customers c");
+}
+
+#[test]
+fn functions_are_inserted_with_parentheses() {
+    let i = inserts("select coun|");
+    assert!(i.contains(&"COUNT()".into()), "{i:?}");
+    assert!(inserts("select fn_|").contains(&"dbo.fn_Tax()".into()));
+}
+
+#[test]
+fn objects_of_the_kind_after_alter() {
+    assert_eq!(inserts("alter procedure usp|"), vec!["dbo.usp_GetOrders"]);
+    assert_eq!(labels("alter view |"), vec!["ActiveCustomers", "dbo", "sales"]);
+    assert_eq!(labels("drop function fn|"), vec!["fn_Tax"]);
+}
+
+#[test]
+fn a_second_table_after_a_comma_whether_or_not_the_alias_has_as() {
+    for sql in ["select * from sales.Orders o, Cust|", "select * from sales.Orders AS o, Cust|"] {
+        assert!(labels(sql).iter().any(|l| l == "Customers"), "{sql}: {:?}", labels(sql));
+    }
+}

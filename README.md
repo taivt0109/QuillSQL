@@ -32,8 +32,10 @@ runs on the command line and in CI.
 | **Refactoring** | Qualify object names, add or remove `AS`, smart rename, encapsulate as a stored procedure, inline an `EXEC`. Each is one Undo step. |
 | **Code analysis** | 54 rules underline problems as you type (`SELECT *`, `= NULL`, `UPDATE` without `WHERE`, deprecated syntax...). Fix them all with one command. |
 | **AI with Claude** | Write SQL from a sentence, explain or review a script, and analyze execution plans and Query Store with real indexes and row counts. |
-| **Safety at a glance** | Color the tab and editor of production connections; hover for a table's columns; highlight every use of a name. |
+| **Object cards** | Rest the mouse on a table to see its columns, keys, indexes, partitions and script; F12 scripts it. |
+| **Safety at a glance** | Color the tab and editor of production connections; ask before `DELETE` or `UPDATE` without `WHERE`; highlight every use of a name. |
 | **Database tools** | Find procedures and views that reference objects that no longer exist; search the history of every query you ran. |
+| **Your way** | An Options window for every behavior, keyboard shortcuts for every command, English or Vietnamese. |
 | **Command line** | `quill` formats folders of `.sql` files and runs the analysis in CI. |
 
 ## Install
@@ -68,7 +70,39 @@ checks its checksum and shows a bar at the top of SSMS: **Install when SSMS clos
 new** or **Skip this version**. SSMS cannot replace an extension while it runs, so the update is
 installed right after SSMS exits. **Tools > QuillSQL > Check for Updates** checks now. To turn the
 daily check off, create `%LOCALAPPDATA%\QuillSQL\settings.json` containing
-`{ "autoUpdate": false }`.
+`{ "autoUpdate": false }`, or untick it in Options.
+
+## Shortcuts
+
+| Keys | Command |
+|---|---|
+| Ctrl+K, Ctrl+Y or Ctrl+Shift+Alt+F | Format the script or selection |
+| Ctrl+Space | Open the suggestion list |
+| F12 or Ctrl+B, Ctrl+D | Script the table, view, procedure or function at the caret |
+| Ctrl+B, Ctrl+K | Object card at the caret (or rest the mouse on a name) |
+| Ctrl+B, Ctrl+W | Expand wildcards (or Tab right after `*`) |
+| Ctrl+B, Ctrl+Q | Qualify object names |
+| Ctrl+B, Ctrl+R | Smart rename |
+| Ctrl+B, Ctrl+C | Insert semicolons |
+| Ctrl+B, Ctrl+U / Ctrl+B, Ctrl+L | UPPERCASE / lowercase keywords |
+| Ctrl+B, Ctrl+E | Execute the statement at the caret |
+| Ctrl+B, Ctrl+B | Execute the batch at the caret |
+| Ctrl+B, Ctrl+T | Summarize the script (go to any statement) |
+| Ctrl+B, Ctrl+S | Insert snippet |
+| Ctrl+B, Ctrl+A / Ctrl+B, Ctrl+F | Analyze code / fix code issues |
+| Ctrl+B, Ctrl+H | Query history |
+| Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Ask AI / analyze the plan with AI |
+| Ctrl+B, Ctrl+O | Options |
+
+Change any of them in Tools > Options > Environment > Keyboard (search for `QuillSQL`). Every
+command is also in **Tools > QuillSQL** and in the editor's right-click menu.
+
+## Options and language
+
+**Tools > QuillSQL > Options...** (Ctrl+B, Ctrl+O) has a page for each area: general, suggestions,
+typing, formatting (with a live preview), code analysis rules, running queries, tab colors, AI,
+snippets and shortcuts. The interface is in **English or Vietnamese**: pick the language on the
+General page; it follows the Windows language until you do.
 
 ## Features in detail
 
@@ -108,17 +142,26 @@ As you type, a list offers:
   `SELECT`, `WHERE` and `ON` (a name found in two tables is inserted with its alias);
 - columns inside `INSERT INTO t (`, and the variables declared in the script after `@`.
 
-Up/Down moves, Enter or Tab inserts, Esc closes, Ctrl+Space opens the list. Metadata loads in the
+Up/Down moves, Enter or Tab inserts, Esc closes, Ctrl+Space opens the list. Next to the list, a
+box shows the definition of the selected table, view or procedure. Which keys insert (Tab, Enter,
+Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
 background the first time a database is used and follows `USE`; **Tools > QuillSQL > Refresh T-SQL
 Suggestions** reloads it after schema changes.
 
 The list also writes code:
 
+- after `FROM` and `JOIN`, the table with its schema and an alias: `Cust` + Tab gives
+  `dbo.Customers AS c` (both can be turned off in Options);
 - after `JOIN`, tables related by a foreign key, with an alias and the condition:
-  `sales.Orders o ON o.CustomerId = c.CustomerId`; after `ON`, the condition alone;
+  `sales.Orders AS o ON o.CustomerId = c.CustomerId`; after `ON`, the condition alone;
+- after `ALTER PROCEDURE`, `ALTER VIEW` or `ALTER FUNCTION`, the object's whole definition;
+- built-in and scalar functions with their parentheses, the caret inside: `GETDATE()`;
 - after `EXEC`, the procedure with all its parameters, one per line with its type;
 - after `INSERT INTO table `, the column list and a `VALUES` row with a placeholder per column;
   after `UPDATE table SET `, every column (identity, computed and rowversion columns are skipped).
+
+While you type, `'`, `[` and `/*` are closed for you (and `(` if you turn it on); typing the
+closing character moves over it.
 
 QuillSQL turns off SSMS's own "Auto list members" so that two lists do not open; turn it back on
 in Tools > Options > Text Editor > Transact-SQL > IntelliSense.
@@ -203,16 +246,31 @@ The plan commands show everything they send in the Output window. Optional setti
   ```
 
   `match` is looked for in "server / database", ignoring case; the first match wins.
-- **Hover** over a table, column, alias or variable (or press Ctrl+K, Ctrl+I) to see its columns,
-  types or parameters.
+- **Object cards**: rest the mouse on a table, view, procedure or function (or press Ctrl+B,
+  Ctrl+K) for a card with its row count, size, columns (keys, identity, defaults, foreign keys),
+  indexes and where they are stored, and a **Script** tab with Copy and Open buttons. A
+  partitioned table says so at the top: column, partition function, `RANGE LEFT`/`RIGHT`, scheme,
+  and a **Partitions** tab with each partition's range, rows and filegroup. **F12** opens the
+  script in a new window, including the partition function and scheme.
+- **Run with care**: running a `DELETE` or `UPDATE` without `WHERE` asks first, with Cancel as the
+  default answer. `TRUNCATE TABLE` and `DROP` can be added in Options.
 - **Highlighting**: every use of the variable, alias or name under the caret is highlighted.
 
 ### Database tools
 
 - **Find Invalid Objects** lists procedures, views and functions that reference objects that no
   longer exist, in the Output window.
-- **Query History...** searches every query you ran (F5) and every query window you closed, with
-  its server and database. Open one in a new window or copy it.
+- **Query History...** (Ctrl+B, Ctrl+H) searches every query you ran (F5) and every query window
+  you closed, with its server and database. Open one in a new window or copy it. The last 5000
+  are kept in `%LOCALAPPDATA%\QuillSQL\history.jsonl`.
+
+### Editing commands
+
+Under **Tools > QuillSQL**: insert semicolons, unformat, add or remove square brackets, uppercase
+or lowercase keywords, remove comments, convert an `sp_executesql` call back to plain SQL, add
+commas (or quotes and commas) to the selected lines, keep a selection unformatted, execute the
+statement or batch at the caret, summarize the script, format every open tab, duplicate a tab,
+close unmodified tabs, create a snippet from the selection, and turn QuillSQL off and on.
 
 ## Privacy
 
@@ -273,7 +331,7 @@ control, a sectioned style groups settings by `whitespace`, `lists`, `joinStatem
 |---|---|
 | `%USERPROFILE%\.quillsql.json` | Formatting options |
 | `%USERPROFILE%\.quillsql-colors.json` | Tab and bar colors per server |
-| `%LOCALAPPDATA%\QuillSQL\settings.json` | `{ "autoUpdate": false }` turns off update checks |
+| `%LOCALAPPDATA%\QuillSQL\settings.json` | Everything set in the Options window |
 | `%LOCALAPPDATA%\QuillSQL\ai.json` | AI model and answer language |
 | `%LOCALAPPDATA%\QuillSQL\Snippets\` | Your snippets |
 | `%LOCALAPPDATA%\QuillSQL\history.jsonl` | Query history |

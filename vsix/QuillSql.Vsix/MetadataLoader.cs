@@ -54,7 +54,7 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
             public readonly List<string> Params = new List<string>();
         }
 
-        private static string KindOf(string type)
+        internal static string KindOf(string type)
         {
             switch (type.Trim())
             {
@@ -68,7 +68,7 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
             }
         }
 
-        private static string TypeText(string name, short maxLength, byte precision, byte scale)
+        internal static string TypeText(string name, short maxLength, byte precision, byte scale)
         {
             switch (name)
             {

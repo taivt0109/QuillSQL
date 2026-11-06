@@ -73,14 +73,11 @@ fn load_style(path: &Path) -> Result<Options, String> {
     let bytes = fs::read(path).map_err(|e| fail(e.to_string()))?;
     let (text, _) = decode(&bytes).map_err(fail)?;
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| fail(e.to_string()))?;
-    if !style::is_sectioned_style(&value) {
-        return serde_json::from_value(value).map_err(|e| fail(e.to_string()));
-    }
-    let loaded = style::load(&value).map_err(fail)?;
-    for warning in &loaded.warnings {
+    let (options, warnings) = style::options_from_value(&value).map_err(fail)?;
+    for warning in &warnings {
         eprintln!("warning: {}: {warning}", path.display());
     }
-    Ok(loaded.options)
+    Ok(options)
 }
 
 #[derive(Clone, Copy)]

@@ -25,7 +25,7 @@ fn batch_of(a: &Analysis, i: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn describe_object(o: &DbObject) -> String {
+pub fn describe_object(o: &DbObject) -> String {
     let kind = match o.kind.as_str() {
         "scalar_function" => "function",
         "table_function" => "table-valued function",
@@ -230,4 +230,38 @@ pub fn schema_context(text: &str, schema: &Schema, budget: usize) -> String {
         }
     }
     out
+}
+
+/// The object the name at the caret (UTF-16) refers to: a table, view, procedure or function
+/// by name, the object behind an alias, or the table of an `alias.column`.
+pub fn object_at<'s>(text: &str, caret: usize, schema: &'s Schema) -> Option<&'s DbObject> {
+    let a = Analysis::new(text);
+    let i = token_at(&a, utf16_to_byte(text, caret))?;
+    let t = &a.tokens[i];
+    if !is_name(t) || (t.kind == Kind::Word && is_reserved(&a.up[i])) {
+        return None;
+    }
+    let mut first = i;
+    while first >= 2 && a.tokens[first - 1].kind == Kind::Dot && is_name(&a.tokens[first - 2]) {
+        first -= 2;
+    }
+    let mut last = i;
+    while last + 2 < a.tokens.len() && a.tokens[last + 1].kind == Kind::Dot && is_name(&a.tokens[last + 2]) {
+        last += 2;
+    }
+    let stmt = statement_of(&a, i);
+    let sources = a.sources(stmt.0, stmt.1);
+    let head = bare(&a.tokens[first]);
+    let alias = sources.iter().find(|s| s.alias_at.is_some() && eq(&s.reference, &head) && (first < last || s.alias_at == Some(i)));
+    if let Some(o) = alias.and_then(|s| resolve(s, schema)) {
+        return Some(o);
+    }
+    for end in [i, last] {
+        let parts: Vec<String> = (first..=end).step_by(2).map(|j| bare(&a.tokens[j])).collect();
+        let lookup = Source { reference: String::new(), parts, columns: Vec::new(), at: first, alias_at: None };
+        if let Some(o) = resolve(&lookup, schema) {
+            return Some(o);
+        }
+    }
+    None
 }

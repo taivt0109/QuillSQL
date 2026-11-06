@@ -100,12 +100,14 @@ namespace QuillSql.Vsix
             view.TextBuffer.Changed += OnChanged;
             view.GotAggregateFocus += OnChanged;
             CodeAnalysis.Toggled += Refresh;
+            Settings.Changed += Refresh;
             view.Closed += (s, e) =>
             {
                 _timer.Stop();
                 view.TextBuffer.Changed -= OnChanged;
                 view.GotAggregateFocus -= OnChanged;
                 CodeAnalysis.Toggled -= Refresh;
+                Settings.Changed -= Refresh;
             };
             _timer.Start();
         }
@@ -150,7 +152,7 @@ namespace QuillSql.Vsix
                         continue;
                     }
                     var type = issue.Severity == "warning" ? PredefinedErrorTypeNames.Warning : PredefinedErrorTypeNames.HintedSuggestion;
-                    var tip = issue.Code + ": " + issue.Message + (issue.Fix == null ? "" : "\nFix available: " + issue.Fix.Title + " (Tools > QuillSQL > Fix Code Issues)");
+                    var tip = issue.Code + ": " + Loc.Issue(issue.Message) + (issue.Fix == null ? "" : "\n" + Loc.T("Fix available: " + Loc.T(issue.Fix.Title) + " (Tools > QuillSQL > Fix Code Issues)"));
                     spans.Add(Tuple.Create(snapshot.CreateTrackingSpan(start, length, SpanTrackingMode.EdgeExclusive), (IErrorTag)new ErrorTag(type, tip)));
                 }
                 Log.Verbose("underlined " + spans.Count + " issue(s): " + string.Join(",", issues.Select(i => i.Code)));
@@ -244,6 +246,11 @@ namespace QuillSql.Vsix
             {
                 return;
             }
+            if (!Settings.Current.Enabled || !Settings.Current.HighlightMatches)
+            {
+                Publish(new List<SnapshotSpan>());
+                return;
+            }
             var snapshot = _view.TextBuffer.CurrentSnapshot;
             var caret = _view.Caret.Position.BufferPosition.Position;
             var text = snapshot.GetText();
@@ -323,23 +330,43 @@ namespace QuillSql.Vsix
         public async Task<QuickInfoItem> GetQuickInfoItemAsync(IAsyncQuickInfoSession session, CancellationToken cancellationToken)
         {
             var point = session.GetTriggerPoint(_buffer.CurrentSnapshot);
+            Log.Verbose("quick info requested at " + (point?.Position ?? -1));
             if (!point.HasValue)
             {
                 return null;
             }
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-            if (!SqlBuffers.IsSql(_buffer, _adapters))
+            if (!Settings.Current.Enabled || !SqlBuffers.IsSql(_buffer, _adapters))
             {
                 return null;
             }
             var key = Commands.MetadataKey(out _);
+            var target = ConnectionResolver.TryGetActive();
             var snapshot = point.Value.Snapshot;
             var position = point.Value.Position;
             var text = snapshot.GetText();
             await TaskScheduler.Default;
             var reply = EngineProcess.Shared.Request("hover", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + position);
             var description = reply == null ? null : Json.Parse<TextReply>(reply)?.Result?.Text;
-            if (string.IsNullOrEmpty(description))
+            // A table, view, procedure or function gets its card, read from the database.
+            ObjectDetails details = null;
+            if (Settings.Current.ObjectCards && target != null && target.CanQuery)
+            {
+                var at = EngineProcess.Shared.Request("object_at", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + position);
+                var found = at == null ? null : Json.Parse<ObjectAtReply>(at)?.Result;
+                if (found != null)
+                {
+                    try
+                    {
+                        details = ObjectScripts.Load(target, found.Schema + "." + found.Name);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error("reading object details", ex);
+                    }
+                }
+            }
+            if (string.IsNullOrEmpty(description) && details == null)
             {
                 return null;
             }
@@ -354,6 +381,12 @@ namespace QuillSql.Vsix
                 end++;
             }
             var span = snapshot.CreateTrackingSpan(start, Math.Max(0, end - start), SpanTrackingMode.EdgeInclusive);
+            if (details != null)
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                Log.Verbose("object card: " + details.FullName + "; " + ObjectScripts.StorageLine(details));
+                return new QuickInfoItem(span, ObjectScripts.Card(details));
+            }
             Log.Verbose("quick info: " + description.Replace("\n", " / "));
             var lines = description.Split('\n').Select(l => (object)new ClassifiedTextElement(new ClassifiedTextRun("text", l)));
             return new QuickInfoItem(span, new ContainerElement(ContainerElementStyle.Stacked, lines));
@@ -413,7 +446,24 @@ namespace QuillSql.Vsix
     /// <summary>Connection colors from %USERPROFILE%\.quillsql-colors.json, reloaded when the file changes.</summary>
     internal static class ConnectionColors
     {
-        private static readonly string Path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".quillsql-colors.json");
+        public static readonly string Path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".quillsql-colors.json");
+
+        public static ColorRule[] All()
+        {
+            Find(null);
+            return _rules;
+        }
+
+        public static void Save(System.Collections.Generic.IEnumerable<ColorRule> rules)
+        {
+            var list = rules.Where(r => !string.IsNullOrWhiteSpace(r.Match)).ToArray();
+            var serializer = new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(ColorRule[]));
+            using (var stream = new MemoryStream())
+            {
+                serializer.WriteObject(stream, list);
+                File.WriteAllBytes(Path, stream.ToArray());
+            }
+        }
         private static DateTime _loadedAt;
         private static ColorRule[] _rules = new ColorRule[0];
 

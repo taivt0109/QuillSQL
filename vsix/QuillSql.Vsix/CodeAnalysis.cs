@@ -1,5 +1,5 @@
 using System;
-using System.IO;
+using System.Linq;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.TextManager.Interop;
 
@@ -8,13 +8,12 @@ namespace QuillSql.Vsix
     /// <summary>Code analysis results in the Error List, and the switch for editor underlines.</summary>
     internal static class CodeAnalysis
     {
-        private static readonly string OffFlag = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuillSQL", "analysis-off");
         private static ErrorListProvider _errors;
 
         /// <summary>Raised when underlines are switched on or off.</summary>
         public static event Action Toggled;
 
-        public static bool UnderlinesOn => !File.Exists(OffFlag);
+        public static bool UnderlinesOn => Settings.Current.Enabled && Settings.Current.CodeAnalysis;
 
         public static void Initialize(IServiceProvider package)
         {
@@ -23,22 +22,17 @@ namespace QuillSql.Vsix
 
         public static CodeIssue[] Analyze(string text, string key)
         {
-            var reply = EngineProcess.Shared.Request("analyze", "\"key\":" + Json.Str(key ?? "") + ",\"text\":" + Json.Str(text));
+            var disabled = string.Join(",", (Settings.Current.DisabledRules ?? new string[0]).Select(Json.Str));
+            var reply = EngineProcess.Shared.Request("analyze", "\"key\":" + Json.Str(key ?? "") + ",\"text\":" + Json.Str(text) + ",\"disabled\":[" + disabled + "]");
             return reply == null ? null : Json.Parse<AnalyzeReply>(reply)?.Result?.Issues;
         }
 
         public static void ToggleUnderlines() => Commands.Run("Toggle code analysis", () =>
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            Directory.CreateDirectory(Path.GetDirectoryName(OffFlag));
-            if (UnderlinesOn)
-            {
-                File.WriteAllText(OffFlag, DateTime.Now.ToString("s"));
-            }
-            else
-            {
-                File.Delete(OffFlag);
-            }
+            var settings = Settings.Current.Clone();
+            settings.CodeAnalysis = !settings.CodeAnalysis;
+            settings.Save();
             Toggled?.Invoke();
             EditorContext.Status("code analysis underlines " + (UnderlinesOn ? "on." : "off."));
         });
@@ -70,7 +64,7 @@ namespace QuillSql.Vsix
                     editor.Lines.GetLineIndexOfPosition(issue.Start, out var line, out var column);
                     var task = new ErrorTask
                     {
-                        Text = issue.Code + ": " + issue.Message + (issue.Fix != null ? " [fix: " + issue.Fix.Title + "]" : ""),
+                        Text = issue.Code + ": " + Loc.Issue(issue.Message) + (issue.Fix != null ? " [" + (Loc.Vietnamese ? "sửa" : "fix") + ": " + Loc.T(issue.Fix.Title) + "]" : ""),
                         Line = line,
                         Column = column,
                         ErrorCategory = issue.Severity == "warning" ? TaskErrorCategory.Warning : TaskErrorCategory.Message,

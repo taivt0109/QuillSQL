@@ -379,3 +379,13 @@ pub fn load(user: &Value) -> Result<LoadedStyle, String> {
     };
     Ok(LoadedStyle { options, warnings })
 }
+
+/// Options from a style file's JSON: a flat QuillSQL options object or a sectioned style.
+/// Returns the warnings a sectioned style produces for settings that are not applied.
+pub fn options_from_value(value: &Value) -> Result<(Options, Vec<String>), String> {
+    if !is_sectioned_style(value) {
+        return serde_json::from_value(value.clone()).map(|o| (o, Vec::new())).map_err(|e| e.to_string());
+    }
+    let loaded = load(value)?;
+    Ok((loaded.options, loaded.warnings))
+}

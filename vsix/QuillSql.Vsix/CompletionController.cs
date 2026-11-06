@@ -90,7 +90,17 @@ namespace QuillSql.Vsix
         public int QueryStatus(ref Guid group, uint count, OLECMD[] commands, IntPtr text)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            return _next.QueryStatus(ref group, count, commands, text);
+            var result = _next.QueryStatus(ref group, count, commands, text);
+            // SSMS turns off Go To Definition and Quick Info in query windows; F12 opens the
+            // object's script and Quick Info its card, so offer both whatever SSMS says.
+            if (Settings.Current.Enabled && commands != null && commands.Length > 0 && IsSqlBuffer(out _)
+                && ((group == VSConstants.GUID_VSStandardCommandSet97 && commands[0].cmdID == (uint)VSConstants.VSStd97CmdID.GotoDefn)
+                    || (group == VSConstants.VSStd2K && commands[0].cmdID == (uint)VSConstants.VSStd2KCmdID.QUICKINFO)))
+            {
+                commands[0].cmdf = (uint)(OLECMDF.OLECMDF_SUPPORTED | OLECMDF.OLECMDF_ENABLED);
+                return VSConstants.S_OK;
+            }
+            return result;
         }
 
         public int Exec(ref Guid group, uint id, uint options, IntPtr input, IntPtr output)
@@ -98,6 +108,25 @@ namespace QuillSql.Vsix
             ThreadHelper.ThrowIfNotOnUIThread();
             var std2k = group == VSConstants.VSStd2K;
             var command = (VSConstants.VSStd2KCmdID)id;
+            if (!Settings.Current.Enabled)
+            {
+                return _next.Exec(ref group, id, options, input, output);
+            }
+            // F12 on a table, view, procedure or function opens its script.
+            if (group == VSConstants.GUID_VSStandardCommandSet97 && id == (uint)VSConstants.VSStd97CmdID.GotoDefn && IsSqlBuffer(out _))
+            {
+                try
+                {
+                    if (ObjectScripts.ScriptAtCaret(false))
+                    {
+                        return VSConstants.S_OK;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("go to definition", ex);
+                }
+            }
             if (std2k && (command == VSConstants.VSStd2KCmdID.COMPLETEWORD || command == VSConstants.VSStd2KCmdID.SHOWMEMBERLIST))
             {
                 Log.Verbose("command " + command);
@@ -114,8 +143,23 @@ namespace QuillSql.Vsix
                         case VSConstants.VSStd2KCmdID.PAGEDN: _popup.Move(8); return VSConstants.S_OK;
                         case VSConstants.VSStd2KCmdID.RETURN:
                         case VSConstants.VSStd2KCmdID.TAB:
-                            Commit();
-                            return VSConstants.S_OK;
+                            if (command == VSConstants.VSStd2KCmdID.TAB ? Settings.Current.InsertWithTab : Settings.Current.InsertWithEnter)
+                            {
+                                Commit();
+                                return VSConstants.S_OK;
+                            }
+                            _popup.Close();
+                            break;
+                        case VSConstants.VSStd2KCmdID.TYPECHAR:
+                            // Optional keys that insert the suggestion and then type themselves.
+                            var typedChar = (char)Convert.ToUInt16(Marshal.GetObjectForNativeVariant(input));
+                            var settings = Settings.Current;
+                            if ((typedChar == ' ' && settings.InsertWithSpace) || (typedChar == '.' && settings.InsertWithDot)
+                                || (typedChar == ',' && settings.InsertWithComma) || (typedChar == '(' && settings.InsertWithParenthesis))
+                            {
+                                Commit();
+                            }
+                            break;
                         case VSConstants.VSStd2KCmdID.CANCEL:
                             _popup.Close();
                             return VSConstants.S_OK;
@@ -126,6 +170,11 @@ namespace QuillSql.Vsix
                             _popup.Close();
                             break;
                     }
+                }
+                if (std2k && command == VSConstants.VSStd2KCmdID.CANCEL && CardPopup.IsOpen)
+                {
+                    CardPopup.Close();
+                    return VSConstants.S_OK;
                 }
                 if (std2k && (command == VSConstants.VSStd2KCmdID.COMPLETEWORD || command == VSConstants.VSStd2KCmdID.SHOWMEMBERLIST))
                 {
@@ -146,13 +195,32 @@ namespace QuillSql.Vsix
                 Log.Error("before command", ex);
             }
 
+            var typed = std2k && command == VSConstants.VSStd2KCmdID.TYPECHAR ? (char)Convert.ToUInt16(Marshal.GetObjectForNativeVariant(input)) : '\0';
+            string closing = null;
+            try
+            {
+                if (typed != '\0' && Overtype(typed))
+                {
+                    return VSConstants.S_OK;
+                }
+                closing = typed != '\0' ? ClosingFor(typed) : null;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("auto-close", ex);
+            }
+
             var result = _next.Exec(ref group, id, options, input, output);
 
             try
             {
-                if (std2k && command == VSConstants.VSStd2KCmdID.TYPECHAR)
+                if (typed != '\0')
                 {
-                    OnTyped((char)Convert.ToUInt16(Marshal.GetObjectForNativeVariant(input)));
+                    if (closing != null)
+                    {
+                        InsertClosing(closing);
+                    }
+                    OnTyped(typed);
                 }
                 else if (std2k && _popup.IsOpen && (command == VSConstants.VSStd2KCmdID.BACKSPACE || command == VSConstants.VSStd2KCmdID.DELETE))
                 {
@@ -167,26 +235,26 @@ namespace QuillSql.Vsix
         }
 
         /// <summary>
-        /// Ctrl+K, Ctrl+I: SSMS's language service handles the command itself, so ask the editor's
-        /// Quick Info broker directly; it calls <see cref="QuickInfoSource"/>.
+        /// Quick Info from the keyboard, when SSMS passes the command on: the object card in its
+        /// own popup, since SSMS closes Quick Info sessions started by a shortcut.
         /// </summary>
         private bool TriggerQuickInfo()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (!IsSqlBuffer(out _) || !(Package.GetGlobalService(typeof(SComponentModel)) is IComponentModel model))
+            return IsSqlBuffer(out _) && ShowCard(_view);
+        }
+
+        /// <summary>Opens the object card (Quick Info) at the caret of a query window.</summary>
+        public static bool ShowCard(IVsTextView textView)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (textView == null || !(Package.GetGlobalService(typeof(SComponentModel)) is IComponentModel model))
             {
                 return false;
             }
-            var view = model.GetService<IVsEditorAdaptersFactoryService>()?.GetWpfTextView(_view);
-            var broker = model.GetService<IAsyncQuickInfoBroker>();
-            if (view == null || broker == null)
-            {
-                return false;
-            }
-            var caret = view.Caret.Position.BufferPosition;
-            var point = caret.Snapshot.CreateTrackingPoint(caret.Position, PointTrackingMode.Positive);
-            _ = broker.TriggerQuickInfoAsync(view, point, QuickInfoSessionOptions.None);
-            return true;
+            var view = model.GetService<IVsEditorAdaptersFactoryService>()?.GetWpfTextView(textView);
+            Log.Verbose("object card requested");
+            return CardPopup.Show(view);
         }
 
         /// <summary>
@@ -219,9 +287,96 @@ namespace QuillSql.Vsix
 
         private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_' || c == '@' || c == '#' || c == '$';
 
+        /// <summary>Where a closing character was inserted automatically, so typing it moves over it.</summary>
+        private int _autoClosed = -1;
+
+        /// <summary>
+        /// The text to insert after `typed`, or null. Quotes and brackets are closed only before
+        /// whitespace or punctuation, and never inside a comment or an open string.
+        /// </summary>
+        private string ClosingFor(char typed)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var settings = Settings.Current;
+            var wanted = (typed == '\'' && settings.CloseSingleQuote) || (typed == '[' && settings.CloseSquareBracket)
+                || (typed == '(' && settings.CloseParenthesis) || (typed == '*' && settings.CloseComment);
+            if (!wanted || !TryGetText(out var text, out var caret))
+            {
+                return null;
+            }
+            var lineStart = caret == 0 ? 0 : text.LastIndexOf('\n', caret - 1) + 1;
+            var line = text.Substring(lineStart, caret - lineStart);
+            if (line.Contains("--"))
+            {
+                return null;
+            }
+            var next = caret < text.Length ? text[caret] : '\n';
+            var nextOk = char.IsWhiteSpace(next) || next == ')' || next == ',' || next == ';' || next == ']';
+            var previous = caret > 0 ? text[caret - 1] : ' ';
+            switch (typed)
+            {
+                case '*':
+                    return previous == '/' ? "*/" : null;
+                case '\'':
+                    // An odd number of quotes before the caret means this one closes a string.
+                    var inString = line.Count(c => c == '\'') % 2 == 1;
+                    var startsString = !IsWordChar(previous) || (previous == 'N' && (caret < 2 || !IsWordChar(text[caret - 2])));
+                    return !inString && startsString && nextOk ? "'" : null;
+                case '[':
+                    return nextOk ? "]" : null;
+                case '(':
+                    return nextOk ? ")" : null;
+            }
+            return null;
+        }
+
+        private void InsertClosing(string closing)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var editor = EditorContext.For(_view);
+            if (editor == null || (editor.Caret < editor.Text.Length && editor.Text.Substring(editor.Caret).StartsWith(closing, StringComparison.Ordinal)))
+            {
+                // SSMS closed it already.
+                return;
+            }
+            editor.Replace(editor.Caret, editor.Caret, closing);
+            editor.Select(editor.Caret, editor.Caret);
+            _autoClosed = closing.Length == 1 ? editor.Caret : -1;
+        }
+
+        /// <summary>Typing the closing character that was inserted automatically just moves over it.</summary>
+        private bool Overtype(char typed)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_autoClosed < 0 || !Settings.Current.OvertypeClosing || !(typed == '\'' || typed == ']' || typed == ')'))
+            {
+                return false;
+            }
+            var editor = EditorContext.For(_view);
+            var hit = editor != null && editor.Caret == _autoClosed && editor.Caret < editor.Text.Length && editor.Text[editor.Caret] == typed;
+            _autoClosed = -1;
+            if (hit)
+            {
+                editor.Select(editor.Caret + 1, editor.Caret + 1);
+            }
+            return hit;
+        }
+
         private void OnTyped(char c)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            if (!Settings.Current.AutoShowSuggestions)
+            {
+                if (_popup.IsOpen && (IsWordChar(c) || c == '.'))
+                {
+                    Trigger(false);
+                }
+                else
+                {
+                    _popup.Close();
+                }
+                return;
+            }
             if (IsWordChar(c) || c == '.' || c == '[')
             {
                 Trigger(false);
@@ -280,7 +435,7 @@ namespace QuillSql.Vsix
                         return;
                     }
                     var reply = EngineProcess.Shared.Request("complete",
-                        "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + caret);
+                        "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + caret + ",\"options\":" + Settings.Current.CompletionOptionsJson());
                     var parsed = reply == null ? null : Json.Parse<CompletionReply>(reply);
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     if (version != _version)
@@ -325,7 +480,7 @@ namespace QuillSql.Vsix
             var screen = new NativePoint { X = point[0].x, Y = point[0].y + lineHeight };
             ClientToScreen(window, ref screen);
             _replaceStart = result.Start;
-            _popup.Show(items, window, screen.X, screen.Y);
+            _popup.Show(items, window, screen.X, screen.Y, Settings.Current.ShowDefinitionBox);
             LastShown = string.Join(",", items.Take(20).Select(i => i.Label));
             Log.Verbose("suggest " + items.Length + ": " + LastShown);
         }
@@ -335,8 +490,16 @@ namespace QuillSql.Vsix
             ThreadHelper.ThrowIfNotOnUIThread();
             var item = _popup.Selected;
             _popup.Close();
-            if (item == null || !TryGetText(out _, out var caret) || caret < _replaceStart)
+            if (item == null || !TryGetText(out var before, out var caret) || caret < _replaceStart)
             {
+                return;
+            }
+            // `ALTER PROCEDURE name`: fill in the object's whole definition.
+            var alter = System.Text.RegularExpressions.Regex.Match(before.Substring(0, _replaceStart), @"\bALTER\s+(PROC|PROCEDURE|VIEW|FUNCTION)\s+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (alter.Success && Settings.Current.GenerateAlter && (item.Kind == "procedure" || item.Kind == "view" || item.Kind == "function" || item.Kind == "table_function"))
+            {
+                var name = (item.Detail ?? "").Split(new[] { " (" }, StringSplitOptions.None)[0];
+                ObjectScripts.ReplaceWithAlter(_view, alter.Index, caret, name);
                 return;
             }
             if (item.Kind == "snippet")
@@ -361,6 +524,13 @@ namespace QuillSql.Vsix
                 Marshal.FreeCoTaskMem(buffer);
             }
             Log.Verbose("inserted " + item.Insert);
+            // Functions are inserted with their parentheses; put the caret between them.
+            if (item.Insert.EndsWith("()", StringComparison.Ordinal) && (item.Kind == "function"))
+            {
+                var editor = EditorContext.For(_view);
+                var end = _replaceStart + item.Insert.Length - 1;
+                editor?.Select(end, end);
+            }
         }
 
         public void OnSetFocus(IVsTextView view) { }

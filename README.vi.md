@@ -35,8 +35,10 @@ QuillSQL miễn phí, mã nguồn mở. Engine viết bằng Rust, chạy nhanh,
 | **Refactor** | Thêm schema/alias cho tên, thêm hoặc bỏ `AS`, đổi tên thông minh, gói thành stored procedure, inline một lệnh `EXEC`. Mỗi thao tác hoàn tác được bằng một lần Undo. |
 | **Phân tích code** | 54 rule gạch chân lỗi ngay khi gõ (`SELECT *`, `= NULL`, `UPDATE` không có `WHERE`, cú pháp lỗi thời…). Sửa tất cả bằng một lệnh. |
 | **AI với Claude** | Viết SQL từ một câu mô tả, giải thích hoặc review script, phân tích execution plan và Query Store dựa trên index và số dòng thật. |
-| **Nhận biết nhanh** | Tô màu tab và editor của kết nối production; rê chuột để xem cột của bảng; tô sáng mọi chỗ dùng cùng một tên. |
+| **Thẻ object** | Rê chuột lên bảng để xem cột, khóa, index, partition và script; F12 để script bảng đó. |
+| **Nhận biết nhanh** | Tô màu tab và editor của kết nối production; hỏi lại trước khi chạy `DELETE` hoặc `UPDATE` không có `WHERE`; tô sáng mọi chỗ dùng cùng một tên. |
 | **Công cụ database** | Tìm procedure và view đang tham chiếu tới object không còn tồn tại; tìm lại mọi query bạn đã chạy. |
+| **Theo ý bạn** | Cửa sổ Options cho mọi hành vi, phím tắt cho mọi lệnh, giao diện tiếng Anh hoặc tiếng Việt. |
 | **Dòng lệnh** | `quill` format cả thư mục file `.sql` và chạy phân tích code trong CI. |
 
 ## Cài đặt
@@ -77,7 +79,39 @@ Mỗi ngày một lần, QuillSQL kiểm tra GitHub xem có bản mới không. 
 
 SSMS không cho thay extension khi đang chạy, nên bản cập nhật được cài ngay sau khi SSMS đóng.
 - Kiểm tra ngay: **Tools > QuillSQL > Check for Updates**.
-- Tắt kiểm tra hằng ngày: tạo file `%LOCALAPPDATA%\QuillSQL\settings.json` với nội dung `{ "autoUpdate": false }`.
+- Tắt kiểm tra hằng ngày: tạo file `%LOCALAPPDATA%\QuillSQL\settings.json` với nội dung `{ "autoUpdate": false }`, hoặc bỏ chọn trong Options.
+
+## Phím tắt
+
+| Phím | Lệnh |
+|---|---|
+| Ctrl+K, Ctrl+Y hoặc Ctrl+Shift+Alt+F | Format script hoặc đoạn chọn |
+| Ctrl+Space | Mở danh sách gợi ý |
+| F12 hoặc Ctrl+B, Ctrl+D | Script bảng, view, procedure hoặc function tại con trỏ |
+| Ctrl+B, Ctrl+K | Thẻ object tại con trỏ (hoặc rê chuột lên tên) |
+| Ctrl+B, Ctrl+W | Mở `*` thành danh sách cột (hoặc Tab ngay sau `*`) |
+| Ctrl+B, Ctrl+Q | Thêm schema/alias cho tên |
+| Ctrl+B, Ctrl+R | Đổi tên thông minh |
+| Ctrl+B, Ctrl+C | Chèn dấu chấm phẩy |
+| Ctrl+B, Ctrl+U / Ctrl+B, Ctrl+L | Viết HOA / viết thường từ khóa |
+| Ctrl+B, Ctrl+E | Chạy câu lệnh tại con trỏ |
+| Ctrl+B, Ctrl+B | Chạy batch tại con trỏ |
+| Ctrl+B, Ctrl+T | Tóm tắt script (nhảy tới câu lệnh bất kỳ) |
+| Ctrl+B, Ctrl+S | Chèn snippet |
+| Ctrl+B, Ctrl+A / Ctrl+B, Ctrl+F | Phân tích code / sửa lỗi code |
+| Ctrl+B, Ctrl+H | Lịch sử query |
+| Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Hỏi AI / phân tích plan bằng AI |
+| Ctrl+B, Ctrl+O | Tùy chọn |
+
+Đổi phím trong Tools > Options > Environment > Keyboard (tìm `QuillSQL`). Mọi lệnh đều có trong
+**Tools > QuillSQL** và trong menu chuột phải của editor.
+
+## Tùy chọn và ngôn ngữ
+
+**Tools > QuillSQL > Options...** (Ctrl+B, Ctrl+O) có một trang cho từng phần: chung, gợi ý, gõ
+phím, format (xem trước ngay), rule phân tích code, chạy query, màu tab, AI, snippet và phím tắt.
+Giao diện có **tiếng Anh và tiếng Việt**: chọn ngôn ngữ ở trang Chung; khi chưa chọn thì theo
+ngôn ngữ của Windows.
 
 ## Chi tiết tính năng
 
@@ -116,16 +150,21 @@ Khi gõ, danh sách gợi ý hiện ra:
 - cột của mọi bảng trong câu lệnh, khi gõ trong `SELECT`, `WHERE` và `ON`. Tên cột có ở hai bảng sẽ được chèn kèm alias;
 - cột trong `INSERT INTO t (`; biến đã khai báo trong script sau `@`.
 
-Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách.
+Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách. Bên cạnh danh sách có ô hiện định nghĩa của bảng, view hoặc procedure đang chọn. Phím nào dùng để chèn (Tab, Enter, Space, `.`, `,`, `(`) do bạn chọn trong Options.
 
 Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Sau khi sửa schema, chạy **Tools > QuillSQL > Refresh T-SQL Suggestions** để nạp lại.
 
 Danh sách còn viết code giúp bạn:
 
-- **Sau `JOIN`:** gợi ý các bảng có khóa ngoại liên quan, kèm alias và điều kiện, ví dụ `sales.Orders o ON o.CustomerId = c.CustomerId`. Sau `ON` thì chỉ gợi ý điều kiện.
+- **Sau `FROM` và `JOIN`:** bảng kèm schema và alias: gõ `Cust` + Tab ra `dbo.Customers AS c` (tắt được trong Options).
+- **Sau `JOIN`:** gợi ý các bảng có khóa ngoại liên quan, kèm alias và điều kiện, ví dụ `sales.Orders AS o ON o.CustomerId = c.CustomerId`. Sau `ON` thì chỉ gợi ý điều kiện.
+- **Sau `ALTER PROCEDURE`, `ALTER VIEW`, `ALTER FUNCTION`:** điền sẵn toàn bộ định nghĩa của object.
+- **Hàm:** hàm có sẵn và hàm scalar được chèn kèm ngoặc, con trỏ nằm giữa: `GETDATE()`.
 - **Sau `EXEC`:** procedure kèm đủ tham số, mỗi tham số một dòng có ghi kiểu dữ liệu.
 - **Sau `INSERT INTO table `:** danh sách cột và một dòng `VALUES` có sẵn chỗ điền cho từng cột.
 - **Sau `UPDATE table SET `:** tất cả các cột. Cột identity, computed và rowversion được bỏ qua.
+
+Khi gõ, `'`, `[` và `/*` được tự đóng (cả `(` nếu bạn bật); gõ ký tự đóng thì con trỏ chỉ nhảy qua nó.
 
 QuillSQL tắt "Auto list members" của SSMS để không hiện hai danh sách cùng lúc. Muốn bật lại thì vào Tools > Options > Text Editor > Transact-SQL > IntelliSense.
 
@@ -221,13 +260,18 @@ Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ 
   ```
 
   `match` được tìm trong chuỗi "server / database", không phân biệt hoa thường; quy tắc khớp đầu tiên được dùng.
-- **Rê chuột:** rê lên bảng, cột, alias hoặc biến (hoặc nhấn Ctrl+K, Ctrl+I) để xem cột, kiểu dữ liệu hoặc tham số.
+- **Thẻ object:** rê chuột lên bảng, view, procedure hoặc function (hoặc nhấn Ctrl+B, Ctrl+K) để xem thẻ gồm số dòng, dung lượng, các cột (khóa, identity, default, khóa ngoại), index và nơi lưu, cùng tab **Script** có nút Sao chép và Mở. Bảng có partition được ghi rõ ở đầu thẻ: cột partition, partition function, `RANGE LEFT`/`RIGHT`, scheme, và tab **Partition** liệt kê khoảng giá trị, số dòng và filegroup của từng partition. **F12** mở script trong cửa sổ mới, gồm cả partition function và scheme.
+- **Chạy an toàn:** chạy `DELETE` hoặc `UPDATE` không có `WHERE` sẽ được hỏi lại trước, mặc định là Hủy. Có thể bật thêm cho `TRUNCATE TABLE` và `DROP` trong Options.
 - **Tô sáng:** mọi chỗ dùng biến, alias hoặc tên tại con trỏ được tô sáng.
 
 ### Công cụ database
 
 - **Find Invalid Objects:** liệt kê procedure, view và function đang tham chiếu tới object không còn tồn tại. Kết quả hiện trong cửa sổ Output.
-- **Query History...:** tìm trong mọi query bạn đã chạy (F5) và mọi cửa sổ query đã đóng, kèm server và database. Có thể mở lại trong cửa sổ mới hoặc sao chép.
+- **Query History...** (Ctrl+B, Ctrl+H): tìm trong mọi query bạn đã chạy (F5) và mọi cửa sổ query đã đóng, kèm server và database. Có thể mở lại trong cửa sổ mới hoặc sao chép. 5000 mục gần nhất được lưu trong `%LOCALAPPDATA%\QuillSQL\history.jsonl`.
+
+### Lệnh chỉnh sửa
+
+Trong **Tools > QuillSQL**: chèn dấu chấm phẩy, bỏ format, thêm hoặc bỏ ngoặc vuông, viết hoa hoặc viết thường từ khóa, xóa comment, chuyển lệnh `sp_executesql` về SQL thường, thêm dấu phẩy (hoặc nháy và dấu phẩy) cho các dòng đang chọn, giữ nguyên một đoạn khi format, chạy câu lệnh hoặc batch tại con trỏ, tóm tắt script, format mọi tab đang mở, nhân đôi tab, đóng các tab chưa sửa, tạo snippet từ đoạn chọn, và bật/tắt QuillSQL.
 
 ## Quyền riêng tư
 
@@ -288,7 +332,7 @@ Muốn tùy chỉnh chi tiết hơn thì dùng **style theo nhóm**: các thiế
 |---|---|
 | `%USERPROFILE%\.quillsql.json` | Tùy chọn format |
 | `%USERPROFILE%\.quillsql-colors.json` | Màu tab và thanh màu theo server |
-| `%LOCALAPPDATA%\QuillSQL\settings.json` | `{ "autoUpdate": false }` để tắt kiểm tra cập nhật |
+| `%LOCALAPPDATA%\QuillSQL\settings.json` | Mọi thiết lập trong cửa sổ Options |
 | `%LOCALAPPDATA%\QuillSQL\ai.json` | Model AI và ngôn ngữ trả lời |
 | `%LOCALAPPDATA%\QuillSQL\Snippets\` | Snippet của bạn |
 | `%LOCALAPPDATA%\QuillSQL\history.jsonl` | Lịch sử query |

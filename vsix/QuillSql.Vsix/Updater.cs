@@ -31,27 +31,6 @@ namespace QuillSql.Vsix
         [DataMember(Name = "browser_download_url")] public string Url { get; set; }
     }
 
-    /// <summary>%LOCALAPPDATA%\QuillSQL\settings.json, for example {"autoUpdate": false}.</summary>
-    [DataContract]
-    internal sealed class Settings
-    {
-        [DataMember(Name = "autoUpdate")] public bool? AutoUpdate { get; set; }
-
-        public static Settings Load()
-        {
-            var path = Path.Combine(Updater.Folder, "settings.json");
-            try
-            {
-                return File.Exists(path) ? Json.Parse<Settings>(File.ReadAllText(path)) ?? new Settings() : new Settings();
-            }
-            catch (Exception ex)
-            {
-                Log.Error("reading " + path, ex);
-                return new Settings();
-            }
-        }
-    }
-
     /// <summary>
     /// Updates from the project's GitHub releases. Once a day it looks at the latest release; a
     /// newer one is downloaded and checked against the release's SHA256SUMS.txt, and the info bar
@@ -88,7 +67,7 @@ namespace QuillSql.Vsix
                 {
                     if (!now)
                     {
-                        if (Settings.Load().AutoUpdate == false)
+                        if (!Settings.Current.AutoUpdate)
                         {
                             return;
                         }
@@ -217,12 +196,12 @@ namespace QuillSql.Vsix
                 return;
             }
             var model = new InfoBarModel(
-                new[] { new InfoBarTextSpan("QuillSQL " + _version + " is available (you have " + QuillSqlPackage.Version + "). ") },
+                new[] { new InfoBarTextSpan(Loc.T("QuillSQL " + _version + " is available (you have " + QuillSqlPackage.Version + "). ")) },
                 new IVsInfoBarActionItem[]
                 {
-                    new InfoBarHyperlink("Install when SSMS closes", "install"),
-                    new InfoBarHyperlink("What's new", "notes"),
-                    new InfoBarHyperlink("Skip this version", "skip"),
+                    new InfoBarHyperlink(Loc.T("Install when SSMS closes"), "install"),
+                    new InfoBarHyperlink(Loc.T("What's new"), "notes"),
+                    new InfoBarHyperlink(Loc.T("Skip this version"), "skip"),
                 },
                 KnownMonikers.StatusInformation,
                 true);

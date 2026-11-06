@@ -13,6 +13,8 @@
 //! - `plan_target` {key, text} gives the batches, the objects used and why running it could write;
 //!   `plan_summary` {plans, maxLines?} turns showplan XML into text.
 //! - `exec_target` {text, caret} names the procedure an EXEC at the caret calls.
+//! - `set_options`, `reload_snippets`, `tool`, `outline`, `execution_warnings`, `object_at`,
+//!   `table_script` and `to_alter` serve the editor commands of the same names.
 //! - `snippets` and `rules` list what is available.
 
 use std::collections::HashMap;
@@ -20,14 +22,43 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use quillsql::complete::{Schema, complete_with, utf16_to_byte};
+use quillsql::complete::{CompleteOptions, Schema, complete_full, utf16_to_byte};
 use quillsql::refactor::{self, Renamed};
 use quillsql::snippets::{self, Env, Snippet};
-use quillsql::{Options, TableAlias, analysis, format, info, plan};
+use quillsql::{Options, TableAlias, analysis, format, info, plan, script, style, tools};
 
 struct State {
     schemas: HashMap<String, Schema>,
     snippets: Vec<Snippet>,
+    /// Formatting options; `set_options` replaces them while the engine runs.
+    options: Options,
+}
+
+/// Object kinds whose description is shown next to the suggestion list.
+const DESCRIBED: &[&str] = &["table", "view", "procedure", "function", "table_function", "synonym"];
+
+/// Adds an `info` description to the first suggestions that are database objects.
+fn with_descriptions(completion: Value, schema: Option<&Schema>) -> Value {
+    let Some(schema) = schema else { return completion };
+    let mut completion = completion;
+    if let Some(items) = completion["items"].as_array_mut() {
+        for item in items.iter_mut().take(80) {
+            if !DESCRIBED.contains(&item["kind"].as_str().unwrap_or("")) {
+                continue;
+            }
+            let detail = item["detail"].as_str().unwrap_or("");
+            let full = detail.split(" (").next().unwrap_or(detail);
+            let Some((owner, name)) = full.split_once('.') else { continue };
+            if let Some(o) = schema.objects.iter().find(|o| o.schema.eq_ignore_ascii_case(owner) && o.name.eq_ignore_ascii_case(name)) {
+                item["info"] = json!(info::describe_object(o));
+            }
+        }
+    }
+    completion
+}
+
+fn edit_result(result: Result<String, String>) -> Result<Value, String> {
+    result.map(|t| json!({ "text": t }))
 }
 
 /// Built-in snippets, then the user's; the user's win.
@@ -118,7 +149,26 @@ fn refactor_op(request: &Value, state: &State) -> Result<Value, String> {
     }
 }
 
-fn handle(request: &Value, state: &mut State, opts: &Options) -> Result<Value, String> {
+fn tool(request: &Value) -> Result<Value, String> {
+    let text = str_field(request, "text")?;
+    let caret = request["caret"].as_u64().map_or(0, |v| v as usize);
+    let range = |r: Option<(usize, usize)>| Ok(r.map_or(Value::Null, |(start, end)| json!({ "start": start, "end": end })));
+    match str_field(request, "action")? {
+        "semicolons" => edit_result(tools::semicolons(text)),
+        "unformat" => edit_result(tools::unformat(text)),
+        "add_brackets" => edit_result(tools::brackets(text, true)),
+        "remove_brackets" => edit_result(tools::brackets(text, false)),
+        "uppercase" => edit_result(tools::casing(text, true)),
+        "lowercase" => edit_result(tools::casing(text, false)),
+        "remove_comments" => edit_result(tools::remove_comments(text)),
+        "sp_executesql" => edit_result(tools::convert_sp_executesql(text, caret)),
+        "statement_range" => range(tools::statement_range(text, caret)),
+        "batch_range" => range(tools::batch_range(text, caret)),
+        other => Err(format!("unknown tool {other:?}")),
+    }
+}
+
+fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
     let key = request["key"].as_str().unwrap_or_default();
     match request["op"].as_str().unwrap_or_default() {
         "load" => {
@@ -131,13 +181,64 @@ fn handle(request: &Value, state: &mut State, opts: &Options) -> Result<Value, S
         "complete" => {
             let text = str_field(request, "text")?;
             let caret = usize_field(request, "caret")?;
-            serde_json::to_value(complete_with(text, caret, state.schemas.get(key), &state.snippets)).map_err(|e| e.to_string())
+            let options: CompleteOptions = serde_json::from_value(request["options"].clone()).unwrap_or_default();
+            let schema = state.schemas.get(key);
+            let completion = serde_json::to_value(complete_full(text, caret, schema, &state.snippets, options)).map_err(|e| e.to_string())?;
+            Ok(with_descriptions(completion, schema))
         }
         "tab" => tab(request, state),
-        "format" => format(str_field(request, "text")?, opts).map(|t| json!({ "text": t })).map_err(|e| e.to_string()),
+        "format" => {
+            // `options` previews other settings without changing the engine's own.
+            let preview = match request.get("options").filter(|o| o.is_object()) {
+                Some(o) => Some(style::options_from_value(o)?.0),
+                None => None,
+            };
+            let mut text = str_field(request, "text")?.to_string();
+            let schema = state.schemas.get(key);
+            if request["expandWildcards"].as_bool() == Some(true)
+                && let Ok((t, _)) = refactor::expand_wildcards(&text, schema, None) {
+                    text = t;
+                }
+            if request["qualifyObjectNames"].as_bool() == Some(true)
+                && let Some(Ok((t, _))) = schema.map(|s| refactor::qualify_object_names(&text, s)) {
+                    text = t;
+                }
+            format(&text, preview.as_ref().unwrap_or(&state.options)).map(|t| json!({ "text": t })).map_err(|e| e.to_string())
+        }
+        "set_options" => {
+            let (options, warnings) = style::options_from_value(&request["options"])?;
+            state.options = options;
+            Ok(json!({ "warnings": warnings }))
+        }
+        "reload_snippets" => {
+            state.snippets = load_snippets();
+            Ok(json!({ "count": state.snippets.len() }))
+        }
+        "tool" => tool(request),
+        "outline" => Ok(json!({ "entries": tools::outline(str_field(request, "text")?) })),
+        "execution_warnings" => {
+            let truncate = request["truncate"].as_bool().unwrap_or(false);
+            let drop = request["drop"].as_bool().unwrap_or(false);
+            let warnings: Vec<String> = tools::execution_warnings(str_field(request, "text")?)
+                .into_iter()
+                .filter(|w| (truncate || !w.contains("TRUNCATE")) && (drop || !w.contains("DROP")))
+                .collect();
+            Ok(json!({ "warnings": warnings }))
+        }
+        "object_at" => {
+            let found = state.schemas.get(key).and_then(|s| info::object_at(str_field(request, "text").ok()?, usize_field(request, "caret").ok()?, s));
+            Ok(found.map_or(Value::Null, |o| json!({ "schema": o.schema, "name": o.name, "kind": o.kind })))
+        }
+        "table_script" => {
+            let details: script::TableDetails = serde_json::from_value(request["details"].clone()).map_err(|e| e.to_string())?;
+            let nl = request["newline"].as_str().unwrap_or("\r\n");
+            Ok(json!({ "text": script::table_script(&details, nl) }))
+        }
+        "to_alter" => edit_result(script::to_alter(str_field(request, "text")?)),
         "refactor" => refactor_op(request, state),
         "analyze" => {
-            let issues = analysis::analyze(str_field(request, "text")?, state.schemas.get(key));
+            let disabled: Vec<String> = request["disabled"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default();
+            let issues: Vec<_> = analysis::analyze(str_field(request, "text")?, state.schemas.get(key)).into_iter().filter(|i| !disabled.iter().any(|d| d == i.code)).collect();
             Ok(json!({ "issues": issues }))
         }
         "fix" => {
@@ -172,7 +273,7 @@ fn handle(request: &Value, state: &mut State, opts: &Options) -> Result<Value, S
 pub fn run(opts: &Options) -> std::io::Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
-    let mut state = State { schemas: HashMap::new(), snippets: load_snippets() };
+    let mut state = State { schemas: HashMap::new(), snippets: load_snippets(), options: opts.clone() };
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -181,7 +282,7 @@ pub fn run(opts: &Options) -> std::io::Result<()> {
         let reply = match serde_json::from_str::<Value>(&line) {
             Ok(request) => {
                 let id = request["id"].clone();
-                match handle(&request, &mut state, opts) {
+                match handle(&request, &mut state) {
                     Ok(result) => json!({ "id": id, "result": result }),
                     Err(error) => json!({ "id": id, "error": error }),
                 }

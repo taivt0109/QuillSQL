@@ -157,7 +157,7 @@ namespace QuillSql.Vsix
             var dte = Dte;
             if (dte != null)
             {
-                dte.StatusBar.Text = "QuillSQL: " + message;
+                dte.StatusBar.Text = "QuillSQL: " + Loc.T(message);
             }
         }
 
@@ -181,25 +181,20 @@ namespace QuillSql.Vsix
         public static string Prompt(string title, string label, string initial)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            var box = new TextBox { Text = initial ?? "", Margin = new Thickness(0, 6, 0, 10), MinWidth = 320 };
-            var ok = new Button { Content = "OK", IsDefault = true, MinWidth = 80, Margin = new Thickness(0, 0, 8, 0) };
-            var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 80 };
-            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-            buttons.Children.Add(ok);
-            buttons.Children.Add(cancel);
-            var panel = new StackPanel { Margin = new Thickness(12) };
-            panel.Children.Add(new TextBlock { Text = label, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 });
-            panel.Children.Add(box);
-            panel.Children.Add(buttons);
-            var window = new Window
-            {
-                Title = title,
-                Content = panel,
-                SizeToContent = SizeToContent.WidthAndHeight,
-                ResizeMode = ResizeMode.NoResize,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                ShowInTaskbar = false,
-            };
+            var box = new TextBox { Text = initial ?? "", Margin = new Thickness(0, 8, 0, 0), MinWidth = 380, MinHeight = 26, Padding = new Thickness(4, 2, 4, 2), VerticalContentAlignment = VerticalAlignment.Center };
+            var ok = Theme.DialogButton(Loc.T("OK"), isDefault: true);
+            var cancel = Theme.DialogButton(Loc.T("Cancel"), isCancel: true);
+            var body = new StackPanel { Margin = new Thickness(20, 18, 20, 20) };
+            body.Children.Add(new TextBlock { Text = Loc.T(label), TextWrapping = TextWrapping.Wrap, MaxWidth = 440, HorizontalAlignment = HorizontalAlignment.Left });
+            body.Children.Add(box);
+            var root = new DockPanel();
+            var footer = Theme.Footer(null, ok, cancel);
+            DockPanel.SetDock(footer, Dock.Bottom);
+            root.Children.Add(footer);
+            root.Children.Add(body);
+            var window = Theme.Dialog(Loc.T(title), false);
+            window.Content = root;
+            window.SizeToContent = SizeToContent.WidthAndHeight;
             SetOwner(window);
             ok.Click += (s, e) => window.DialogResult = true;
             window.Loaded += (s, e) =>
@@ -210,30 +205,34 @@ namespace QuillSql.Vsix
             return window.ShowDialog() == true ? box.Text : null;
         }
 
-        /// <summary>A modal yes/no question; true when the user chooses `action`.</summary>
-        public static bool Confirm(string title, string message, string action)
+        /// <summary>
+        /// A modal yes/no question; true when the user chooses `action`. With `safeDefault`, Enter
+        /// and the initial focus pick Cancel, for questions about something that cannot be undone.
+        /// </summary>
+        public static bool Confirm(string title, string message, string action, bool safeDefault = false)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            var ok = new Button { Content = action, IsDefault = true, MinWidth = 90, Margin = new Thickness(0, 0, 8, 0) };
-            var cancel = new Button { Content = "Cancel", IsCancel = true, MinWidth = 80 };
-            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
-            buttons.Children.Add(ok);
-            buttons.Children.Add(cancel);
-            var panel = new StackPanel { Margin = new Thickness(14) };
-            panel.Children.Add(new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, MaxWidth = 440 });
-            panel.Children.Add(buttons);
-            var window = new Window
-            {
-                Title = title,
-                Content = panel,
-                SizeToContent = SizeToContent.WidthAndHeight,
-                ResizeMode = ResizeMode.NoResize,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                ShowInTaskbar = false,
-            };
+            var ok = Theme.DialogButton(Loc.T(action), isDefault: !safeDefault);
+            var cancel = Theme.DialogButton(Loc.T("Cancel"), isDefault: safeDefault, isCancel: true);
+            // A warning sign for questions about something that cannot be undone, otherwise an info sign.
+            var icon = Theme.Icon(safeDefault ? Theme.WarningGlyph : Theme.InfoGlyph, 28, Theme.Frozen(safeDefault ? Theme.Amber : Theme.Blue));
+            icon.VerticalAlignment = VerticalAlignment.Top;
+            icon.Margin = new Thickness(0, 0, 16, 0);
+            var body = new DockPanel { Margin = new Thickness(20, 20, 24, 22) };
+            DockPanel.SetDock(icon, Dock.Left);
+            body.Children.Add(icon);
+            body.Children.Add(new TextBlock { Text = Loc.T(message), TextWrapping = TextWrapping.Wrap, MaxWidth = 460, MinWidth = 260, LineHeight = 19, VerticalAlignment = VerticalAlignment.Center });
+            var root = new DockPanel();
+            var footer = Theme.Footer(null, ok, cancel);
+            DockPanel.SetDock(footer, Dock.Bottom);
+            root.Children.Add(footer);
+            root.Children.Add(body);
+            var window = Theme.Dialog(Loc.T(title), false);
+            window.Content = root;
+            window.SizeToContent = SizeToContent.WidthAndHeight;
             SetOwner(window);
             ok.Click += (s, e) => window.DialogResult = true;
-            window.Loaded += (s, e) => ok.Focus();
+            window.Loaded += (s, e) => (safeDefault ? cancel : ok).Focus();
             return window.ShowDialog() == true;
         }
 

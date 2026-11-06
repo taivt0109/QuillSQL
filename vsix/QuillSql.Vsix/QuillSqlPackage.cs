@@ -4,7 +4,9 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using EnvDTE;
 using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Threading;
 using Task = System.Threading.Tasks.Task;
+using TaskScheduler = System.Threading.Tasks.TaskScheduler;
 
 namespace QuillSql.Vsix
 {
@@ -17,7 +19,7 @@ namespace QuillSql.Vsix
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.2.0";
+        public const string Version = "0.3.0";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
@@ -42,6 +44,29 @@ namespace QuillSql.Vsix
         private const int ActualPlanAiCommandId = 0x0114;
         private const int SlowQueriesAiCommandId = 0x0115;
         private const int CheckUpdatesCommandId = 0x0116;
+        private const int ScriptObjectCommandId = 0x0120;
+        private const int InsertSemicolonsCommandId = 0x0121;
+        private const int UnformatCommandId = 0x0122;
+        private const int AddBracketsCommandId = 0x0123;
+        private const int RemoveBracketsCommandId = 0x0124;
+        private const int UppercaseCommandId = 0x0125;
+        private const int LowercaseCommandId = 0x0126;
+        private const int RemoveCommentsCommandId = 0x0127;
+        private const int SpExecuteSqlCommandId = 0x0128;
+        private const int ExecuteStatementCommandId = 0x0129;
+        private const int ExecuteBatchCommandId = 0x012A;
+        private const int SummarizeCommandId = 0x012B;
+        private const int FormatAllCommandId = 0x012C;
+        private const int DuplicateTabCommandId = 0x012D;
+        private const int CloseUnmodifiedCommandId = 0x012E;
+        private const int CreateSnippetCommandId = 0x012F;
+        private const int AddCommasCommandId = 0x0130;
+        private const int AddQuotesCommasCommandId = 0x0131;
+        private const int DisableFormattingCommandId = 0x0132;
+        private const int ToggleEnabledCommandId = 0x0133;
+        private const int OptionsCommandId = 0x0134;
+        private const int LogFolderCommandId = 0x0135;
+        private const int ShowCardCommandId = 0x0136;
 
         private EditorWatcher _watcher;
 
@@ -50,9 +75,9 @@ namespace QuillSql.Vsix
             await base.InitializeAsync(cancellationToken, progress);
             var commands = await GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
             await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-            void add(int id, Action run) => commands?.AddCommand(new MenuCommand((s, e) => run(), new CommandID(CommandSet, id)));
-            commands?.AddCommand(new MenuCommand(OnFormat, new CommandID(CommandSet, FormatCommandId)));
-            commands?.AddCommand(new MenuCommand(OnRefresh, new CommandID(CommandSet, RefreshCommandId)));
+            void add(int id, Action run) => commands?.AddCommand(Localized(new OleMenuCommand((s, e) => run(), new CommandID(CommandSet, id))));
+            commands?.AddCommand(Localized(new OleMenuCommand(OnFormat, new CommandID(CommandSet, FormatCommandId))));
+            commands?.AddCommand(Localized(new OleMenuCommand(OnRefresh, new CommandID(CommandSet, RefreshCommandId))));
             add(ExpandWildcardsCommandId, Commands.ExpandWildcards);
             add(QualifyCommandId, Commands.QualifyObjectNames);
             add(AddAsCommandId, () => Commands.TableAliases(true));
@@ -73,6 +98,37 @@ namespace QuillSql.Vsix
             add(ActualPlanAiCommandId, () => AiAssistant.AnalyzePlan(this, true));
             add(SlowQueriesAiCommandId, () => AiAssistant.ReviewSlowQueries(this));
             add(CheckUpdatesCommandId, () => Updater.Start(this, true));
+            add(ScriptObjectCommandId, () => ObjectScripts.ScriptAtCaret(true));
+            add(InsertSemicolonsCommandId, () => TextCommands.Rewrite("semicolons", "semicolons inserted"));
+            add(UnformatCommandId, () => TextCommands.Rewrite("unformat", "unformatted"));
+            add(AddBracketsCommandId, () => TextCommands.Rewrite("add_brackets", "brackets added"));
+            add(RemoveBracketsCommandId, () => TextCommands.Rewrite("remove_brackets", "brackets removed"));
+            add(UppercaseCommandId, () => TextCommands.Rewrite("uppercase", "keywords uppercased"));
+            add(LowercaseCommandId, () => TextCommands.Rewrite("lowercase", "keywords lowercased"));
+            add(RemoveCommentsCommandId, () => TextCommands.Rewrite("remove_comments", "comments removed"));
+            add(SpExecuteSqlCommandId, () => TextCommands.Rewrite("sp_executesql", "sp_executesql converted"));
+            add(ExecuteStatementCommandId, () => TextCommands.ExecuteAtCaret(false));
+            add(ExecuteBatchCommandId, () => TextCommands.ExecuteAtCaret(true));
+            add(SummarizeCommandId, TextCommands.SummarizeScript);
+            add(FormatAllCommandId, TextCommands.FormatAllTabs);
+            add(DuplicateTabCommandId, TextCommands.DuplicateTab);
+            add(CloseUnmodifiedCommandId, TextCommands.CloseUnmodifiedTabs);
+            add(CreateSnippetCommandId, TextCommands.CreateSnippet);
+            add(AddCommasCommandId, () => TextCommands.AddCommas(false));
+            add(AddQuotesCommasCommandId, () => TextCommands.AddCommas(true));
+            add(DisableFormattingCommandId, TextCommands.DisableFormatting);
+            add(ToggleEnabledCommandId, TextCommands.ToggleEnabled);
+            add(OptionsCommandId, () => OptionsWindow.Show(this));
+            add(LogFolderCommandId, TextCommands.OpenLogFolder);
+            add(ShowCardCommandId, () =>
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+                Log.Verbose("show object card command");
+                if (!CompletionController.ShowCard(EditorContext.Active()?.View))
+                {
+                    EditorContext.Status("open a query window first.");
+                }
+            });
             try
             {
                 CodeAnalysis.Initialize(this);
@@ -166,7 +222,14 @@ namespace QuillSql.Vsix
                 var end = (useSelection ? selection.BottomPoint : document.EndPoint).CreateEditPoint();
                 var original = start.GetText(end);
 
-                var formatted = await FormatterProcess.RunAsync(original, DisposalToken);
+                var key = Commands.MetadataKey(out _);
+                var settings = Settings.Current;
+                await TaskScheduler.Default;
+                var reply = EngineProcess.Shared.Request("format", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(original)
+                    + ",\"expandWildcards\":" + Json.Bool(settings.FormatExpandsWildcards) + ",\"qualifyObjectNames\":" + Json.Bool(settings.FormatQualifiesNames));
+                var parsed = reply == null ? null : Json.Parse<TextReply>(reply);
+                await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+                var formatted = parsed?.Result?.Text ?? throw new InvalidOperationException(parsed?.Error ?? "the engine did not answer");
                 await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
 
                 if (formatted == original)
@@ -210,12 +273,26 @@ namespace QuillSql.Vsix
             }
         }
 
+        /// <summary>Shows the command's menu text in the chosen language; English comes from the .vsct.</summary>
+        private static OleMenuCommand Localized(OleMenuCommand command)
+        {
+            command.BeforeQueryStatus += (s, e) =>
+            {
+                var c = (OleMenuCommand)s;
+                if (MenuTexts.English.TryGetValue(c.CommandID.ID, out var english))
+                {
+                    c.Text = Loc.T(english);
+                }
+            };
+            return command;
+        }
+
         private static void SetStatus(DTE dte, string message)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             if (dte != null)
             {
-                dte.StatusBar.Text = message;
+                dte.StatusBar.Text = message.StartsWith("QuillSQL: ", StringComparison.Ordinal) ? "QuillSQL: " + Loc.T(message.Substring(10)) : message;
             }
         }
     }

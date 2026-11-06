@@ -22,8 +22,16 @@ namespace QuillSql.Vsix
     [DataContract]
     internal sealed class AiSettings
     {
+        public static readonly string FilePath = Path.Combine(Updater.Folder, "ai.json");
+
         [DataMember(Name = "model")] public string Model { get; set; }
         [DataMember(Name = "language")] public string Language { get; set; }
+
+        public void Save()
+        {
+            Directory.CreateDirectory(Updater.Folder);
+            File.WriteAllText(FilePath, "{\"model\":" + Json.Str(Model ?? "") + ",\"language\":" + Json.Str(Language ?? "") + "}");
+        }
     }
 
     /// <summary>
@@ -92,7 +100,7 @@ namespace QuillSql.Vsix
             return null;
         }
 
-        private static AiSettings Settings()
+        public static AiSettings LoadSettings()
         {
             var path = Path.Combine(Folder, "ai.json");
             try
@@ -134,7 +142,7 @@ namespace QuillSql.Vsix
         private static string Ask(string systemPrompt, string input)
         {
             var claude = FindClaude() ?? throw new InvalidOperationException("Claude Code CLI was not found. Install it and sign in with `claude` first.");
-            var settings = Settings();
+            var settings = LoadSettings();
             Directory.CreateDirectory(Folder);
             var systemFile = Path.Combine(Folder, "ai-system-prompt.txt");
             var system = systemPrompt + (string.IsNullOrEmpty(settings.Language) ? "" : " Write explanations and comments in " + settings.Language + ".");
@@ -348,8 +356,8 @@ namespace QuillSql.Vsix
                     return;
                 }
                 var run = EditorContext.Confirm("Analyze Actual Plan with AI",
-                    "Run the query on " + connection.Description + " to measure its actual plan?\n\n"
-                    + "The results are discarded. The script only reads, but it uses the server like any query.", "Run");
+                    Loc.T("Run the query on " + connection.Description + " to measure its actual plan?") + "\n\n"
+                    + Loc.T("The results are discarded. The script only reads, but it uses the server like any query."), "Run");
                 if (!run)
                 {
                     return;

@@ -466,6 +466,10 @@ enum Context {
     InsertTarget,
     /// After `EXEC name `: offer the parameters.
     ExecArgs,
+    /// After `ALTER VIEW` or `DROP VIEW`.
+    Views,
+    /// After `ALTER FUNCTION` or `DROP FUNCTION`.
+    Functions,
     Nothing,
 }
 
@@ -624,6 +628,8 @@ fn wants(context: Context, kind: &str) -> bool {
         Context::TableSource => matches!(kind, "table" | "view" | "table_function" | "synonym"),
         Context::Procedure => matches!(kind, "procedure" | "synonym"),
         Context::Expression => matches!(kind, "scalar_function" | "table" | "view"),
+        Context::Views => kind == "view",
+        Context::Functions => matches!(kind, "scalar_function" | "table_function"),
         Context::InsertColumns | Context::InsertTarget | Context::ExecArgs | Context::Nothing => false,
     }
 }
@@ -652,11 +658,42 @@ fn object_at(tokens: &[Token], from: usize, to: usize, schema: &Schema) -> Optio
     resolve(&source, schema).cloned()
 }
 
+/// Choices the user can change in the options.
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CompleteOptions {
+    /// Give a table picked after FROM or JOIN an alias: `Customers` becomes `Customers AS c`.
+    pub assign_aliases: bool,
+    /// Write `AS` before generated aliases.
+    pub alias_with_as: bool,
+    /// Insert objects with their schema (`dbo.Customers`) even in the default schema.
+    pub qualify_object_names: bool,
+    /// List sys and INFORMATION_SCHEMA views without typing their schema first.
+    pub show_system_objects: bool,
+}
+
+impl Default for CompleteOptions {
+    fn default() -> Self {
+        CompleteOptions { assign_aliases: true, alias_with_as: true, qualify_object_names: true, show_system_objects: false }
+    }
+}
+
+fn is_system(o: &DbObject) -> bool {
+    o.schema.eq_ignore_ascii_case("sys") || o.schema.eq_ignore_ascii_case("INFORMATION_SCHEMA")
+}
+
+/// Built-in functions called without parentheses.
+const NILADIC: &[&str] = &["CURRENT_TIMESTAMP", "CURRENT_USER", "SESSION_USER", "SYSTEM_USER", "USER", "CURRENT_DATE"];
+
 pub fn complete(text: &str, caret_utf16: usize, schema: Option<&Schema>) -> Completion {
     complete_with(text, caret_utf16, schema, &[])
 }
 
 pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, snippets: &[Snippet]) -> Completion {
+    complete_full(text, caret_utf16, schema, snippets, CompleteOptions::default())
+}
+
+pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, snippets: &[Snippet], options: CompleteOptions) -> Completion {
     let caret = utf16_to_byte(text, caret_utf16);
     let none = |at: usize| Completion { start: byte_to_utf16(text, at), items: Vec::new() };
     let before = &text[..caret];
@@ -724,7 +761,9 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         _ if insert_target.is_some() => Context::InsertTarget,
         _ if exec_target.is_some() => Context::ExecArgs,
         Some((Kind::Word, w)) if matches!(w.as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO" | "TABLE" | "MERGE" | "USING" | "APPLY") => Context::TableSource,
-        Some((Kind::Word, w)) if matches!(w.as_str(), "EXEC" | "EXECUTE") => Context::Procedure,
+        Some((Kind::Word, w)) if matches!(w.as_str(), "EXEC" | "EXECUTE" | "PROC" | "PROCEDURE") => Context::Procedure,
+        Some((Kind::Word, w)) if w == "VIEW" => Context::Views,
+        Some((Kind::Word, w)) if w == "FUNCTION" => Context::Functions,
         Some((Kind::Comma, _)) if clause == "FROM" || clause == "JOIN" => Context::TableSource,
         Some((Kind::LParen | Kind::Comma, _)) if a.in_insert_column_list(k) => Context::InsertColumns,
         Some((Kind::Word, w)) if matches!(w.as_str(), "AS") && clause == "FROM" => Context::Nothing,
@@ -743,6 +782,24 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
     let indent: String = before[line_start..].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
     let prev_upper = prev_word.as_ref().filter(|(kind, _)| *kind == Kind::Word).map(|(_, w)| w.as_str()).unwrap_or("");
     let earlier: Vec<&Source> = sources.iter().filter(|s| s.at < k).collect();
+    // An alias is added after FROM, JOIN or a comma in FROM, unless one is already written.
+    let after = (0..a.tokens.len()).find(|&j| !a.tokens[j].is_comment() && a.starts[j] >= caret);
+    let has_alias = after.is_some_and(|j| {
+        let t = &a.tokens[j];
+        matches!(t.kind, Kind::Bracket | Kind::Quoted | Kind::Dot | Kind::LParen) || (t.kind == Kind::Word && (!is_reserved(&a.up[j]) || a.up[j] == "AS"))
+    });
+    let aliasing = options.assign_aliases
+        && context == Context::TableSource
+        && !has_alias
+        && (matches!(prev_upper, "FROM" | "JOIN") || (matches!(prev_word, Some((Kind::Comma, _))) && clause == "FROM"));
+    let taken: Vec<String> = sources.iter().filter(|s| s.at < k || a.starts[s.at] > caret).map(|s| s.reference.clone()).collect();
+    let with_alias = |item: &mut Item, name: &str| {
+        let alias = alias_for(name, &taken);
+        if !eq(&alias, name) {
+            item.insert = format!("{}{}{alias}", item.insert, if options.alias_with_as { " AS " } else { " " });
+        }
+    };
+    let qualify = options.qualify_object_names;
 
     if variable {
         for (name, ty) in a.declared_variables(prefix_start) {
@@ -781,7 +838,11 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                 c => wants(c, kind),
             };
             for o in meta.objects.iter().filter(|o| eq(&o.schema, q) && wanted(&o.kind)) {
-                items.push(object_item(o, meta, true));
+                let mut item = object_item(o, meta, true);
+                if aliasing && matches!(o.kind.as_str(), "table" | "view" | "synonym") {
+                    with_alias(&mut item, &o.name);
+                }
+                items.push(item);
             }
         } else if let Some(src) = sources.iter().find(|s| s.parts.last().is_some_and(|p| eq(p, q))) {
             for (name, ty) in source_columns(src, schema) {
@@ -790,10 +851,16 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         }
     } else {
         match context {
-            Context::TableSource | Context::Procedure => {
-                for o in meta.objects.iter().filter(|o| wants(context, &o.kind)) {
+            Context::TableSource | Context::Procedure | Context::Views | Context::Functions => {
+                for o in meta.objects.iter().filter(|o| wants(context, &o.kind) && (options.show_system_objects || !is_system(o))) {
                     let mut item = object_item(o, meta, false);
-                    if context == Context::Procedure && o.kind == "procedure" && !o.params.is_empty() {
+                    if qualify && !o.schema.is_empty() {
+                        item.insert = format!("{}.{}", quote(&o.schema), quote(&o.name));
+                    }
+                    if aliasing && matches!(o.kind.as_str(), "table" | "view" | "synonym") {
+                        with_alias(&mut item, &o.name);
+                    }
+                    if matches!(prev_upper, "EXEC" | "EXECUTE") && o.kind == "procedure" && !o.params.is_empty() {
                         let align = " ".repeat(column + item.insert.chars().count() + 1);
                         item.insert = format!("{} {}", item.insert, parameter_list(&o.params, &align, nl));
                     }
@@ -806,16 +873,21 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                         for e in &earlier {
                             let Some(eo) = resolve(e, meta) else { continue };
                             if let Some((cond, fk)) = join_conditions((&alias, o), (&e.reference, eo), meta).into_iter().next() {
-                                let name = object_item(o, meta, false).insert;
+                                let name = if qualify && !o.schema.is_empty() { format!("{}.{}", quote(&o.schema), quote(&o.name)) } else { object_item(o, meta, false).insert };
                                 let kind = if fk { "join" } else { "join_guess" };
-                                items.push(Item { label: o.name.clone(), insert: format!("{name} {alias} ON {cond}"), kind, detail: format!("ON {cond}") });
+                                let as_ = if options.alias_with_as { " AS " } else { " " };
+                                items.push(Item { label: o.name.clone(), insert: format!("{name}{as_}{alias} ON {cond}"), kind, detail: format!("ON {cond}") });
                             }
                         }
                     }
                 }
                 if context == Context::TableSource {
                     for cte in a.ctes(stmt_start, stmt_end) {
-                        items.push(Item { label: cte.reference.clone(), insert: quote(&cte.reference), kind: "cte", detail: "common table expression".into() });
+                        let mut item = Item { label: cte.reference.clone(), insert: quote(&cte.reference), kind: "cte", detail: "common table expression".into() };
+                        if aliasing {
+                            with_alias(&mut item, &cte.reference);
+                        }
+                        items.push(item);
                     }
                 }
                 for s in &meta.schemas {
@@ -898,10 +970,15 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                     items.push(Item { label: s.reference.clone(), insert: quote(&s.reference), kind: "alias", detail: s.parts.join(".") });
                 }
                 for o in meta.objects.iter().filter(|o| o.kind == "scalar_function") {
-                    items.push(object_item(o, meta, false));
+                    let mut item = object_item(o, meta, false);
+                    // Scalar functions must be called with their schema.
+                    item.insert = format!("{}.{}()", quote(&o.schema), quote(&o.name));
+                    items.push(item);
                 }
                 for f in FUNCTIONS {
-                    items.push(Item { label: f.to_string(), insert: f.to_string(), kind: "function", detail: "built-in function".into() });
+                    // The editor puts the caret between the parentheses.
+                    let insert = if NILADIC.contains(f) { f.to_string() } else { format!("{f}()") };
+                    items.push(Item { label: f.to_string(), insert, kind: "function", detail: "built-in function".into() });
                 }
                 for kw in STATEMENT_KEYWORDS {
                     items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
