@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::common::{self, Source};
+use super::sources;
 use crate::args::{self, ArgError, Args, Switch, exit};
 use crate::catalog::Database;
 use crate::schema::select::Selection;
@@ -57,7 +58,16 @@ const ACTIONS: [Switch; 9] = [
 ];
 
 fn switches() -> Vec<Switch> {
-    common::GENERAL.into_iter().chain(common::SOURCE1).chain(common::SOURCE2).chain(ACTIONS).chain(common::DEPLOY).collect()
+    common::GENERAL
+        .into_iter()
+        .chain(common::SOURCE1)
+        .chain(sources::FOLDER1)
+        .chain(common::SOURCE2)
+        .chain(sources::FOLDER2)
+        .chain(ACTIONS)
+        .chain(sources::SCHEMA)
+        .chain(common::DEPLOY)
+        .collect()
 }
 
 const SUMMARY: &str = "Compares the schemas of two databases (live or snapshots) and deploys the differences.";
@@ -82,6 +92,16 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let project = common::project_of(args, crate::project::ProjectKind::Schema)?;
     let source1 = common::source(args, 1)?
         .ok_or_else(|| ArgError::new(exit::USAGE, "give database 1: /database1 (with /server1) or /snapshot1"))?;
+    let options = match (args.get("options"), &project) {
+        (Some(list), _) => Options::parse(list).map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?,
+        (None, Some(p)) => Options::parse(&p.options.join(",")).map_err(|e| ArgError::new(exit::DATA_ERROR, e))?,
+        (None, None) => Options::default_set(),
+    };
+    options.validate().map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?;
+    if let Some(dir) = args.get("makescripts") {
+        let (db, _) = load(&source1, args, &options)?;
+        return sources::make_scripts(args, &db, Path::new(dir), &options, &describe(&source1, &db));
+    }
     if let Some(path) = args.get("makesnapshot") {
         let path = Path::new(path);
         common::check_output(path, args)?;
@@ -102,12 +122,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let source2 = common::source(args, 2)?.ok_or_else(|| {
         ArgError::new(exit::USAGE, "give database 2: /database2 (with /server2) or /snapshot2, or use /makesnapshot")
     })?;
-    let options = match (args.get("options"), &project) {
-        (Some(list), _) => Options::parse(list).map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?,
-        (None, Some(p)) => Options::parse(&p.options.join(",")).map_err(|e| ArgError::new(exit::DATA_ERROR, e))?,
-        (None, None) => Options::default_set(),
-    };
-    options.validate().map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?;
+    let filter = sources::filter(args, project.as_ref().and_then(|p| p.redgate_filter.as_deref()))?;
     let (includes, excludes) = match &project {
         Some(p) if !args.has("include") && !args.has("exclude") => (p.include.clone(), p.exclude.clone()),
         _ => (args.all("include").to_vec(), args.all("exclude").to_vec()),
@@ -118,8 +133,8 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         common::check_output(Path::new(path), args)?;
     }
 
-    let db1 = common::load(&source1, args)?;
-    let db2 = common::load(&source2, args)?;
+    let (db1, folder1) = load(&source1, args, &options)?;
+    let (db2, folder2) = load(&source2, args, &options)?;
     let mut comparison = schema::compare(&db1, &db2, &options, &mappings);
     if let Some(p) = &project {
         for d in &mut comparison.differences {
@@ -129,7 +144,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
     }
     let identical = comparison.identical();
-    let listed: Vec<Difference> = selection.apply(&mut comparison).into_iter().cloned().collect();
+    let mut listed: Vec<Difference> = selection.apply(&mut comparison).into_iter().cloned().collect();
+    if let Some(f) = &filter {
+        sources::apply_filter(f, &mut comparison, &mut listed);
+    }
     let quiet = args.has("quiet");
 
     if let Some(path) = args.get("json") {
@@ -190,10 +208,22 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     if !args.has("scriptfile") && !args.has("synchronize") {
         return Ok(exit::SUCCESS);
     }
-    if args.has("synchronize") && !matches!(source2, Source::Live(_)) {
-        return Err(ArgError::new(exit::USAGE, "/synchronize needs database 2 to be a live database, not a snapshot"));
+    if args.has("synchronize") && matches!(source2, Source::Scripts { revision: Some(_), .. }) {
+        return Err(ArgError::new(exit::USAGE, "/synchronize cannot write to a source control revision; give the scripts folder with /scripts2"));
     }
-    let script = build_script(args, &comparison, &db1, &db2, &options, &mappings, &source1, &source2)?;
+    if args.has("synchronize") && !matches!(source2, Source::Live(_) | Source::Scripts { .. }) {
+        return Err(ArgError::new(exit::USAGE, "/synchronize needs database 2 to be a live database or a scripts folder, not a snapshot"));
+    }
+    let mut script = build_script(args, &comparison, &db1, &db2, &options, &mappings, &source1, &source2)?;
+    if let Some(f) = &folder1 {
+        sources::add_pre_post(&mut script, f, &options)?;
+    }
+    // ForceSyncScriptGeneration: only the SQL script, the folder stays as it is.
+    if let (true, Some(f)) = (args.has("synchronize") && !options.has(crate::schema::Opt::ForceSyncScriptGeneration), &folder2) {
+        common::write_script(args, &script)?;
+        sources::sync_folder(args, &db1, f, &comparison.differences, &options)?;
+        return Ok(exit::SUCCESS);
+    }
     common::write_script(args, &script)?;
     common::report_warnings(args, &script);
     common::check_warnings(args, &script)?;
@@ -222,6 +252,18 @@ fn describe(source: &Source, db: &Database) -> String {
     match source {
         Source::Live(spec) => format!("{}.{}", spec.server, db.name),
         Source::Snapshot(path) => format!("{} (snapshot {})", db.name, path.display()),
+        Source::Scripts { path, .. } => format!("{} (scripts folder {})", db.name, path.display()),
+    }
+}
+
+/// Reads one side; a scripts folder also comes back as itself, for deploying to it.
+fn load(source: &Source, args: &Args, options: &Options) -> Result<(Database, Option<crate::sources::folder::Folder>), ArgError> {
+    match source {
+        Source::Scripts { path, revision } => {
+            let (db, folder) = sources::load(path, revision.as_deref(), args, options)?;
+            Ok((db, Some(folder)))
+        }
+        _ => Ok((common::load(source, args)?, None)),
     }
 }
 

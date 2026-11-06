@@ -3,6 +3,7 @@
 pub mod cast;
 pub mod compare;
 pub mod ddl;
+pub mod filter;
 pub mod deploy;
 pub mod options;
 pub mod print;
