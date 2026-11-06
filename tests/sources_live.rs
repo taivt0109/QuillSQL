@@ -61,6 +61,7 @@ impl Server {
 
 const SHOP: &str = include_str!("fixtures/compare/shop.sql");
 const SHOP_CHANGES: &str = include_str!("fixtures/compare/shop_changes.sql");
+const XML_SPATIAL: &str = include_str!("fixtures/compare/sources_xml_spatial.sql");
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("quill-sources-{name}-{}", std::process::id()));
@@ -78,7 +79,7 @@ fn assert_identical(a: &Database, b: &Database, opts: &Options, what: &str) {
 fn makescripts_reads_back_identical() {
     let Some(server) = server() else { return };
     let changed = format!("{SHOP}\nGO\n{SHOP_CHANGES}");
-    for (name, script) in [("QD_sources_RT1", SHOP), ("QD_sources_RT2", changed.as_str())] {
+    for (name, script) in [("QD_sources_RT1", SHOP), ("QD_sources_RT2", changed.as_str()), ("QD_sources_RT3", XML_SPATIAL)] {
         server.create(name, script);
         let live = server.read(name);
         let dir = temp(name);
@@ -111,17 +112,20 @@ fn makescripts_reads_back_identical() {
 #[test]
 fn hand_written_script_reads_like_the_database() {
     let Some(server) = server() else { return };
-    server.create("QD_sources_Hand", SHOP);
-    let live = server.read("QD_sources_Hand");
-    let defaults = parse::Defaults { collation: live.collation.clone(), ..Default::default() };
-    let mut r = parse::Reader::new(defaults);
-    r.add_file(Path::new("shop.sql"), SHOP);
-    let read = r.finish("shop");
-    assert!(read.messages.is_empty(), "{:?}", read.messages);
-    // Unnamed constraints get other generated names than the server's.
-    let opts = Options::default_set().with(Opt::IgnoreSystemNamedConstraintNames);
-    assert_identical(&read.database, &live, &opts, "shop.sql");
-    server.drop("QD_sources_Hand");
+    for (file, script) in [("shop.sql", SHOP), ("xml_spatial.sql", XML_SPATIAL)] {
+        server.create("QD_sources_Hand", script);
+        let live = server.read("QD_sources_Hand");
+        let defaults = parse::Defaults { collation: live.collation.clone(), ..Default::default() };
+        let mut r = parse::Reader::new(defaults);
+        r.add_file(Path::new(file), script);
+        let read = r.finish("hand");
+        assert!(read.messages.is_empty(), "{:?}", read.messages);
+        // Unnamed constraints get other generated names than the server's.
+        let opts = Options::default_set().with(Opt::IgnoreSystemNamedConstraintNames);
+        assert_identical(&read.database, &live, &opts, file);
+        assert_identical(&live, &read.database, &opts, file);
+        server.drop("QD_sources_Hand");
+    }
 }
 
 #[test]

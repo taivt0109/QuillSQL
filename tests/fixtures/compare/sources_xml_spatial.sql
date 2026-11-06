@@ -1,0 +1,25 @@
+-- XML and spatial indexes, for reading and writing scripts folders.
+CREATE TABLE dbo.Doc (Id int NOT NULL CONSTRAINT PK_Doc PRIMARY KEY, Body xml NULL, Shape geometry NULL, Place geography NULL);
+GO
+CREATE PRIMARY XML INDEX PX_Doc ON dbo.Doc (Body);
+GO
+CREATE XML INDEX SX_Doc_Path ON dbo.Doc (Body) USING XML INDEX PX_Doc FOR PATH;
+GO
+CREATE XML INDEX SX_Doc_Value ON dbo.Doc (Body) USING XML INDEX PX_Doc FOR VALUE;
+GO
+CREATE SPATIAL INDEX SP_Doc_Shape ON dbo.Doc (Shape) USING GEOMETRY_GRID WITH (BOUNDING_BOX = (0, 0, 100, 50.5), GRIDS = (LOW, MEDIUM, HIGH, MEDIUM), CELLS_PER_OBJECT = 20);
+GO
+CREATE SPATIAL INDEX SP_Doc_Shape2 ON dbo.Doc (Shape) WITH (BOUNDING_BOX = (-10, -10, 10, 10));
+GO
+CREATE SPATIAL INDEX SP_Doc_Place ON dbo.Doc (Place);
+GO
+CREATE SPATIAL INDEX SP_Doc_Place2 ON dbo.Doc (Place) USING GEOGRAPHY_GRID WITH (GRIDS = (LEVEL_1 = HIGH, LEVEL_2 = LOW, LEVEL_3 = MEDIUM, LEVEL_4 = LOW), CELLS_PER_OBJECT = 64);
+GO
+CREATE TABLE dbo.Doc2 (Id int NOT NULL CONSTRAINT PK_Doc2 PRIMARY KEY, Body xml NULL);
+GO
+CREATE SELECTIVE XML INDEX SEL_Doc2 ON dbo.Doc2 (Body)
+WITH XMLNAMESPACES ('http://example.com/a' AS a, DEFAULT 'http://example.com/d')
+FOR (p1 = '/a:x/a:y' AS XQUERY 'xs:string' MAXLENGTH(20) SINGLETON, p2 = '/a:x/a:z' AS SQL int, p3 = '/a:x/w' AS XQUERY 'node()', p4 = '/q');
+GO
+CREATE XML INDEX SSX_Doc2 ON dbo.Doc2 (Body) USING XML INDEX SEL_Doc2 FOR (p1);
+GO
