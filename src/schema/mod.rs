@@ -9,6 +9,7 @@ pub mod features;
 pub mod linediff;
 pub mod options;
 pub mod print;
+pub mod renames;
 pub mod report;
 pub mod select;
 pub mod text;
