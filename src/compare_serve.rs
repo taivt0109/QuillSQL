@@ -215,7 +215,11 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         "schema_compare" => {
             let project: Project = field(request, "project")?;
-            let opts = schema_options(&project)?;
+            let mut opts = schema_options(&project)?;
+            // Folders with an SSDT database project are compared with SsdtCompatibleOptions.
+            if [&project.source, &project.target].iter().any(|s| s.is_scripts() && crate::sources::sqlproj::find(std::path::Path::new(&s.path)).is_some()) {
+                opts = Options::parse("SsdtCompatibleOptions")?.iter().fold(opts, |o, x| o.with(x));
+            }
             let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
             let (db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
             let (db2, w2) = load_side_with_warnings(&project.target, 2, decrypt, progress)?;
