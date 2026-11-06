@@ -2,7 +2,9 @@
 
 pub mod cast;
 pub mod compare;
+mod compare_objects;
 pub mod ddl;
+pub mod ddl_objects;
 pub mod deploy;
 pub mod exists;
 pub mod features;

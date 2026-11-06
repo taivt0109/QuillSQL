@@ -507,6 +507,7 @@ pub fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<St
             for tr in &t.triggers {
                 parts.push(tr.definition.trim().to_string());
             }
+            parts.extend(schema::ddl_objects::table_parts(t));
             parts.join("\nGO\n")
         }),
         ObjectType::View => db.views.iter().find(|v| same(&v.schema, &v.name)).map(|v| {
@@ -550,6 +551,7 @@ pub fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<St
             .iter()
             .find(|p| p.class == "DATABASE" && p.name == name.name)
             .map(|p| ddl::add_xprop(p, "NULL, NULL, NULL, NULL, NULL, NULL")),
+        other => schema::ddl_objects::object_sql(db, other, name),
     }
 }
 

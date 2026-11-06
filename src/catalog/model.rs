@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::objects::*;
+
 /// Format version of the serialized model (snapshot files).
 pub const MODEL_VERSION: u32 = 1;
 
@@ -33,6 +35,58 @@ pub struct Database {
     /// Database-level DDL triggers.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ddl_triggers: Vec<DdlTrigger>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assemblies: Vec<Assembly>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub xml_schema_collections: Vec<XmlSchemaCollection>,
+    /// CREATE DEFAULT objects.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub defaults: Vec<BindableObject>,
+    /// CREATE RULE objects.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<BindableObject>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partition_functions: Vec<PartitionFunction>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partition_schemes: Vec<PartitionScheme>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fulltext_catalogs: Vec<FullTextCatalog>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fulltext_stoplists: Vec<FullTextStoplist>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub search_property_lists: Vec<SearchPropertyList>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub message_types: Vec<MessageType>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contracts: Vec<Contract>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub queues: Vec<Queue>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<Service>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<Route>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub service_bindings: Vec<ServiceBinding>,
+    /// Event notifications ON DATABASE (queue ones belong to their queue).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub event_notifications: Vec<EventNotification>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub certificates: Vec<Certificate>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asymmetric_keys: Vec<AsymmetricKey>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub symmetric_keys: Vec<SymmetricKey>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub security_policies: Vec<SecurityPolicy>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub external_data_sources: Vec<ExternalDataSource>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub external_file_formats: Vec<ExternalFileFormat>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub external_tables: Vec<ExternalTable>,
+    /// Names of the database scoped credentials (not compared; external data sources need them).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<String>,
 }
 
 /// A trigger ON DATABASE.
@@ -40,12 +94,21 @@ pub struct Database {
 #[serde(default, rename_all = "camelCase")]
 pub struct DdlTrigger {
     pub name: String,
-    /// The CREATE TRIGGER text; empty when encrypted.
+    /// The CREATE TRIGGER text; empty when encrypted or CLR.
     pub definition: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub encrypted: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// Event types and groups, as sys.trigger_events lists them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+    pub settings: ModuleSettings,
+    /// CLR triggers: `[assembly].[class].[method]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clr_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execute_as: Option<String>,
 }
 
 impl Database {
@@ -237,6 +300,8 @@ pub struct Column {
     /// Rule bound with sp_bindrule: `[schema].[name]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<Sensitivity>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +529,11 @@ pub struct Trigger {
     /// sp_settriggerorder: (event, FIRST|LAST).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub order: Vec<(String, String)>,
+    /// CLR triggers: `[assembly].[class].[method]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clr_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execute_as: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -510,6 +580,13 @@ pub struct Table {
     pub graph: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change_tracking: Option<ChangeTracking>,
+    /// CREATE STATISTICS objects (statistics of indexes and auto-created ones are not kept).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub statistics: Vec<Statistic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fulltext_index: Option<FullTextIndex>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_constraints: Vec<EdgeConstraint>,
 }
 
 impl Table {
@@ -564,6 +641,10 @@ pub struct View {
     pub indexes: Vec<Index>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<Trigger>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub statistics: Vec<Statistic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fulltext_index: Option<FullTextIndex>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -601,6 +682,31 @@ pub struct Routine {
     /// CLR: assembly.class.method.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_method: Option<String>,
+    /// CLR modules: the parameters (T-SQL modules carry them in their text).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<Parameter>,
+    /// CLR scalar functions and aggregates: the return type as written in DDL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returns: Option<String>,
+    /// CLR table-valued functions: the result columns.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub result_columns: Vec<Column>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub null_on_null_input: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Parameter {
+    /// With the `@`.
+    pub name: String,
+    /// The type as written in DDL: `nvarchar(50)`, `[dbo].[Point]`.
+    pub data_type: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub output: bool,
+    /// The default as a T-SQL literal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -701,6 +807,12 @@ pub struct Principal {
     /// Roles this principal is a member of (fixed roles included).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub member_of: Vec<String>,
+    /// Users mapped to a certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<String>,
+    /// Users mapped to an asymmetric key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asymmetric_key: Option<String>,
 }
 
 impl Principal {
@@ -713,12 +825,19 @@ impl Principal {
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Permission {
-    /// OBJECT, SCHEMA or DATABASE.
+    /// OBJECT, SCHEMA, DATABASE, or the class keyword of another securable: TYPE, ASSEMBLY,
+    /// XML SCHEMA COLLECTION, MESSAGE TYPE, CONTRACT, SERVICE, ROUTE, REMOTE SERVICE BINDING,
+    /// FULLTEXT CATALOG, FULLTEXT STOPLIST, SEARCH PROPERTY LIST, CERTIFICATE, ASYMMETRIC KEY,
+    /// SYMMETRIC KEY.
     pub class: String,
+    /// The schema of schema-scoped securables (OBJECT, TYPE, XML SCHEMA COLLECTION; SCHEMA itself).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
+    /// Column-level permission on a table or view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
     pub grantee: String,
     /// SELECT, EXECUTE, ALTER...
     pub permission: String,
@@ -727,16 +846,22 @@ pub struct Permission {
 }
 
 impl Permission {
-    /// ` ON OBJECT::[s].[o]`, ` ON SCHEMA::[s]`, or nothing for the database.
+    /// ` ON OBJECT::[s].[o]`, ` ON SCHEMA::[s]`, ` ON CERTIFICATE::[c]`, or nothing for the database.
     pub fn securable(&self) -> String {
+        let q = |s: &Option<String>| crate::db::quote(s.as_deref().unwrap_or_default());
         match self.class.as_str() {
-            "OBJECT" => format!(
-                " ON OBJECT::{}.{}",
-                crate::db::quote(self.schema.as_deref().unwrap_or_default()),
-                crate::db::quote(self.object.as_deref().unwrap_or_default())
-            ),
-            "SCHEMA" => format!(" ON SCHEMA::{}", crate::db::quote(self.schema.as_deref().unwrap_or_default())),
-            _ => String::new(),
+            "DATABASE" => String::new(),
+            "SCHEMA" => format!(" ON SCHEMA::{}", q(&self.schema)),
+            class if self.schema.is_some() => format!(" ON {class}::{}.{}", q(&self.schema), q(&self.object)),
+            class => format!(" ON {class}::{}", q(&self.object)),
+        }
+    }
+
+    /// The permission with its column list: `SELECT ([c])`.
+    pub fn action(&self) -> String {
+        match &self.column {
+            Some(c) => format!("{} ({})", self.permission, crate::db::quote(c)),
+            None => self.permission.clone(),
         }
     }
 
@@ -747,13 +872,13 @@ impl Permission {
             "GRANT_WITH_GRANT_OPTION" => ("GRANT", " WITH GRANT OPTION"),
             _ => ("GRANT", ""),
         };
-        format!("{verb} {}{} TO {}{with}", self.permission, self.securable(), crate::db::quote(&self.grantee))
+        format!("{verb} {}{} TO {}{with}", self.action(), self.securable(), crate::db::quote(&self.grantee))
     }
 
     /// `REVOKE SELECT ON OBJECT::[dbo].[T] FROM [app]` (CASCADE for grants that were passed on).
     pub fn revoke_sql(&self) -> String {
         let cascade = if self.state == "GRANT_WITH_GRANT_OPTION" { " CASCADE" } else { "" };
-        format!("REVOKE {}{} FROM {}{cascade}", self.permission, self.securable(), crate::db::quote(&self.grantee))
+        format!("REVOKE {}{} FROM {}{cascade}", self.action(), self.securable(), crate::db::quote(&self.grantee))
     }
 }
 

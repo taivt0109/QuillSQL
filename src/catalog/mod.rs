@@ -2,7 +2,10 @@
 
 pub mod decrypt;
 pub mod model;
+pub mod objects;
 pub mod read;
+mod read_objects;
 
 pub use model::*;
+pub use objects::*;
 pub use read::{read_database, read_database_with};
