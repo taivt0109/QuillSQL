@@ -38,6 +38,8 @@ pub async fn read(conn: &mut Connection) -> Result<Database, String> {
     r.sequences(conn).await?;
     r.synonyms(conn).await?;
     r.extended_properties(conn).await?;
+    r.principals(conn).await?;
+    r.permissions(conn).await?;
     r.dependencies(conn).await?;
     Ok(r.finish())
 }
@@ -77,6 +79,8 @@ struct Reader {
     owners: HashMap<i32, Owner>,
     /// (object_id, index_id) → (owner, index position).
     index_slots: HashMap<(i32, i32), (Owner, usize)>,
+    /// schema_id → name.
+    schema_names: HashMap<i32, String>,
     /// object_id → parent_object_id, for constraints and triggers.
     parents: HashMap<i32, i32>,
     /// object_id → definition text from sys.sql_modules.
@@ -158,12 +162,13 @@ impl Reader {
     async fn schemas(&mut self, conn: &mut Connection) -> Result<(), String> {
         let rows = db::query(
             conn,
-            "SELECT s.name, USER_NAME(s.principal_id) FROM sys.schemas AS s
+            "SELECT s.name, USER_NAME(s.principal_id), s.schema_id FROM sys.schemas AS s
              WHERE s.schema_id < 16384 AND s.name NOT IN (N'sys', N'INFORMATION_SCHEMA', N'guest')
              ORDER BY s.name",
         )
         .await?;
         self.db.schemas = rows.iter().map(|r| Schema { name: s(r, 0), owner: s(r, 1) }).collect();
+        self.schema_names = rows.iter().map(|r| (i(r, 2), s(r, 0))).collect();
         Ok(())
     }
 
@@ -862,6 +867,84 @@ impl Reader {
                 _ => continue,
             }
             self.db.extended_properties.push(p);
+        }
+        Ok(())
+    }
+
+    async fn principals(&mut self, conn: &mut Connection) -> Result<(), String> {
+        let rows = db::query(
+            conn,
+            "SELECT p.name, p.type_desc, SUSER_SNAME(p.sid), p.default_schema_name, USER_NAME(p.owning_principal_id),
+                    CASE WHEN p.type IN ('S', 'U', 'G') AND p.authentication_type = 0 THEN 1 ELSE 0 END
+             FROM sys.database_principals AS p
+             WHERE p.type IN ('S', 'U', 'G', 'E', 'X', 'C', 'K', 'R', 'A') AND p.is_fixed_role = 0
+               AND p.name NOT IN (N'public', N'dbo', N'guest', N'sys', N'INFORMATION_SCHEMA') AND p.principal_id < 16384
+             ORDER BY p.name",
+        )
+        .await?;
+        for r in rows {
+            let kind = s(&r, 1);
+            let without_login = flag(&r, 5);
+            let role = kind.ends_with("_ROLE");
+            self.db.principals.push(Principal {
+                name: s(&r, 0),
+                login: if role || without_login { None } else { text(&r, 2) },
+                default_schema: if role { None } else { text(&r, 3) },
+                owner: if role { text(&r, 4) } else { None },
+                kind,
+                member_of: Vec::new(),
+            });
+        }
+        let rows = db::query(
+            conn,
+            "SELECT m.name, r.name FROM sys.database_role_members AS rm
+             JOIN sys.database_principals AS r ON r.principal_id = rm.role_principal_id
+             JOIN sys.database_principals AS m ON m.principal_id = rm.member_principal_id
+             ORDER BY m.name, r.name",
+        )
+        .await?;
+        for r in rows {
+            let (member, role) = (s(&r, 0), s(&r, 1));
+            if let Some(p) = self.db.principals.iter_mut().find(|p| p.name == member) {
+                p.member_of.push(role);
+            }
+        }
+        Ok(())
+    }
+
+    async fn permissions(&mut self, conn: &mut Connection) -> Result<(), String> {
+        // CONNECT for users comes with CREATE USER; column-level permissions are not modelled yet.
+        let rows = db::query(
+            conn,
+            "SELECT p.class, p.major_id, p.permission_name, p.state_desc, g.name
+             FROM sys.database_permissions AS p
+             JOIN sys.database_principals AS g ON g.principal_id = p.grantee_principal_id
+             WHERE p.class IN (0, 1, 3) AND p.minor_id = 0 AND g.name NOT IN (N'dbo', N'sys', N'INFORMATION_SCHEMA')
+               AND NOT (p.class = 0 AND p.permission_name = 'CONNECT')
+             ORDER BY p.class, p.major_id, g.name, p.permission_name",
+        )
+        .await?;
+        for r in rows {
+            let mut p = Permission { grantee: s(&r, 4), permission: s(&r, 2), state: s(&r, 3), ..Default::default() };
+            match i(&r, 0) {
+                0 => p.class = "DATABASE".into(),
+                1 => {
+                    let Some((kind, name)) = self.objects.get(&i(&r, 1)).cloned() else { continue };
+                    if kind == "S" || kind == "IT" {
+                        continue;
+                    }
+                    p.class = "OBJECT".into();
+                    p.schema = Some(name.schema);
+                    p.object = Some(name.name);
+                }
+                3 => {
+                    let Some(schema) = self.schema_names.get(&i(&r, 1)).cloned() else { continue };
+                    p.class = "SCHEMA".into();
+                    p.schema = Some(schema);
+                }
+                _ => continue,
+            }
+            self.db.permissions.push(p);
         }
         Ok(())
     }

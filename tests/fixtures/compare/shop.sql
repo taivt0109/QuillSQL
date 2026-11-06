@@ -68,3 +68,14 @@ EXEC sp_addextendedproperty N'MS_Description', N'People who buy things', N'SCHEM
 EXEC sp_addextendedproperty N'MS_Description', N'Display name', N'SCHEMA', N'dbo', N'TABLE', N'Customer', N'COLUMN', N'Name';
 EXEC sp_addextendedproperty N'Owner', N'Sales team', N'SCHEMA', N'Sales', N'TABLE', N'Order', N'CONSTRAINT', N'PK_Order';
 GO
+CREATE ROLE Reporting;
+GO
+CREATE USER app WITHOUT LOGIN WITH DEFAULT_SCHEMA = Sales;
+GO
+ALTER ROLE Reporting ADD MEMBER app;
+ALTER ROLE db_datareader ADD MEMBER app;
+GRANT SELECT ON SCHEMA::Sales TO Reporting;
+GRANT EXECUTE ON Sales.GetOrders TO app;
+DENY DELETE ON dbo.Customer TO Reporting;
+GRANT VIEW DEFINITION TO Reporting;
+GO

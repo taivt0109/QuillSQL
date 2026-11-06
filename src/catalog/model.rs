@@ -24,6 +24,10 @@ pub struct Database {
     pub sequences: Vec<Sequence>,
     pub synonyms: Vec<Synonym>,
     pub extended_properties: Vec<ExtendedProperty>,
+    /// Users and roles (fixed roles and built-in users excluded).
+    pub principals: Vec<Principal>,
+    /// GRANT / DENY on objects, schemas and the database (column permissions not included).
+    pub permissions: Vec<Permission>,
     /// Object-to-object references: views and modules to what they use, FKs, triggers, synonyms.
     pub dependencies: Vec<Dependency>,
 }
@@ -571,6 +575,81 @@ pub struct ExtendedProperty {
     pub minor_name: Option<String>,
     pub name: String,
     pub value: Option<String>,
+}
+
+/// A database user or role.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Principal {
+    pub name: String,
+    /// SQL_USER, WINDOWS_USER, WINDOWS_GROUP, EXTERNAL_USER, EXTERNAL_GROUP, CERTIFICATE_MAPPED_USER,
+    /// ASYMMETRIC_KEY_MAPPED_USER, DATABASE_ROLE or APPLICATION_ROLE.
+    pub kind: String,
+    /// The server login of a user; `None` for users without a login.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_schema: Option<String>,
+    /// Owner of a role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Roles this principal is a member of (fixed roles included).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub member_of: Vec<String>,
+}
+
+impl Principal {
+    pub fn is_role(&self) -> bool {
+        self.kind.ends_with("_ROLE")
+    }
+}
+
+/// One GRANT or DENY.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Permission {
+    /// OBJECT, SCHEMA or DATABASE.
+    pub class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    pub grantee: String,
+    /// SELECT, EXECUTE, ALTER...
+    pub permission: String,
+    /// GRANT, DENY or GRANT_WITH_GRANT_OPTION.
+    pub state: String,
+}
+
+impl Permission {
+    /// ` ON OBJECT::[s].[o]`, ` ON SCHEMA::[s]`, or nothing for the database.
+    pub fn securable(&self) -> String {
+        match self.class.as_str() {
+            "OBJECT" => format!(
+                " ON OBJECT::{}.{}",
+                crate::db::quote(self.schema.as_deref().unwrap_or_default()),
+                crate::db::quote(self.object.as_deref().unwrap_or_default())
+            ),
+            "SCHEMA" => format!(" ON SCHEMA::{}", crate::db::quote(self.schema.as_deref().unwrap_or_default())),
+            _ => String::new(),
+        }
+    }
+
+    /// `GRANT SELECT ON OBJECT::[dbo].[T] TO [app]`.
+    pub fn grant_sql(&self) -> String {
+        let (verb, with) = match self.state.as_str() {
+            "DENY" => ("DENY", ""),
+            "GRANT_WITH_GRANT_OPTION" => ("GRANT", " WITH GRANT OPTION"),
+            _ => ("GRANT", ""),
+        };
+        format!("{verb} {}{} TO {}{with}", self.permission, self.securable(), crate::db::quote(&self.grantee))
+    }
+
+    /// `REVOKE SELECT ON OBJECT::[dbo].[T] FROM [app]` (CASCADE for grants that were passed on).
+    pub fn revoke_sql(&self) -> String {
+        let cascade = if self.state == "GRANT_WITH_GRANT_OPTION" { " CASCADE" } else { "" };
+        format!("REVOKE {}{} FROM {}{cascade}", self.permission, self.securable(), crate::db::quote(&self.grantee))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
