@@ -4,6 +4,7 @@ pub mod cast;
 pub mod compare;
 pub mod ddl;
 pub mod deploy;
+pub mod linediff;
 pub mod options;
 pub mod print;
 pub mod report;

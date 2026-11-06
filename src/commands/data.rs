@@ -1,13 +1,13 @@
 //! `quill data`: compare the data of two databases and deploy the differences, with the
 //! switches, console summary, CSV export and exit codes of SQLDataCompare.exe.
 
-use std::cell::RefCell;
 use std::path::Path;
 
 use regex::{Regex, RegexBuilder};
 
 use super::common::{self, Source};
-use crate::args::{self, ArgError, Args, Switch, exit};
+use super::console;
+use crate::args::{ArgError, Args, Switch, exit};
 use crate::catalog::Database;
 use crate::data::compare::{self, DataComparison, TableResult};
 use crate::data::mapping::{DataMappings, TableOverride, TablePair};
@@ -23,7 +23,7 @@ const CANNOT_CREATE: u8 = 73;
 
 const NOTHING_TO_COMPARE_TEXT: &str = "Nothing to compare.  Either there are no tables/views that can be compared, or everything has been filtered out with /include or /exclude. Use /Include:Identical to see tables/views that exist in both databases but could not be compared.";
 
-const ACTIONS: [Switch; 18] = [
+const ACTIONS: [Switch; 12] = [
     Switch {
         name: "options",
         aliases: &["o"],
@@ -70,13 +70,6 @@ const ACTIONS: [Switch; 18] = [
         help: "With /export: identical tables are not an error (deprecated; use /include:Identical)",
     },
     Switch {
-        name: "allowIdenticalDatabases",
-        aliases: &["aidb", "aid"],
-        takes_value: false,
-        repeatable: false,
-        help: "Identical databases exit 0 rather than 63 (deprecated; use /include:Identical)",
-    },
-    Switch {
         name: "assertidentical",
         aliases: &[],
         takes_value: false,
@@ -90,17 +83,6 @@ const ACTIONS: [Switch; 18] = [
         repeatable: false,
         help: "Split the deployment into transactions of at most this many MB (0 = one transaction)",
     },
-    Switch { name: "outputProject", aliases: &["outpr"], takes_value: true, repeatable: false, help: "Save the settings used as a project file" },
-    Switch {
-        name: "makescripts",
-        aliases: &["mkscr"],
-        takes_value: true,
-        repeatable: false,
-        help: "Write the data of database 1 as INSERT scripts to <folder>\\Data and stop",
-    },
-    Switch { name: "out", aliases: &[], takes_value: true, repeatable: false, help: "Also write the console output to a file" },
-    Switch { name: "outputwidth", aliases: &[], takes_value: true, repeatable: false, help: "Width of the summary (80 to 1024; default 80)" },
-    Switch { name: "html", aliases: &[], takes_value: false, repeatable: false, help: "With /help: print the help as HTML" },
     Switch {
         name: "parallel",
         aliases: &[],
@@ -116,84 +98,18 @@ fn switches() -> Vec<Switch> {
 
 const SUMMARY: &str = "Compares the data of two databases table by table and deploys the differences.";
 
-thread_local! {
-    /// Everything printed to the console, for `/out`.
-    static OUTPUT: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// Prints a line (and keeps it for `/out`).
-fn say(line: &str) {
-    println!("{line}");
-    OUTPUT.with(|o| {
-        if let Some(buf) = o.borrow_mut().as_mut() {
-            buf.push_str(line);
-            buf.push_str("\r\n");
-        }
-    });
-}
-
-fn warn(line: &str) {
-    eprintln!("Warning: {line}");
-    OUTPUT.with(|o| {
-        if let Some(buf) = o.borrow_mut().as_mut() {
-            buf.push_str(&format!("Warning: {line}\r\n"));
-        }
-    });
-}
-
 pub fn run(argv: &[String]) -> u8 {
     let switches = switches();
-    let args = match args::parse(&switches, argv) {
-        Ok(a) => a,
-        Err(e) => return common::fail(e),
+    let rules = common::shared_rules();
+    let cli = common::Cli {
+        command: "data",
+        product: "QuillSQL Data Compare Command Line",
+        summary: SUMMARY,
+        switches: &switches,
+        rules: &rules,
+        require_one_of: &["auth", "database1", "backup1", "project", "scripts1", "sourcecontrol1"],
     };
-    if args.has("help") || argv.is_empty() {
-        let text = args::usage("data", SUMMARY, &switches);
-        if args.has("html") {
-            print!("{}", html_help(&text));
-        } else {
-            print!("{text}");
-        }
-        return exit::SUCCESS;
-    }
-    if args.has("out") {
-        OUTPUT.with(|o| *o.borrow_mut() = Some(String::new()));
-    }
-    let code = match execute(&args) {
-        Ok(code) => code,
-        Err(e) => {
-            OUTPUT.with(|o| {
-                if let Some(buf) = o.borrow_mut().as_mut() {
-                    buf.push_str(&format!("error: {}\r\n", e.message));
-                }
-            });
-            common::fail(e)
-        }
-    };
-    if let Some(path) = args.get("out") {
-        let text = OUTPUT.with(|o| o.borrow_mut().take()).unwrap_or_default();
-        if let Err(e) = std::fs::write(path, text) {
-            eprintln!("error: {path}: {e}");
-            return exit::IO_ERROR;
-        }
-    }
-    code
-}
-
-fn html_help(text: &str) -> String {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let mut out = String::from("<html><head><title>quill data</title></head><body>\n");
-    let mut lines = text.lines();
-    if let Some(first) = lines.next() {
-        out.push_str(&format!("<p>{}</p>\n", esc(first)));
-    }
-    out.push_str("<table>\n");
-    for line in lines.filter(|l| l.starts_with("  /")) {
-        let (names, help) = line.trim_start().split_at(line.trim_start().find("  ").unwrap_or(line.trim_start().len()));
-        out.push_str(&format!("<tr><td><code>{}</code></td><td>{}</td></tr>\n", esc(names.trim()), esc(help.trim())));
-    }
-    out.push_str("</table>\n</body></html>\n");
-    out
+    common::run(&cli, argv, execute)
 }
 
 fn regex(p: &str, case_sensitive: bool) -> Result<Regex, ArgError> {
@@ -353,7 +269,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let base = if project.is_some() { DataOptions::none() } else { DataOptions::default_set() };
     let resolved = DataOptions::resolve(args.get("options"), base, args.has("casesensitive"));
     for w in &resolved.warnings {
-        warn(w);
+        console::warn(w);
     }
     let mut options = match &project {
         Some(p) => DataOptions::parse(&p.options.join(",")).map_err(|e| ArgError::new(exit::DATA_ERROR, e))?.union(&resolved.options),
@@ -368,10 +284,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         Some(p) => p.parse::<usize>().map_err(|_| ArgError::new(exit::INVALID_VALUE, format!("/parallel: '{p}' is not a number")))?,
         None => 4,
     };
-    let width = match args.get("outputwidth") {
-        Some(w) => w.parse::<usize>().ok().filter(|w| (80..=1024).contains(w)).ok_or_else(|| ArgError::new(exit::INVALID_VALUE, format!("Invalid value for switch /outputwidth: {w}.")))?,
-        None => 80,
-    };
+    let width = console::width();
     let max_mb = match args.get("MaxTransactionSizeMB") {
         Some(v) => v.parse::<u64>().map_err(|_| ArgError::new(exit::INVALID_VALUE, format!("Invalid value for switch /MaxTransactionSizeMB: {v}.")))?,
         None => 0,
@@ -428,20 +341,20 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
 
     if !quiet {
-        say("Finished");
+        console::log("Finished");
         for line in summary(&result, &rules, &describe(&spec1, &db1), &describe(&spec2, &db2), width) {
-            say(&line);
+            console::log(&line);
         }
         if verbose {
-            say("OK");
+            console::log("OK");
         }
     }
     for t in &result.tables {
         for n in t.pair.notes.iter().filter(|n| n.not_compared() || verbose) {
-            warn(&n.text);
+            console::warn(&n.text);
         }
         if let Some(problem) = &t.pair.problem {
-            warn(&format!("{} is not compared: {problem}", t.pair.source));
+            console::warn(&format!("{} is not compared: {problem}", t.pair.source));
         }
     }
     if let Some(dir) = args.get("export") {
@@ -484,7 +397,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     {
         if script.is_empty() {
             if !quiet {
-                say("Nothing to deploy.");
+                console::log("Nothing to deploy.");
             }
         } else {
             let ran = deploy::execute(&spec2, script, |i, n| {
@@ -494,7 +407,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             })
             .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
             if !quiet {
-                say(&format!("Deployed the data of {} to {} ({ran} batches).", db1.name, spec2.describe()));
+                console::log(&format!("Deployed the data of {} to {} ({ran} batches).", db1.name, spec2.describe()));
             }
         }
     }
@@ -574,7 +487,7 @@ fn make_scripts(spec: &ConnectionSpec, db: &Database, opts: &DataOptions, dir: &
         std::fs::write(data.join(name), [&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat()).map_err(io)?;
     }
     if !args.has("quiet") {
-        say(&format!("Data scripts written to {}.", data.display()));
+        console::log(&format!("Data scripts written to {}.", data.display()));
     }
     Ok(exit::SUCCESS)
 }

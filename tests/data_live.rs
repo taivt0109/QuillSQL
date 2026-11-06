@@ -247,6 +247,11 @@ fn quill(server: &Server, args: &[&str]) -> (i32, String, String) {
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// Console text with its line wrapping and repeated spaces undone.
+fn flat(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
 fn command_line_parity() {
     let Some(server) = server() else { return };
@@ -266,7 +271,7 @@ INSERT INTO dbo.T VALUES (1, N'a', 0x01, '2025-04-03T13:00:00', 1), (2, N'b', NU
     // Identical databases: 63, unless identical results are allowed.
     let (code, out, err) = call(db("QD_data_C1", "QD_data_C1"), &[]);
     assert_eq!(code, 63, "{out}{err}");
-    assert!(err.contains("Nothing to compare.  Either there are no tables/views"), "{err}");
+    assert!(flat(&err).contains("Nothing to compare. Either there are no tables/views"), "{err}");
     let (code, out, _) = call(db("QD_data_C1", "QD_data_C1"), &["/include:identical"]);
     assert_eq!(code, 0);
     assert!(out.contains("Table           [dbo].[T]                                           2  ==  ==  "), "{out}");
@@ -276,7 +281,7 @@ INSERT INTO dbo.T VALUES (1, N'a', 0x01, '2025-04-03T13:00:00', 1), (2, N'b', NU
     // A bad comparison key: 34; a password without a user: 8.
     let (code, _, err) = call(db("QD_data_C1", "QD_data_C2"), &["/comparisonkeys:T:NoSuchIndex"]);
     assert_eq!(code, 34, "{err}");
-    assert!(err.contains("Invalid comparison keys specified for [dbo].[T] 'NoSuchIndex'.  Only a single key or unique index may be specified."), "{err}");
+    assert!(flat(&err).contains("Invalid comparison keys specified for [dbo].[T] 'NoSuchIndex'. Only a single key or unique index may be specified."), "{err}");
     assert_eq!(call(db("QD_data_C1", "QD_data_C2"), &["/comparisonkeys:T:UX_T_V"]).0, 0);
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_quill")).args(["data", "/database1:x", "/password1:p", "/database2:y"]).output().unwrap();
     assert_eq!(out.status.code(), Some(8));
@@ -285,8 +290,8 @@ INSERT INTO dbo.T VALUES (1, N'a', 0x01, '2025-04-03T13:00:00', 1), (2, N'b', NU
     let dir_s = dir.to_string_lossy().to_string();
     let (code, out, err) = call(db("QD_data_C1", "QD_data_C2"), &[&format!("/export:{dir_s}"), "/options:Default,NoSuchOption"]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(err.contains("Warning: Unrecognised SQL Data Compare option: NoSuchOption."), "{err}");
-    assert!(out.starts_with("Finished\n\nSummary Information\n") || out.starts_with("Finished\r\n\r\nSummary Information\r\n"), "{out}");
+    assert!(flat(&err).contains("Warning: Unrecognised SQL Data Compare option: NoSuchOption."), "{err}");
+    assert!(out.replace("\r\n", "\n").contains("\nFinished\n\nSummary Information\n"), "{out}");
     assert!(out.contains("Table           [dbo].[T]                                           1  <>  <>  "), "{out}");
     assert!(out.contains("Table           [dbo].[T]                                           1      <<  "), "{out}");
     let summary = std::fs::read_to_string(dir.join("Results Summary.csv")).unwrap();
