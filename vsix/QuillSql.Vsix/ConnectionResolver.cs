@@ -16,8 +16,35 @@ namespace QuillSql.Vsix
         public string ConnectionString { get; set; }
         public string Description { get; set; }
 
-        /// <summary>False for logins QuillSQL cannot open a connection with, such as Microsoft Entra.</summary>
+        /// <summary>
+        /// For Microsoft Entra logins: gets an access token from the sign-in SSMS keeps for the
+        /// window, renewing it when it has expired. Null for Windows and SQL Server logins.
+        /// </summary>
+        public Func<string> AccessToken { get; set; }
+
+        /// <summary>False for logins QuillSQL cannot open a connection with.</summary>
         public bool CanQuery => ConnectionString != null;
+
+        /// <summary>A new (closed) connection, with a fresh access token for Microsoft Entra logins.</summary>
+        public SqlConnection CreateConnection()
+        {
+            var connection = new SqlConnection(ConnectionString);
+            if (AccessToken != null)
+            {
+                try
+                {
+                    connection.AccessToken = AccessToken();
+                }
+                catch (Exception ex)
+                {
+                    connection.Dispose();
+                    var cause = (ex as TargetInvocationException)?.InnerException ?? ex;
+                    throw new InvalidOperationException("The Microsoft Entra sign-in of this query window could not be renewed (" + cause.Message
+                        + "). Run a query in the window to sign in again.", cause);
+                }
+            }
+            return connection;
+        }
     }
 
     /// <summary>
@@ -28,6 +55,7 @@ namespace QuillSql.Vsix
     {
         private const BindingFlags Any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private static bool _loggedShape;
+        private static bool _loggedEntra;
 
         public static ConnectionTarget TryGetActive()
         {
@@ -140,6 +168,26 @@ namespace QuillSql.Vsix
                     builder.Password = Get(info, "Password") as string ?? "";
                     break;
                 default:
+                    // Microsoft Entra: SSMS keeps a renewable token for the window; ask it for a fresh
+                    // token whenever a connection is opened.
+                    var token = Get(info, "RenewableToken");
+                    var getToken = token?.GetType().GetInterfaces().FirstOrDefault(i => i.Name == "IRenewableToken")?.GetMethod("GetAccessToken");
+                    if (getToken != null)
+                    {
+                        if (log && !_loggedEntra)
+                        {
+                            _loggedEntra = true;
+                            Log.Write("Microsoft Entra login (authentication type " + authentication + "): using the sign-in of the query window");
+                        }
+                        var entraUser = Get(token, "UserId") as string ?? user ?? "";
+                        return new ConnectionTarget
+                        {
+                            Key = string.Join("|", server, database ?? "", authentication, entraUser),
+                            ConnectionString = builder.ConnectionString,
+                            Description = server + " / " + (database ?? "(default)"),
+                            AccessToken = () => (string)getToken.Invoke(token, null),
+                        };
+                    }
                     if (log)
                     {
                         Log.Write("authentication type " + authentication + " is not supported for metadata; suggestions use the script only");

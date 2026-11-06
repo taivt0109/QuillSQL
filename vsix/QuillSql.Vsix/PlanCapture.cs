@@ -46,7 +46,7 @@ namespace QuillSql.Vsix
                 return "(no tables found in the script)";
             }
             var sb = new StringBuilder();
-            using (var connection = new SqlConnection(target.ConnectionString))
+            using (var connection = target.CreateConnection())
             using (var command = new SqlCommand { Connection = connection, CommandTimeout = Timeout })
             {
                 var list = In(command, objects);
@@ -121,7 +121,7 @@ ORDER BY i.object_id, i.index_id;";
         public static List<string> Plans(ConnectionTarget target, IList<string> batches, bool actual, List<string> errors)
         {
             var plans = new List<string>();
-            using (var connection = new SqlConnection(target.ConnectionString))
+            using (var connection = target.CreateConnection())
             {
                 connection.Open();
                 using (var on = new SqlCommand(actual ? "SET STATISTICS XML ON;" : "SET SHOWPLAN_XML ON;", connection))
@@ -162,7 +162,7 @@ ORDER BY i.object_id, i.index_id;";
         public static List<SlowQuery> QueryStore(ConnectionTarget target, int days, int top)
         {
             var queries = new List<SlowQuery>();
-            using (var connection = new SqlConnection(target.ConnectionString))
+            using (var connection = target.CreateConnection())
             {
                 connection.Open();
                 using (var state = new SqlCommand("SELECT actual_state_desc FROM sys.database_query_store_options;", connection))

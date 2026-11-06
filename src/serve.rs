@@ -276,10 +276,12 @@ pub fn run(opts: &Options) -> std::io::Result<()> {
     let mut state = State { schemas: HashMap::new(), snippets: load_snippets(), options: opts.clone() };
     for line in stdin.lock().lines() {
         let line = line?;
+        // A .NET client may start the stream with a UTF-8 byte order mark.
+        let line = line.trim_start_matches('\u{feff}');
         if line.trim().is_empty() {
             continue;
         }
-        let reply = match serde_json::from_str::<Value>(&line) {
+        let reply = match serde_json::from_str::<Value>(line) {
             Ok(request) => {
                 let id = request["id"].clone();
                 match handle(&request, &mut state) {

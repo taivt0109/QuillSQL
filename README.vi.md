@@ -246,6 +246,10 @@ Các lệnh này dùng Claude Code CLI trên máy bạn. Mọi tool của Claude
 - Câu trả lời hiện dần trong lúc Claude viết. Mỗi khối SQL có nút **Chèn vào editor** (tại con trỏ, bôi đen sẵn, một lần Undo là bỏ), **Mở cửa sổ mới** và **Copy**. Dưới câu trả lời cuối có các câu hỏi gợi ý; bấm vào là hỏi.
 - **Chat mới** mở chủ đề khác; **Lịch sử** mở lại cuộc trò chuyện cũ để hỏi tiếp. Lịch sử chat lưu trong `%LOCALAPPDATA%\QuillSQL\chats`.
 - Enter để gửi, Shift+Enter xuống dòng, Esc để dừng câu trả lời.
+- **Mỗi cuộc chat gắn với một cửa sổ query**, hiện ngay trên ô nhập: "Hỏi về: SQLQuery3.sql server / database". Chat mới lấy tab bạn đang mở; khi đã hỏi rồi thì chat giữ nguyên cửa sổ đó dù bạn chuyển tab, và hiện "Bạn đang ở SQLQuery5.sql · Thêm vào · Chỉ hỏi tab này" thay vì tự đoán. **Thêm tab** đưa thêm cửa sổ vào cuộc chat để so sánh các query, kể cả trên server khác nhau; dấu × để bỏ một cửa sổ. Claude đọc query từ các cửa sổ đó (chỉ cần nói "query này"), mỗi plan và tra cứu chạy trên kết nối của đúng cửa sổ nó nói tới, và mỗi bước ghi rõ cửa sổ.
+- **Claude tự tra cứu.** Trong lúc trả lời, Claude đọc được database đang kết nối qua các tool chỉ đọc: tìm đối tượng và cột, xem cấu trúc bảng (cột, khóa, index, partition), đọc định nghĩa, mức dùng index, gợi ý index còn thiếu, statistics, plan ước tính, Query Store, các query đang chạy và cấu hình server. Mỗi lần tra cứu hiện thành một bước dưới câu trả lời; bấm vào để xem Claude đã đọc được gì.
+- **Cho AI đọc dữ liệu** (mặc định tắt) cho phép Claude chạy câu SELECT chỉ đọc, tối đa 200 dòng, trong transaction luôn được rollback; câu lệnh có ghi dữ liệu bị từ chối.
+- Không cần cài hay cấu hình gì trong Claude Code: QuillSQL chạy các tool này ngay trong SSMS trên 127.0.0.1, chỉ trong lúc trả lời, có token dùng một lần, và chỉ truyền cho `claude` của lần trả lời đó.
 
 Các lệnh dưới đây mở chủ đề mới trong khung chat, gửi kèm sẵn dữ liệu phù hợp, để bạn hỏi tiếp:
 
@@ -268,7 +272,7 @@ Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ 
   ```
 
   `match` được tìm trong chuỗi "server / database", không phân biệt hoa thường; quy tắc khớp cụ thể nhất (dài nhất) được dùng, nên màu của một database thắng màu của server, và màu server thắng màu theo từ.
-- **Thẻ object:** rê chuột lên bảng, view, procedure hoặc function (hoặc nhấn Ctrl+B, Ctrl+K) để xem thẻ gồm số dòng, dung lượng, các cột (khóa, identity, default, khóa ngoại), index và nơi lưu, cùng tab **Script** có nút Sao chép và Mở. Bảng có partition được ghi rõ ở đầu thẻ: cột partition, partition function, `RANGE LEFT`/`RIGHT`, scheme, và tab **Partition** liệt kê khoảng giá trị, số dòng và filegroup của từng partition. **F12** mở script trong cửa sổ mới, gồm cả partition function và scheme.
+- **Thẻ object:** rê chuột lên bảng, view, procedure hoặc function (hoặc nhấn Ctrl+B, Ctrl+K) để xem thẻ gồm số dòng, dung lượng, các cột (khóa, identity, default, khóa ngoại), index và nơi lưu, cùng tab **Script** có nút Sao chép và Mở. Bảng có partition được ghi rõ ở đầu thẻ: cột partition, partition function, `RANGE LEFT`/`RIGHT`, scheme, và tab **Partition** liệt kê khoảng giá trị, số dòng và filegroup của từng partition. **F12** mở script trong cửa sổ mới, gồm cả partition function và scheme. Giữ **Ctrl** thì tên object được gạch chân như link: **Ctrl+click** mở thẻ ở chế độ ghim, thẻ giữ nguyên trong lúc bạn đọc, gõ hay di chuyển, đến khi bấm ✕ hoặc Esc. Nút ghim trên thẻ khi rê chuột cũng làm như vậy.
 - **Chạy an toàn:** chạy `DELETE` hoặc `UPDATE` không có `WHERE` sẽ được hỏi lại trước, mặc định là Hủy. Có thể bật thêm cho `TRUNCATE TABLE` và `DROP` trong Options.
 - **Tô sáng:** mọi chỗ dùng biến, alias hoặc tên tại con trỏ được tô sáng.
 
@@ -290,9 +294,10 @@ QuillSQL chạy trên máy bạn và chỉ kết nối tới:
 - **Claude:** qua Claude Code CLI của bạn, và chỉ khi bạn chạy một lệnh AI. Dữ liệu gửi đi gồm:
   - yêu cầu của bạn, đoạn đang chọn hoặc cả script, và tên/kiểu của các bảng mà script dùng;
   - với lệnh phân tích plan: thêm số dòng, định nghĩa index và bản tóm tắt plan (có chứa các giá trị literal và tham số trong query);
-  - với lệnh Query Store: thêm nội dung các query chậm nhất.
+  - với lệnh Query Store: thêm nội dung các query chậm nhất;
+  - trong khung chat AI: những gì Claude tự tra cứu qua các tool chỉ đọc (metadata, statistics, plan, Query Store, các query đang chạy).
 
-  Dữ liệu dòng của bảng không bao giờ được gửi đi.
+  Dữ liệu dòng của bảng chỉ được gửi đi khi bạn bật **Cho AI đọc dữ liệu**, và chỉ gồm các dòng của câu SELECT mà Claude chạy (tối đa 200 dòng mỗi câu).
 
 Lịch sử query được lưu ở `%LOCALAPPDATA%\QuillSQL\history.jsonl` (5000 mục gần nhất). File này chứa toàn văn script của bạn; nếu script có thông tin bí mật thì hãy xóa file.
 
@@ -376,7 +381,7 @@ Workflow Release sẽ chạy test, build và đăng `QuillSQL.vsix`, `quill.exe`
 ## Giới hạn hiện tại
 
 - QuillSQL đọc T-SQL theo token chứ không phân tích cú pháp đầy đủ. Nó xử lý được các query, DML và DDL thường gặp. Với cú pháp lạ, có thể không có gợi ý, không refactor hay không cảnh báo, nhưng code không bị sửa sai.
-- Với đăng nhập Microsoft Entra, các tính năng cần metadata không dùng được. Format, snippet, tô màu và lịch sử vẫn hoạt động.
+- Với đăng nhập Microsoft Entra, QuillSQL kết nối bằng phiên đăng nhập mà SSMS đang giữ cho cửa sổ query, và xin SSMS một access token mới mỗi lần kết nối, nên token hết hạn được làm mới giống như SSMS tự làm mới. Nếu SSMS không làm mới được mà không cần hỏi lại, hãy chạy một query trong cửa sổ đó để đăng nhập lại. Cách này dựa vào phần nội bộ của SSMS và còn mới: báo lại nếu có cửa sổ không đọc được.
 - `insertSemicolons` bỏ qua những chỗ không chắc chắn, ví dụ trước `THROW`.
 - Smart Rename với object trong database chỉ tạo script; nó không tự sửa các object khác.
 - Tô màu tab phụ thuộc vào cấu trúc tab tài liệu của SSMS 21; một phiên bản SSMS sau này có thể cần cập nhật lại.

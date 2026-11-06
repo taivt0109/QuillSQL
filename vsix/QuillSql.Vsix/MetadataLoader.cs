@@ -86,7 +86,7 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
         private static string Bool(bool value) => value ? "true" : "false";
 
         /// <summary>Returns the engine's schema JSON and the number of objects read.</summary>
-        public static string Load(string connectionString, out int objectCount)
+        public static string Load(ConnectionTarget target, out int objectCount)
         {
             var objects = new Dictionary<int, DbObject>();
             var keys = new Dictionary<int, ForeignKey>();
@@ -96,7 +96,7 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
 
             var watch = System.Diagnostics.Stopwatch.StartNew();
             long opened, executed;
-            using (var connection = new SqlConnection(connectionString))
+            using (var connection = target.CreateConnection())
             using (var command = new SqlCommand(Query, connection) { CommandTimeout = 60 })
             {
                 connection.Open();
@@ -219,7 +219,7 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
                 try
                 {
                     var started = DateTime.Now;
-                    var schema = MetadataLoader.Load(target.ConnectionString, out var count);
+                    var schema = MetadataLoader.Load(target, out var count);
                     var loadedAt = DateTime.Now;
                     var reply = EngineProcess.Shared.Request("load", "\"key\":" + Json.Str(target.Key) + ",\"schema\":" + schema);
                     var error = reply == null ? "no reply" : Json.Parse<ErrorOnlyReply>(reply)?.Error;

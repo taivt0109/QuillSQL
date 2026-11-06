@@ -26,11 +26,13 @@ namespace QuillSql.Vsix
 
         [DataMember(Name = "model")] public string Model { get; set; }
         [DataMember(Name = "language")] public string Language { get; set; }
+        /// <summary>Whether the AI chat may run read-only SELECTs to look at rows.</summary>
+        [DataMember(Name = "allowData")] public bool AllowData { get; set; }
 
         public void Save()
         {
             Directory.CreateDirectory(Updater.Folder);
-            File.WriteAllText(FilePath, "{\"model\":" + Json.Str(Model ?? "") + ",\"language\":" + Json.Str(Language ?? "") + "}");
+            File.WriteAllText(FilePath, "{\"model\":" + Json.Str(Model ?? "") + ",\"language\":" + Json.Str(Language ?? "") + ",\"allowData\":" + Json.Bool(AllowData) + "}");
         }
     }
 

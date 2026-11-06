@@ -191,7 +191,7 @@ FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY paramete
             }
             var watch = System.Diagnostics.Stopwatch.StartNew();
             var d = new ObjectDetails();
-            using (var connection = new SqlConnection(target.ConnectionString))
+            using (var connection = target.CreateConnection())
             using (var command = new SqlCommand(Query, connection) { CommandTimeout = 30 })
             {
                 command.Parameters.AddWithValue("@name", fullName);

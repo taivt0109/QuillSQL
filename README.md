@@ -232,6 +232,23 @@ windows for a conversation on one topic: ask, then keep asking, and Claude remem
 - **New chat** starts another topic; **History** reopens an earlier one to continue it. Chats
   are kept in `%LOCALAPPDATA%\QuillSQL\chats`.
 - Enter sends, Shift+Enter starts a new line, Esc stops an answer.
+- **Each conversation is about one query window**, shown above the box: "Ask about:
+  SQLQuery3.sql server / database". A new chat takes the tab you have open; once you have asked,
+  it stays on that window even when you switch tabs, and shows "You are in SQLQuery5.sql · Add
+  it · Ask only about it" instead of guessing. **Add tab** puts more windows in the conversation,
+  to compare queries, even on different servers; × removes one. Claude reads the queries from
+  those windows ("this query" is enough), each plan and lookup runs on the connection of the
+  window it is about, and each step names that window.
+- **Claude looks things up itself.** While it answers, Claude can read the connected database
+  through read-only tools: find objects and columns, describe a table (columns, keys, indexes,
+  partitions), read a definition, index usage, missing-index hints, statistics, an estimated plan,
+  Query Store, the queries running now and the server settings. Each lookup shows as a step under
+  the answer; click it to see what Claude read.
+- **Let AI read data** (off by default) also lets Claude run read-only SELECTs, at most 200 rows,
+  in a transaction that is always rolled back; statements that write are refused.
+- Nothing needs installing or configuring in Claude Code: QuillSQL serves these tools from SSMS
+  on 127.0.0.1, only during an answer, behind a one-time token, and passes them to `claude` for
+  that answer only.
 
 The commands below start a new topic in the chat with the right context, so you can ask follow-up
 questions:
@@ -272,7 +289,10 @@ step. Optional settings in
   indexes and where they are stored, and a **Script** tab with Copy and Open buttons. A
   partitioned table says so at the top: column, partition function, `RANGE LEFT`/`RIGHT`, scheme,
   and a **Partitions** tab with each partition's range, rows and filegroup. **F12** opens the
-  script in a new window, including the partition function and scheme.
+  script in a new window, including the partition function and scheme. Hold **Ctrl** and names
+  of objects are underlined like links: **Ctrl+click** opens the card pinned, so it stays open
+  while you read it, type or move around, until you close it with ✕ or Esc. The pin button on a
+  hovered card does the same.
 - **Run with care**: running a `DELETE` or `UPDATE` without `WHERE` asks first, with Cancel as the
   default answer. `TRUNCATE TABLE` and `DROP` can be added in Options.
 - **Highlighting**: every use of the variable, alias or name under the caret is highlighted.
@@ -303,8 +323,10 @@ QuillSQL runs on your machine and talks only to:
 - **Claude**, through your Claude Code CLI, only when you run an AI command. It sends your
   request, the selection or script, and the names and types of the tables it uses; the plan
   commands add row counts, index definitions and a plan summary (which includes literal and
-  parameter values from the query); Query Store review adds the slowest queries' text. Table rows
-  are never sent.
+  parameter values from the query); Query Store review adds the slowest queries' text. In the AI
+  chat, Claude can also look up metadata, statistics, plans, Query Store and the running queries
+  through the read-only tools. Table rows are sent only if you turn on **Let AI read data**, and
+  then only the rows of the SELECTs Claude runs (at most 200 each).
 
 Query history stays in `%LOCALAPPDATA%\QuillSQL\history.jsonl` (the last 5000 entries). It holds
 the full text of your scripts, so delete it if they contain secrets.
@@ -387,8 +409,10 @@ installed copies offer the update within a day.
 
 - QuillSQL reads T-SQL as tokens rather than a full parse. It covers everyday queries, DML and
   DDL; unusual syntax may get no suggestion, rewrite or warning, but it is not changed wrongly.
-- With Microsoft Entra logins, features that need metadata are unavailable; formatting, snippets,
-  colors and history still work.
+- With Microsoft Entra logins, QuillSQL connects with the sign-in SSMS keeps for the query
+  window, asking SSMS for a fresh access token each time it connects, so an expired token is
+  renewed the same way SSMS renews it. If SSMS cannot renew it silently, run a query in the window
+  to sign in again. This relies on SSMS internals and is new: report it if a window is not read.
 - `insertSemicolons` skips ambiguous places, for example before `THROW`.
 - Smart Rename of database objects produces a script; it does not change other objects for you.
 - Tab colors depend on the layout of SSMS 21's document tabs and may need an update for a future
