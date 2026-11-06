@@ -35,7 +35,7 @@ namespace QuillSql.Compare
         }
 
         /// <summary>A folder chosen through a save dialog (WPF has no folder picker).</summary>
-        private static string PickFolder(Window owner, string start, string title)
+        public static string PickFolder(Window owner, string start, string title)
         {
             var d = new SaveFileDialog { Title = title, FileName = "Choose this folder", Filter = "Folders|*.none", InitialDirectory = Directory.Exists(start) ? start : null, CheckPathExists = true, OverwritePrompt = false };
             return d.ShowDialog(owner) == true ? Path.GetDirectoryName(d.FileName) : null;
@@ -356,7 +356,7 @@ namespace QuillSql.Compare
             };
             filter.TextChanged += (s, e) => view.Refresh();
             var status = Ui.Text("", brush: CompareTheme.Muted);
-            string side(JsonObject s) => s == null ? "" : s.Str("type") == "snapshot" ? System.IO.Path.GetFileName(s.Str("path")) : s.Str("type") == "empty" ? "Empty database" : s.Str("server") + " / " + s.Str("database");
+            string side(JsonObject s) => s == null ? "" : s.Str("type") == "snapshot" || s.Str("type") == "scripts" ? System.IO.Path.GetFileName(s.Str("path")) : s.Str("type") == "empty" ? "Empty database" : s.Str("server") + " / " + s.Str("database");
             async Task load()
             {
                 rows.Clear();
