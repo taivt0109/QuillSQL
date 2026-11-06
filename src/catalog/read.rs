@@ -9,12 +9,23 @@ use tiberius::{ColumnData, Row};
 use super::model::*;
 use crate::db::{self, Connection, ConnectionSpec};
 
-/// Reads the database named in `spec`.
+/// Reads the database named in `spec`, decrypting encrypted modules where the server allows it
+/// (DecryptPost2kEncryptedObjects, on by default).
 pub fn read_database(spec: &ConnectionSpec) -> Result<Database, String> {
+    read_database_with(spec, true)
+}
+
+/// Reads the database named in `spec`; `decrypt` recovers the text of encrypted modules over
+/// the dedicated administrator connection when it can be reached.
+pub fn read_database_with(spec: &ConnectionSpec, decrypt: bool) -> Result<Database, String> {
     let rt = db::runtime()?;
     rt.block_on(async {
         let mut conn = db::connect_async(spec).await?;
-        read(&mut conn).await
+        let mut model = read(&mut conn).await?;
+        if decrypt {
+            super::decrypt::decrypt_modules(&mut conn, spec, &mut model).await?;
+        }
+        Ok(model)
     })
 }
 
@@ -122,6 +133,14 @@ fn int(row: &Row, i: usize) -> Option<i64> {
         ColumnData::I64(v) => *v,
         ColumnData::Bit(v) => v.map(i64::from),
         ColumnData::Numeric(v) => v.map(|n| n.int_part() as i64),
+        _ => None,
+    }
+}
+
+fn float(row: &Row, i: usize) -> Option<f64> {
+    match row.get_column_data(i).ok()? {
+        ColumnData::F64(v) => *v,
+        ColumnData::F32(v) => v.map(f64::from),
         _ => None,
     }
 }
@@ -338,13 +357,16 @@ impl Reader {
                     ic.is_not_for_replication, c.is_identity,
                     cc.definition, cc.is_persisted,
                     dc.name, dc.definition, dc.is_system_named,
-                    {generated}, {hidden}, {masked}
+                    {generated}, {hidden}, {masked},
+                    QUOTENAME(SCHEMA_NAME(bd.schema_id)) + N'.' + QUOTENAME(bd.name),
+                    QUOTENAME(OBJECT_SCHEMA_NAME(NULLIF(c.rule_object_id, 0))) + N'.' + QUOTENAME(OBJECT_NAME(NULLIF(c.rule_object_id, 0)))
              FROM sys.columns AS c
              JOIN sys.types AS ty ON ty.user_type_id = c.user_type_id
              LEFT JOIN sys.xml_schema_collections AS xc ON xc.xml_collection_id = c.xml_collection_id AND c.xml_collection_id <> 0
              LEFT JOIN sys.identity_columns AS ic ON ic.object_id = c.object_id AND ic.column_id = c.column_id
              LEFT JOIN sys.computed_columns AS cc ON cc.object_id = c.object_id AND cc.column_id = c.column_id
              LEFT JOIN sys.default_constraints AS dc ON dc.object_id = c.default_object_id AND dc.parent_object_id = c.object_id
+             LEFT JOIN sys.objects AS bd ON bd.object_id = c.default_object_id AND bd.type = 'D' AND bd.parent_object_id = 0
              {masked_join}
              ORDER BY c.object_id, c.column_id",
             generated = v.pick(
@@ -401,6 +423,8 @@ impl Reader {
                 generated_always: text(&r, 26),
                 hidden: flag(&r, 27),
                 masking_function: text(&r, 28),
+                bound_default: text(&r, 29),
+                bound_rule: text(&r, 30),
             };
             self.columns_of(owner).push(column);
         }
@@ -506,6 +530,116 @@ impl Reader {
             }
         }
         // Heaps: the table's own storage comes from index 0, which has no row in sys.indexes above.
+        self.xml_and_spatial_indexes(conn, v).await
+    }
+
+    /// The parts of XML and spatial indexes that sys.indexes does not show.
+    async fn xml_and_spatial_indexes(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+        // Selective XML indexes came with SQL Server 2012 SP1.
+        let selective = v.major >= SQL2014;
+        let sql = format!(
+            "SELECT x.object_id, x.index_id, {kind}, ui.name, x.secondary_type, {path}
+             FROM sys.xml_indexes AS x
+             LEFT JOIN sys.indexes AS ui ON ui.object_id = x.object_id AND ui.index_id = x.using_xml_index_id
+             {path_join}",
+            kind = if selective { "CAST(x.xml_index_type AS int)" } else { "CASE WHEN x.using_xml_index_id IS NULL THEN 0 ELSE 1 END" },
+            path = if selective { "p.name" } else { "CAST(NULL AS sysname)" },
+            path_join = if selective {
+                "LEFT JOIN sys.selective_xml_index_paths AS p ON p.object_id = x.object_id AND p.index_id = x.using_xml_index_id AND p.path_id = x.path_id"
+            } else {
+                ""
+            },
+        );
+        for r in db::query(conn, &sql).await? {
+            let Some(&(owner, slot)) = self.index_slots.get(&(i(&r, 0), i(&r, 1))) else { continue };
+            let kind = match i(&r, 2) {
+                1 => XmlIndexKind::Secondary,
+                2 => XmlIndexKind::Selective,
+                3 => XmlIndexKind::SecondarySelective,
+                _ => XmlIndexKind::Primary,
+            };
+            let secondary_type = match s(&r, 4).as_str() {
+                "V" => Some("VALUE".to_string()),
+                "P" => Some("PATH".to_string()),
+                "R" => Some("PROPERTY".to_string()),
+                _ => None,
+            };
+            let xml = XmlIndex { kind, secondary_type, using_index: text(&r, 3), using_path: text(&r, 5), ..Default::default() };
+            self.indexes_of(owner)[slot].xml = Some(xml);
+        }
+        if selective {
+            let rows = db::query(
+                conn,
+                "SELECT p.object_id, p.index_id, p.path_id, p.name, p.path, CAST(p.path_type AS int),
+                        p.xquery_type_description, CAST(p.xquery_max_length AS int), p.is_node, p.is_singleton,
+                        t.name, CAST(p.max_length AS int),
+                        CAST(p.precision AS int), CAST(p.scale AS int)
+                 FROM sys.selective_xml_index_paths AS p
+                 LEFT JOIN sys.types AS t ON t.user_type_id = p.user_type_id
+                 ORDER BY p.object_id, p.index_id, p.path_id",
+            )
+            .await?;
+            for r in rows {
+                let Some(&(owner, slot)) = self.index_slots.get(&(i(&r, 0), i(&r, 1))) else { continue };
+                let sql = i(&r, 5) == 1;
+                let path = SelectivePath {
+                    id: i(&r, 2),
+                    name: s(&r, 3),
+                    path: s(&r, 4),
+                    sql,
+                    xquery_type: if sql { None } else { text(&r, 6) },
+                    max_length: if sql { None } else { int(&r, 7).map(|n| n as i32).filter(|n| *n > 0) },
+                    node_hint: flag(&r, 8),
+                    singleton: flag(&r, 9),
+                    data_type: (sql && !s(&r, 10).is_empty()).then(|| system_type(&s(&r, 10), i(&r, 11), i(&r, 12), i(&r, 13))),
+                };
+                if let Some(x) = self.indexes_of(owner)[slot].xml.as_mut() {
+                    x.paths.push(path);
+                }
+            }
+            let rows = db::query(
+                conn,
+                "SELECT n.object_id, n.index_id, n.is_default_uri, n.prefix, n.uri
+                 FROM sys.selective_xml_index_namespaces AS n ORDER BY n.object_id, n.index_id, n.prefix",
+            )
+            .await?;
+            for r in rows {
+                let Some(&(owner, slot)) = self.index_slots.get(&(i(&r, 0), i(&r, 1))) else { continue };
+                let ns = XmlNamespace { prefix: if flag(&r, 2) { None } else { text(&r, 3) }, uri: s(&r, 4) };
+                if let Some(x) = self.indexes_of(owner)[slot].xml.as_mut() {
+                    x.namespaces.push(ns);
+                }
+            }
+        }
+        let rows = db::query(
+            conn,
+            "SELECT si.object_id, si.index_id, CAST(si.spatial_index_type AS int), st.tessellation_scheme,
+                    CONVERT(float, st.bounding_box_xmin), CONVERT(float, st.bounding_box_ymin),
+                    CONVERT(float, st.bounding_box_xmax), CONVERT(float, st.bounding_box_ymax),
+                    st.level_1_grid_desc, st.level_2_grid_desc, st.level_3_grid_desc, st.level_4_grid_desc,
+                    CAST(st.cells_per_object AS int)
+             FROM sys.spatial_indexes AS si
+             LEFT JOIN sys.spatial_index_tessellations AS st ON st.object_id = si.object_id AND st.index_id = si.index_id",
+        )
+        .await?;
+        for r in rows {
+            let Some(&(owner, slot)) = self.index_slots.get(&(i(&r, 0), i(&r, 1))) else { continue };
+            // 3 and 4 are the auto-grid variants of geometry and geography.
+            let geography = matches!(i(&r, 2), 2 | 4);
+            let bounding_box = if geography {
+                Vec::new()
+            } else {
+                (4..8).filter_map(|c| float(&r, c)).map(|f| f.to_string()).collect()
+            };
+            let spatial = SpatialIndex {
+                geography,
+                tessellation: s(&r, 3),
+                bounding_box,
+                grids: (8..12).map(|c| text(&r, c).unwrap_or_else(|| "MEDIUM".into())).collect(),
+                cells_per_object: int(&r, 12).unwrap_or(16) as i32,
+            };
+            self.indexes_of(owner)[slot].spatial = Some(spatial);
+        }
         Ok(())
     }
 
@@ -744,6 +878,21 @@ impl Reader {
                 Some(Owner::View(v)) => self.db.views[v].triggers.push(trigger),
                 _ => {}
             }
+        }
+        let rows = db::query(
+            conn,
+            "SELECT tr.name, OBJECT_DEFINITION(tr.object_id), tr.is_disabled
+             FROM sys.triggers AS tr WHERE tr.parent_class = 0 AND tr.is_ms_shipped = 0 ORDER BY tr.name",
+        )
+        .await?;
+        for r in rows {
+            let definition = text(&r, 1);
+            self.db.ddl_triggers.push(DdlTrigger {
+                name: s(&r, 0),
+                encrypted: definition.is_none(),
+                definition: definition.unwrap_or_default(),
+                disabled: flag(&r, 2),
+            });
         }
         Ok(())
     }
