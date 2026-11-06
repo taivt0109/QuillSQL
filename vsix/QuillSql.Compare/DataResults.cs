@@ -487,6 +487,7 @@ namespace QuillSql.Compare
             menu.Items.Add(Ui.MenuItem("Exclude all different", () => set(Different, false)));
             menu.Items.Add(Ui.MenuItem("Include all in " + Plain(_targetName), () => set(OnlyInTarget, true)));
             menu.Items.Add(Ui.MenuItem("Exclude all in " + Plain(_targetName), () => set(OnlyInTarget, false)));
+            Dialogs.RegisterMenu(menu);
             return menu;
         }
 
