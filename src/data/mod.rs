@@ -1,0 +1,10 @@
+//! Data compare: pairs tables and keys, reads both sides in key order, merges them and stores
+//! the differing rows, then scripts the changes.
+
+pub mod compare;
+pub mod mapping;
+pub mod options;
+pub mod store;
+pub mod value;
+
+pub use options::{DataOpt, DataOptions};
