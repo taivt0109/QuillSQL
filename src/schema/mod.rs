@@ -6,6 +6,7 @@ pub mod ddl;
 pub mod deploy;
 pub mod options;
 pub mod print;
+pub mod report;
 pub mod select;
 pub mod text;
 
