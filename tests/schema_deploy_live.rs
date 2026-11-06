@@ -280,3 +280,45 @@ fn modules_get_encrypted() {
     server.drop(a);
     server.drop(b);
 }
+
+/// A database script that gives the database a memory-optimized filegroup first.
+fn with_memory_optimized_filegroup(db: &str, rest: &str) -> String {
+    format!(
+        "ALTER DATABASE [{db}] ADD FILEGROUP mo CONTAINS MEMORY_OPTIMIZED_DATA\nGO\nALTER DATABASE [{db}] ADD FILE (NAME = N'{db}_mo', FILENAME = N'/var/opt/mssql/data/{db}_mo') TO FILEGROUP mo\nGO\n{rest}"
+    )
+}
+
+#[test]
+fn memory_optimized_tables_are_rebuilt_through_a_copy() {
+    let Some(server) = server() else { return };
+    let (a, b) = ("QD_schemadeploy_Mo1", "QD_schemadeploy_Mo2");
+    let disk = "CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, V nvarchar(20) NOT NULL CONSTRAINT DF_T_V DEFAULT (N'x'))\nGO\nINSERT INTO dbo.T (Id, V) VALUES (1, N'a'), (2, N'b'), (3, N'c')";
+    let mo = |width: u32| {
+        format!(
+            "CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY NONCLUSTERED, V nvarchar({width}) NOT NULL CONSTRAINT DF_T_V DEFAULT (N'x'), W int NOT NULL CONSTRAINT DF_T_W DEFAULT (0)) WITH (MEMORY_OPTIMIZED = ON)"
+        )
+    };
+    let opts = Options::default_set().with(Opt::NoTransactions);
+    let rows = |server: &Server| server.scalar(b, "SELECT COUNT(*) FROM dbo.T WHERE W = 0 OR W IS NULL");
+    // Disk-based to memory-optimized.
+    server.create(a, &with_memory_optimized_filegroup(a, &mo(20)));
+    server.create(b, &with_memory_optimized_filegroup(b, disk));
+    let s = converge(&server, a, b, &opts);
+    assert!(s.sql.contains("CREATE TABLE [dbo].[RG_Recovery_1_T]") && s.sql.contains("UPDATE STATISTICS [dbo].[T] WITH FULLSCAN, NORECOMPUTE"), "{}", s.sql);
+    assert!(!s.warnings.iter().any(|w| w.message.contains("in a transaction, which is not supported")), "{:?}", s.warnings);
+    assert_eq!(rows(&server), 3);
+    // Memory-optimized to memory-optimized.
+    server.create(a, &with_memory_optimized_filegroup(a, &mo(50)));
+    converge(&server, a, b, &opts);
+    assert_eq!(rows(&server), 3);
+    // And back to disk, with the default constraint names kept.
+    server.create(a, &with_memory_optimized_filegroup(a, &disk.replace("V nvarchar(20) NOT NULL CONSTRAINT DF_T_V DEFAULT (N'x')", "V nvarchar(50) NOT NULL CONSTRAINT DF_T_V DEFAULT (N'x'), W int NOT NULL CONSTRAINT DF_T_W DEFAULT (0)")));
+    converge(&server, a, b, &opts);
+    assert_eq!(rows(&server), 3);
+    // With a transaction the deployment is warned about.
+    server.create(a, &with_memory_optimized_filegroup(a, &mo(20)));
+    let (s, _) = script(&server, a, b, &Options::default_set());
+    assert!(s.warnings.iter().any(|w| w.message.contains("in a transaction, which is not supported")), "{:?}", s.warnings);
+    server.drop(a);
+    server.drop(b);
+}

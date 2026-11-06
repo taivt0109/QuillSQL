@@ -1800,31 +1800,58 @@ impl<'a> Planner<'a> {
         self.table_feature_warnings(s);
         self.disturbed.insert(old.clone());
         self.recreate.insert(name.clone());
+        // A memory-optimized table goes through a disk-based copy: it can't be renamed, and its
+        // keys and constraints can't be dropped one by one.
+        let memory_optimized = s.memory_optimized || t.memory_optimized;
         // Everything attached to the old table goes with it; foreign keys from other tables are
         // dropped first and come back afterwards.
-        for fk in &t.foreign_keys {
-            self.drop_foreign_key(t, fk);
-        }
-        self.drop_inbound_foreign_keys(t, true);
-        // Default constraint names are schema-wide, so the old ones are dropped before the new table takes them.
-        for c in &t.columns {
-            if let Some(df) = &c.default {
-                self.drop_default(&old, &c.name, df);
+        if !t.memory_optimized {
+            for fk in &t.foreign_keys {
+                self.drop_foreign_key(t, fk);
             }
         }
-        // Keys and check constraints are schema-wide names too.
-        for ix in t.indexes.iter().filter(|i| i.primary_key || i.unique_constraint) {
-            self.release_index(t, ix);
+        self.drop_inbound_foreign_keys(t, true);
+        if !t.memory_optimized {
+            // Default constraint names are schema-wide, so the old ones are dropped before the new table takes them.
+            for c in &t.columns {
+                if let Some(df) = &c.default {
+                    self.drop_default(&old, &c.name, df);
+                }
+            }
+            // Keys and check constraints are schema-wide names too.
+            for ix in t.indexes.iter().filter(|i| i.primary_key || i.unique_constraint) {
+                self.release_index(t, ix);
+            }
+            for ck in &t.check_constraints {
+                self.drop_check(&old, &ck.name);
+            }
         }
-        for ck in &t.check_constraints {
-            self.drop_check(&old, &ck.name);
-        }
-        let tmp_name: String = format!("RG_Recovery_{}_{}", self.next_temp, s.name).chars().take(128).collect();
-        self.next_temp += 1;
+        let temp_name = |p: &mut Self| -> String {
+            let n: String = format!("RG_Recovery_{}_{}", p.next_temp, s.name).chars().take(128).collect();
+            p.next_temp += 1;
+            n
+        };
+        let tmp_name = temp_name(self);
         let tmp = ObjectName::new(&s.schema, &tmp_name);
         let mut temp_table = s.clone();
         temp_table.indexes.clear();
         temp_table.temporal = None;
+        // The disk-based copy's defaults get temporary names while the real ones are taken.
+        // (column, temporary name, real default)
+        let mut temp_defaults: Vec<(String, String, DefaultConstraint)> = Vec::new();
+        if memory_optimized {
+            temp_table.memory_optimized = false;
+            temp_table.durability = None;
+            temp_table.storage = Storage::default();
+            for c in temp_table.columns.iter_mut() {
+                if let Some(df) = c.default.as_mut() {
+                    let real = df.clone();
+                    df.name = temp_name(self);
+                    df.system_named = false;
+                    temp_defaults.push((c.name.clone(), df.name.clone(), real));
+                }
+            }
+        }
         let mut statements = vec![ddl::create_table_with(&temp_table, Some(&tmp_name), false, &self.r)];
 
         let mut into = Vec::new();
@@ -1910,6 +1937,7 @@ impl<'a> Planner<'a> {
         }
         let identity_col = s.columns.iter().find(|c| c.identity.is_some());
         if let Some(c) = identity_col
+            && !s.memory_optimized
             && t.columns.iter().any(|tc| tc.identity.is_some() && self.same(&tc.name, &c.name))
         {
             statements.push(format!(
@@ -1919,8 +1947,34 @@ impl<'a> Planner<'a> {
             ));
         }
         statements.push(format!("DROP TABLE {}", old.quoted()));
-        let rename = format!("EXEC sp_rename {}, {}, N'OBJECT'", literal(&tmp_q), literal(&s.name));
-        statements.push(self.ex.rename_table(&tmp, &name, &rename));
+        if s.memory_optimized {
+            // The final memory-optimized table, filled from the copy.
+            statements.push(ddl::create_table_with(s, None, false, &self.r));
+            let cols: Vec<String> = s
+                .columns
+                .iter()
+                .filter(|c| c.computed.is_none() && !c.column_set && !matches!(c.data_type.name.as_str(), "timestamp" | "rowversion"))
+                .map(|c| quote(&c.name))
+                .collect();
+            let identity = identity_col.is_some();
+            if identity {
+                statements.push(format!("SET IDENTITY_INSERT {} ON", name.quoted()));
+            }
+            statements.push(format!("INSERT INTO {}({}) SELECT {} FROM {tmp_q}", name.quoted(), cols.join(", "), cols.join(", ")));
+            if identity {
+                statements.push(format!("SET IDENTITY_INSERT {} OFF", name.quoted()));
+            }
+            statements.push(format!("UPDATE STATISTICS {} WITH FULLSCAN, NORECOMPUTE", name.quoted()));
+            statements.push(format!("DROP TABLE {tmp_q}"));
+        } else {
+            let rename = format!("EXEC sp_rename {}, {}, N'OBJECT'", literal(&tmp_q), literal(&s.name));
+            statements.push(self.ex.rename_table(&tmp, &name, &rename));
+            // The copy's defaults take their real names back.
+            for (column, temp, real) in &temp_defaults {
+                statements.push(ddl::drop_constraint(&name.quoted(), temp));
+                statements.push(ddl::add_default(&name.quoted(), column, real));
+            }
+        }
         if s.lock_escalation != "TABLE" && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&name.quoted(), &s.lock_escalation));
         }
