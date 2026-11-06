@@ -1,0 +1,7 @@
+/target/
+vsix/*/bin/
+vsix/*/obj/
+vsix/packages/
+*.user
+.vs/
+dist/

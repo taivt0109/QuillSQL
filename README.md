@@ -1,0 +1,320 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo/png/quillsql-logo-dark.png">
+    <img alt="QuillSQL" src="assets/logo/png/quillsql-logo.png" width="560">
+  </picture>
+</p>
+
+<p align="center">
+  <b>English</b> · <a href="README.vi.md">Tiếng Việt</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/taivt0109/QuillSQL/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/taivt0109/QuillSQL"></a>
+  <a href="https://github.com/taivt0109/QuillSQL/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/taivt0109/QuillSQL/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
+
+**QuillSQL** makes writing T-SQL in SQL Server Management Studio faster and safer. It formats your
+code, suggests tables, columns and joins as you type, expands snippets, refactors, flags risky
+code, keeps a history of your queries, and can ask Claude to write, explain or tune SQL using your
+real schema and execution plans. It is free and open source, with a fast Rust engine that also
+runs on the command line and in CI.
+
+## What it does
+
+| | |
+|---|---|
+| **Format** | One shortcut lays out a script or a selection: lists, joins, `CASE`, `AND`/`OR`, casing, semicolons. Configurable, and it refuses to change anything it cannot verify. |
+| **IntelliSense** | Tables, views, columns, procedures, schemas, CTEs and variables as you type, from the connected database. |
+| **Writes code for you** | Join conditions from foreign keys, `EXEC` with every parameter, `INSERT ... VALUES` and `UPDATE ... SET` with every column, `*` expanded to columns. |
+| **Snippets** | About 70 built in (`ssf` + Tab → `SELECT * FROM`), your own in JSON, and "surround with" for a selection. |
+| **Refactoring** | Qualify object names, add or remove `AS`, smart rename, encapsulate as a stored procedure, inline an `EXEC`. Each is one Undo step. |
+| **Code analysis** | 54 rules underline problems as you type (`SELECT *`, `= NULL`, `UPDATE` without `WHERE`, deprecated syntax...). Fix them all with one command. |
+| **AI with Claude** | Write SQL from a sentence, explain or review a script, and analyze execution plans and Query Store with real indexes and row counts. |
+| **Safety at a glance** | Color the tab and editor of production connections; hover for a table's columns; highlight every use of a name. |
+| **Database tools** | Find procedures and views that reference objects that no longer exist; search the history of every query you ran. |
+| **Command line** | `quill` formats folders of `.sql` files and runs the analysis in CI. |
+
+## Install
+
+Requirements: Windows with SQL Server Management Studio 21 or later. The AI commands also need
+the [Claude Code CLI](https://code.claude.com/docs/en/overview), installed and signed in.
+
+Close SSMS, then run in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/taivt0109/QuillSQL/main/install.ps1 | iex
+```
+
+This installs the extension into every SSMS 21 or later on the machine, and the `quill` command
+line tool into `%LOCALAPPDATA%\QuillSQL\bin` (added to your PATH). It needs no admin rights, and
+every download is checked against the release's `SHA256SUMS.txt` before it is installed. Start
+SSMS: everything is under **Tools > QuillSQL**.
+
+Run the same command again to update, or set an option first:
+
+```powershell
+$env:QUILLSQL_VERSION = '0.2.0'    # install a specific version
+$env:QUILLSQL_NO_CLI = '1'         # only the SSMS extension
+$env:QUILLSQL_UNINSTALL = '1'      # remove QuillSQL
+irm https://raw.githubusercontent.com/taivt0109/QuillSQL/main/install.ps1 | iex
+```
+
+### Updates
+
+Once a day QuillSQL looks for a newer release on GitHub. When it finds one, it downloads it,
+checks its checksum and shows a bar at the top of SSMS: **Install when SSMS closes**, **What's
+new** or **Skip this version**. SSMS cannot replace an extension while it runs, so the update is
+installed right after SSMS exits. **Tools > QuillSQL > Check for Updates** checks now. To turn the
+daily check off, create `%LOCALAPPDATA%\QuillSQL\settings.json` containing
+`{ "autoUpdate": false }`.
+
+## Features in detail
+
+### Formatting
+
+**Tools > QuillSQL > Format T-SQL** (Ctrl+Shift+Alt+F) formats the selection, or the whole script
+if nothing is selected. One Undo reverts it.
+
+```sql
+-- Before
+select c.Name,sum(o.Total) total from dbo.Customers c join sales.Orders o on o.CustomerId=c.CustomerId where o.Total>100 and c.Name like 'A%' group by c.Name
+
+-- After, with "applyCasing": true
+SELECT c.Name,
+       sum(o.Total) total
+FROM dbo.Customers c
+JOIN sales.Orders o
+    ON o.CustomerId = c.CustomerId
+WHERE o.Total > 100
+    AND c.Name LIKE 'A%'
+GROUP BY c.Name
+```
+
+The formatter works on tokens. After formatting it reads its own output back and compares it with
+the original; if anything other than whitespace and the rewrites you asked for changed, or the
+script has an unterminated string, comment or identifier, it reports an error and leaves your code
+alone. Lines between `-- quill-format-off` and `-- quill-format-on` are never touched. See
+[Formatting options](#formatting-options) to change the layout.
+
+### IntelliSense
+
+As you type, a list offers:
+
+- tables, views, table functions, schemas and CTEs after `FROM`, `JOIN`, `INTO` and `UPDATE`;
+- procedures after `EXEC`, objects after `schema.`;
+- columns after `alias.` or `table.`, and the columns of every table in the statement inside
+  `SELECT`, `WHERE` and `ON` (a name found in two tables is inserted with its alias);
+- columns inside `INSERT INTO t (`, and the variables declared in the script after `@`.
+
+Up/Down moves, Enter or Tab inserts, Esc closes, Ctrl+Space opens the list. Metadata loads in the
+background the first time a database is used and follows `USE`; **Tools > QuillSQL > Refresh T-SQL
+Suggestions** reloads it after schema changes.
+
+The list also writes code:
+
+- after `JOIN`, tables related by a foreign key, with an alias and the condition:
+  `sales.Orders o ON o.CustomerId = c.CustomerId`; after `ON`, the condition alone;
+- after `EXEC`, the procedure with all its parameters, one per line with its type;
+- after `INSERT INTO table `, the column list and a `VALUES` row with a placeholder per column;
+  after `UPDATE table SET `, every column (identity, computed and rowversion columns are skipped).
+
+QuillSQL turns off SSMS's own "Auto list members" so that two lists do not open; turn it back on
+in Tools > Options > Text Editor > Transact-SQL > IntelliSense.
+
+### Snippets
+
+Type a prefix and press Tab, or pick it from the list. **Tools > QuillSQL > Insert Snippet...**
+lists them all; with text selected, the snippet wraps it (`tc` for TRY...CATCH, `be` for
+BEGIN...END, `timings` to time it).
+
+Add your own as JSON files in `%LOCALAPPDATA%\QuillSQL\Snippets` (one with a built-in prefix
+replaces it), then restart SSMS:
+
+```json
+{ "prefix": "sel", "description": "Select from a table", "body": "SELECT $CURSOR$ FROM $table$;",
+  "placeholders": [{ "name": "table", "defaultValue": "dbo.MyTable" }] }
+```
+
+Bodies can use `$CURSOR$`, `$SELECTEDTEXT$`, `$SELECTIONSTART$`/`$SELECTIONEND$`, `$DATE$`,
+`$TIME$`, `$USER$`, `$MACHINE$`, `$SERVER$`, `$DBNAME$` and `$PASTE$` (the clipboard). The first
+`$name$` placeholder is selected after insertion so you can type over it.
+
+### Refactoring
+
+Under **Tools > QuillSQL**:
+
+- **Expand Wildcards**: `*` and `alias.*` become the column names. Tab right after a `*` does the
+  same for that one wildcard.
+- **Qualify Object Names**: adds schemas to tables, views and procedures, and aliases to columns
+  in queries over more than one table.
+- **Add AS to Aliases** / **Remove AS from Aliases**.
+- **Smart Rename...**: renames the variable (in its batch), alias or CTE (in its statement) under
+  the caret. For a table, view, procedure or column it opens an `sp_rename` script, with a query
+  listing the objects that use the old name, for you to review and run.
+- **Encapsulate as Stored Procedure...**: turns the selection into a `CREATE PROCEDURE` script;
+  variables it uses without declaring become typed parameters.
+- **Inline EXEC**: replaces the `EXEC` under the caret with the procedure's body, declaring each
+  parameter with its argument or default.
+
+### Code analysis
+
+Problems are underlined a moment after you stop typing; hover to read them. **Analyze Code**
+lists them in the Error List, and **Fix Code Issues** applies every safe fix at once: `!=` to
+`<>`, `= NULL` to `IS NULL`, `@@IDENTITY` to `SCOPE_IDENTITY()`, `TOP 5` to `TOP (5)`, table hints
+without `WITH`, missing schemas, `SELECT *` and `INSERT` without a column list. **Toggle Code
+Analysis Underlines** switches the underlines off and on.
+
+Each rule has a stable code whose prefix gives its kind: BP best practice, DEP deprecated, EI
+execution issue, MI miscellaneous, PE performance, ST style, SC script. `RULES` in
+[`src/analysis.rs`](src/analysis.rs) lists all 54.
+
+### AI with Claude
+
+These commands use the Claude Code CLI on your machine, with all of Claude's tools turned off so
+it can only answer:
+
+- **Ask AI...**: write SQL from a request ("top 10 customers by order total this year"), or
+  rewrite the selection ("add paging"). The result is inserted and selected, as one Undo step.
+- **Explain with AI**: an explanation of the selection or script in the Output window.
+- **Review with AI**: problems found and an improved script, in a new window.
+- **Analyze Plan with AI**: reads the row counts, sizes, indexes and statistics dates of the
+  tables the query uses, and its estimated execution plan (compiled, never run), then asks Claude
+  where the cost goes and what to change.
+- **Analyze Actual Plan with AI (runs the query)...**: the same with measured rows, reads and time
+  per operator. It runs the query and discards the results, so it only accepts read-only scripts
+  and asks you first.
+- **Find Slow Queries with AI (Query Store)**: the 10 most expensive queries of the last 7 days,
+  the plans of the slowest, and their tables' indexes, reviewed for the fixes with most impact.
+
+The plan commands show everything they send in the Output window. Optional settings in
+`%LOCALAPPDATA%\QuillSQL\ai.json`: `{ "model": "sonnet", "language": "English" }`, where
+`language` is the language of explanations and comments.
+
+### Safety at a glance
+
+- **Colored tabs**: query windows connected to servers you mark get a colored document tab and a
+  colored bar above the editor. Create `%USERPROFILE%\.quillsql-colors.json`:
+
+  ```json
+  [{ "match": "prod", "color": "#C62828", "label": "PRODUCTION" },
+   { "match": "test", "color": "#2E7D32" }]
+  ```
+
+  `match` is looked for in "server / database", ignoring case; the first match wins.
+- **Hover** over a table, column, alias or variable (or press Ctrl+K, Ctrl+I) to see its columns,
+  types or parameters.
+- **Highlighting**: every use of the variable, alias or name under the caret is highlighted.
+
+### Database tools
+
+- **Find Invalid Objects** lists procedures, views and functions that reference objects that no
+  longer exist, in the Output window.
+- **Query History...** searches every query you ran (F5) and every query window you closed, with
+  its server and database. Open one in a new window or copy it.
+
+## Privacy
+
+QuillSQL runs on your machine and talks only to:
+
+- **your SQL Server**, with the query window's own connection, to read metadata, plans and Query
+  Store;
+- **GitHub**, once a day, to look for updates (turn it off with `"autoUpdate": false`);
+- **Claude**, through your Claude Code CLI, only when you run an AI command. It sends your
+  request, the selection or script, and the names and types of the tables it uses; the plan
+  commands add row counts, index definitions and a plan summary (which includes literal and
+  parameter values from the query); Query Store review adds the slowest queries' text. Table rows
+  are never sent.
+
+Query history stays in `%LOCALAPPDATA%\QuillSQL\history.jsonl` (the last 5000 entries). It holds
+the full text of your scripts, so delete it if they contain secrets.
+
+## Command line
+
+```powershell
+quill -p .\scripts                # format every .sql file, recursively
+quill -p .\scripts --check        # report only; exit code 1 if anything would change
+quill -p a.sql -b                 # keep the original as a.sql.bak
+Get-Content a.sql | quill --stdin # stdin to stdout
+quill --analyze -p .\scripts      # code analysis as file:line:column: severity CODE message
+```
+
+Exit codes: 0 success, 1 changes found (`--check`) or warnings (`--analyze`), 2 error. UTF-8 and
+UTF-16 files keep their encoding; files in a legacy code page are refused rather than guessed at.
+Run `quill --help` for every option.
+
+## Formatting options
+
+`quill --style file.json` and the extension (which reads `%USERPROFILE%\.quillsql.json`) take a
+small options file. Every field is optional:
+
+```json
+{
+  "layout": true,
+  "indentSize": 4,
+  "leadingCommas": false,
+  "applyCasing": true,
+  "prefixUnicode": false,
+  "insertSemicolons": true,
+  "encloseIdentifiers": "WithoutBrackets",
+  "tableAliasStyle": "AddAs"
+}
+```
+
+`encloseIdentifiers` also accepts `WithBrackets`, and `tableAliasStyle` `RemoveAs`. For finer
+control, a sectioned style groups settings by `whitespace`, `lists`, `joinStatements`,
+`caseExpressions` and more, and only needs the values that differ from the defaults in
+[`src/quill_defaults.json`](src/quill_defaults.json). The CLI warns about any setting it ignores.
+
+## Files and settings
+
+| Path | What it is |
+|---|---|
+| `%USERPROFILE%\.quillsql.json` | Formatting options |
+| `%USERPROFILE%\.quillsql-colors.json` | Tab and bar colors per server |
+| `%LOCALAPPDATA%\QuillSQL\settings.json` | `{ "autoUpdate": false }` turns off update checks |
+| `%LOCALAPPDATA%\QuillSQL\ai.json` | AI model and answer language |
+| `%LOCALAPPDATA%\QuillSQL\Snippets\` | Your snippets |
+| `%LOCALAPPDATA%\QuillSQL\history.jsonl` | Query history |
+| `%LOCALAPPDATA%\QuillSQL\quillsql.log` | Log; an empty file named `verbose` next to it logs more |
+
+## Build from source
+
+Requires Rust (stable) and Visual Studio 2022 with MSBuild; the VS SDK comes from NuGet.
+
+```powershell
+cargo test
+.\vsix\build.ps1                 # builds quill.exe and vsix\QuillSql.Vsix\bin\Release\QuillSql.Vsix.vsix
+.\vsix\install.ps1               # close SSMS first; -RootSuffix Exp for a test instance, -Uninstall to remove
+```
+
+```
+src/      Rust engine: lexer, formatter, IntelliSense, refactoring, analysis, plans, snippets
+tests/    Engine tests
+vsix/     SSMS extension: a thin C# shell that runs quill.exe as a separate process
+assets/   Logo (SVG sources; assets\logo\render.ps1 makes the PNGs and the .ico)
+scripts/  set-version.ps1
+```
+
+SSMS loads only in-process .NET Framework packages, so the extension is C#; it holds no SQL logic
+and talks to the engine over a pipe, so an engine crash cannot take SSMS down.
+
+To release: `.\scripts\set-version.ps1 0.3.0`, commit, then push the tag `v0.3.0`. The Release
+workflow tests, builds and publishes `QuillSQL.vsix`, `quill.exe` and `SHA256SUMS.txt`, and
+installed copies offer the update within a day.
+
+## Known limits
+
+- QuillSQL reads T-SQL as tokens rather than a full parse. It covers everyday queries, DML and
+  DDL; unusual syntax may get no suggestion, rewrite or warning, but it is not changed wrongly.
+- With Microsoft Entra logins, features that need metadata are unavailable; formatting, snippets,
+  colors and history still work.
+- `insertSemicolons` skips ambiguous places, for example before `THROW`.
+- Smart Rename of database objects produces a script; it does not change other objects for you.
+- Tab colors depend on the layout of SSMS 21's document tabs and may need an update for a future
+  SSMS.
+
+## License
+
+[MIT](LICENSE)

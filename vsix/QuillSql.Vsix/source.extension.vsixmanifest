@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <Identity Id="QuillSql.Ssms.5f0c7a52-3b1e-4d7c-9a46-6e2d1c8b7f10" Version="0.2.0" Language="en-US" Publisher="QuillSQL" />
+    <DisplayName>QuillSQL</DisplayName>
+    <Description xml:space="preserve">T-SQL formatting, suggestions, snippets, refactoring, code analysis and query history for SSMS, powered by a Rust engine.</Description>
+    <MoreInfo>https://github.com/taivt0109/QuillSQL</MoreInfo>
+    <License>LICENSE</License>
+    <Icon>quillsql-90.png</Icon>
+    <PreviewImage>quillsql-200.png</PreviewImage>
+    <Tags>SQL; T-SQL; SSMS; formatter; IntelliSense; refactoring; code analysis</Tags>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Ssms" Version="[17.0,)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+  </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.Framework.NDP" DisplayName="Microsoft .NET Framework" d:Source="Manual" Version="[4.8,)" />
+  </Dependencies>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.0,18.0)" DisplayName="Visual Studio core editor" />
+  </Prerequisites>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+    <Asset Type="Microsoft.VisualStudio.MefComponent" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%|" />
+  </Assets>
+</PackageManifest>

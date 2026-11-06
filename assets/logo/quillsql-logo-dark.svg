@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320">
+  <title>QuillSQL</title>
+  <svg x="32" y="32" width="256" height="256" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#1E1B4B"/>
+    </linearGradient>
+    <linearGradient id="vane" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#F59E0B"/>
+      <stop offset="1" stop-color="#FDE68A"/>
+    </linearGradient>
+    <linearGradient id="drum" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#C7D2FE"/>
+      <stop offset="0.55" stop-color="#EEF2FF"/>
+      <stop offset="1" stop-color="#A5B4FC"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <g transform="translate(14 8)">
+  <!-- Database: a cylinder with two rings. -->
+  <path d="M96 236 V384 A120 36 0 0 0 336 384 V236 Z" fill="url(#drum)"/>
+  <path d="M96 286 A120 36 0 0 0 336 286" fill="none" stroke="#6366F1" stroke-width="10" stroke-linecap="round"/>
+  <path d="M96 336 A120 36 0 0 0 336 336" fill="none" stroke="#6366F1" stroke-width="10" stroke-linecap="round"/>
+  <ellipse cx="216" cy="236" rx="120" ry="36" fill="#FFFFFF"/>
+
+  <!-- The line the quill is writing on the top of the database. -->
+  <path d="M134 240 q18 -16 36 0 t36 0 t36 0" fill="none" stroke="#312E81" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Quill: feather, shaft and nib, its tip at the end of the line. -->
+  <path d="M256 236 L270 204 C304 146 362 88 450 46 C434 120 378 182 294 222 Z" fill="url(#vane)"/>
+  <path d="M338 155 l-14 -20 M364 130 l-12 -18 M390 104 l-10 -16" stroke="#B45309" stroke-width="6" stroke-linecap="round" opacity="0.55"/>
+  <path d="M268 222 L442 54" stroke="#92400E" stroke-width="7" stroke-linecap="round"/>
+  <path d="M252 246 L264 210 L284 226 Z" fill="#1E1B4B"/>
+  </g>
+  </svg>
+  <text x="320" y="190" font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif" font-size="150" font-weight="700" letter-spacing="-3"><tspan fill="#FFFFFF">Quill</tspan><tspan fill="#A5B4FC">SQL</tspan></text>
+  <text x="326" y="256" font-family="Segoe UI, Inter, Helvetica Neue, Arial, sans-serif" font-size="40" fill="#CBD5E1">T-SQL formatting, IntelliSense and AI for SSMS</text>
+</svg>

@@ -1,0 +1,50 @@
+name: Release
+
+# Push a tag such as v0.3.0 (after scripts/set-version.ps1 0.3.0) to publish a release.
+# Installed extensions find it within a day; install.ps1 installs it immediately.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the version in the sources
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $manifest = ([xml](Get-Content vsix/QuillSql.Vsix/source.extension.vsixmanifest)).PackageManifest.Metadata.Identity.Version
+          $package = (Select-String -Path vsix/QuillSql.Vsix/QuillSqlPackage.cs -Pattern 'const string Version = "(.+)"').Matches[0].Groups[1].Value
+          if ($cargo -ne $tag -or $manifest -ne $tag -or $package -ne $tag) {
+            throw "Tag $tag does not match Cargo.toml $cargo, manifest $manifest, package $package. Run scripts/set-version.ps1 $tag."
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build the SSMS extension
+        shell: pwsh
+        run: ./vsix/build.ps1
+
+      - name: Collect the release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item vsix/QuillSql.Vsix/bin/Release/QuillSql.Vsix.vsix dist/QuillSQL.vsix
+          Copy-Item target/release/quill.exe dist/quill.exe
+          Get-ChildItem dist | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } |
+            Set-Content dist/SHA256SUMS.txt -Encoding ascii
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidQuillSqlPackage">
+    <Menus>
+      <Menu guid="guidQuillSqlCmdSet" id="QuillSqlMenu" priority="0x0100" type="Menu">
+        <Parent guid="guidQuillSqlCmdSet" id="ToolsGroup" />
+        <Strings>
+          <ButtonText>QuillSQL</ButtonText>
+        </Strings>
+      </Menu>
+    </Menus>
+    <Groups>
+      <Group guid="guidQuillSqlCmdSet" id="ToolsGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
+      <Group guid="guidQuillSqlCmdSet" id="EditGroup" priority="0x0100">
+        <Parent guid="guidQuillSqlCmdSet" id="QuillSqlMenu" />
+      </Group>
+      <Group guid="guidQuillSqlCmdSet" id="RefactorGroup" priority="0x0200">
+        <Parent guid="guidQuillSqlCmdSet" id="QuillSqlMenu" />
+      </Group>
+      <Group guid="guidQuillSqlCmdSet" id="AnalysisGroup" priority="0x0300">
+        <Parent guid="guidQuillSqlCmdSet" id="QuillSqlMenu" />
+      </Group>
+      <Group guid="guidQuillSqlCmdSet" id="DatabaseGroup" priority="0x0400">
+        <Parent guid="guidQuillSqlCmdSet" id="QuillSqlMenu" />
+      </Group>
+      <Group guid="guidQuillSqlCmdSet" id="AiGroup" priority="0x0500">
+        <Parent guid="guidQuillSqlCmdSet" id="QuillSqlMenu" />
+      </Group>
+      <Group guid="guidQuillSqlCmdSet" id="AboutGroup" priority="0x0600">
+        <Parent guid="guidQuillSqlCmdSet" id="QuillSqlMenu" />
+      </Group>
+    </Groups>
+    <Buttons>
+      <Button guid="guidQuillSqlCmdSet" id="FormatCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="EditGroup" />
+        <Strings>
+          <ButtonText>Format T-SQL</ButtonText>
+          <CanonicalName>.Tools.FormatTSQL</CanonicalName>
+          <LocCanonicalName>.Tools.FormatTSQL</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="RefreshCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="DatabaseGroup" />
+        <Strings>
+          <ButtonText>Refresh T-SQL Suggestions</ButtonText>
+          <CanonicalName>.Tools.RefreshTSQLSuggestions</CanonicalName>
+          <LocCanonicalName>.Tools.RefreshTSQLSuggestions</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="InsertSnippetCommandId" priority="0x0101" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="EditGroup" />
+        <Strings>
+          <ButtonText>Insert Snippet...</ButtonText>
+          <CanonicalName>.QuillSQL.InsertSnippet</CanonicalName>
+          <LocCanonicalName>.QuillSQL.InsertSnippet</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="ExpandWildcardsCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="RefactorGroup" />
+        <Strings>
+          <ButtonText>Expand Wildcards</ButtonText>
+          <CanonicalName>.QuillSQL.ExpandWildcards</CanonicalName>
+          <LocCanonicalName>.QuillSQL.ExpandWildcards</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="QualifyCommandId" priority="0x0101" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="RefactorGroup" />
+        <Strings>
+          <ButtonText>Qualify Object Names</ButtonText>
+          <CanonicalName>.QuillSQL.QualifyObjectNames</CanonicalName>
+          <LocCanonicalName>.QuillSQL.QualifyObjectNames</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="AddAsCommandId" priority="0x0102" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="RefactorGroup" />
+        <Strings>
+          <ButtonText>Add AS to Aliases</ButtonText>
+          <CanonicalName>.QuillSQL.AddAs</CanonicalName>
+          <LocCanonicalName>.QuillSQL.AddAs</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="RemoveAsCommandId" priority="0x0103" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="RefactorGroup" />
+        <Strings>
+          <ButtonText>Remove AS from Aliases</ButtonText>
+          <CanonicalName>.QuillSQL.RemoveAs</CanonicalName>
+          <LocCanonicalName>.QuillSQL.RemoveAs</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="RenameCommandId" priority="0x0104" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="RefactorGroup" />
+        <Strings>
+          <ButtonText>Smart Rename...</ButtonText>
+          <CanonicalName>.QuillSQL.SmartRename</CanonicalName>
+          <LocCanonicalName>.QuillSQL.SmartRename</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="EncapsulateCommandId" priority="0x0105" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="RefactorGroup" />
+        <Strings>
+          <ButtonText>Encapsulate as Stored Procedure...</ButtonText>
+          <CanonicalName>.QuillSQL.EncapsulateAsProcedure</CanonicalName>
+          <LocCanonicalName>.QuillSQL.EncapsulateAsProcedure</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="InlineExecCommandId" priority="0x0106" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="RefactorGroup" />
+        <Strings>
+          <ButtonText>Inline EXEC</ButtonText>
+          <CanonicalName>.QuillSQL.InlineExec</CanonicalName>
+          <LocCanonicalName>.QuillSQL.InlineExec</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="AnalyzeCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AnalysisGroup" />
+        <Strings>
+          <ButtonText>Analyze Code</ButtonText>
+          <CanonicalName>.QuillSQL.AnalyzeCode</CanonicalName>
+          <LocCanonicalName>.QuillSQL.AnalyzeCode</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="FixIssuesCommandId" priority="0x0101" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AnalysisGroup" />
+        <Strings>
+          <ButtonText>Fix Code Issues</ButtonText>
+          <CanonicalName>.QuillSQL.FixCodeIssues</CanonicalName>
+          <LocCanonicalName>.QuillSQL.FixCodeIssues</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="ToggleAnalysisCommandId" priority="0x0102" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AnalysisGroup" />
+        <Strings>
+          <ButtonText>Toggle Code Analysis Underlines</ButtonText>
+          <CanonicalName>.QuillSQL.ToggleCodeAnalysis</CanonicalName>
+          <LocCanonicalName>.QuillSQL.ToggleCodeAnalysis</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="InvalidObjectsCommandId" priority="0x0101" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="DatabaseGroup" />
+        <Strings>
+          <ButtonText>Find Invalid Objects</ButtonText>
+          <CanonicalName>.QuillSQL.FindInvalidObjects</CanonicalName>
+          <LocCanonicalName>.QuillSQL.FindInvalidObjects</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="HistoryCommandId" priority="0x0102" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="DatabaseGroup" />
+        <Strings>
+          <ButtonText>Query History...</ButtonText>
+          <CanonicalName>.QuillSQL.QueryHistory</CanonicalName>
+          <LocCanonicalName>.QuillSQL.QueryHistory</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="AskAiCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <Strings>
+          <ButtonText>Ask AI...</ButtonText>
+          <CanonicalName>.QuillSQL.AskAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.AskAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="ExplainAiCommandId" priority="0x0101" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <Strings>
+          <ButtonText>Explain with AI</ButtonText>
+          <CanonicalName>.QuillSQL.ExplainWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.ExplainWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="ReviewAiCommandId" priority="0x0102" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <Strings>
+          <ButtonText>Review with AI</ButtonText>
+          <CanonicalName>.QuillSQL.ReviewWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.ReviewWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="PlanAiCommandId" priority="0x0103" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <Strings>
+          <ButtonText>Analyze Plan with AI</ButtonText>
+          <CanonicalName>.QuillSQL.AnalyzePlanWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.AnalyzePlanWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="ActualPlanAiCommandId" priority="0x0104" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <Strings>
+          <ButtonText>Analyze Actual Plan with AI (runs the query)...</ButtonText>
+          <CanonicalName>.QuillSQL.AnalyzeActualPlanWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.AnalyzeActualPlanWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="SlowQueriesAiCommandId" priority="0x0105" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <Strings>
+          <ButtonText>Find Slow Queries with AI (Query Store)</ButtonText>
+          <CanonicalName>.QuillSQL.FindSlowQueriesWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.FindSlowQueriesWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="CheckUpdatesCommandId" priority="0x0100" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AboutGroup" />
+        <Strings>
+          <ButtonText>Check for Updates</ButtonText>
+          <CanonicalName>.QuillSQL.CheckForUpdates</CanonicalName>
+          <LocCanonicalName>.QuillSQL.CheckForUpdates</LocCanonicalName>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <KeyBindings>
+    <KeyBinding guid="guidQuillSqlCmdSet" id="FormatCommandId" editor="guidVSStd97" key1="F" mod1="Control Shift Alt" />
+  </KeyBindings>
+
+  <Symbols>
+    <GuidSymbol name="guidQuillSqlPackage" value="{a4d6f0c1-7e2b-4c39-8f15-2b9e6d3a1c74}" />
+    <GuidSymbol name="guidQuillSqlCmdSet" value="{c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36}">
+      <IDSymbol name="ToolsGroup" value="0x1020" />
+      <IDSymbol name="FormatCommandId" value="0x0100" />
+      <IDSymbol name="RefreshCommandId" value="0x0101" />
+      <IDSymbol name="QuillSqlMenu" value="0x1000" />
+      <IDSymbol name="EditGroup" value="0x1021" />
+      <IDSymbol name="RefactorGroup" value="0x1022" />
+      <IDSymbol name="AnalysisGroup" value="0x1023" />
+      <IDSymbol name="DatabaseGroup" value="0x1024" />
+      <IDSymbol name="AiGroup" value="0x1025" />
+      <IDSymbol name="AboutGroup" value="0x1026" />
+      <IDSymbol name="CheckUpdatesCommandId" value="0x0116" />
+      <IDSymbol name="AskAiCommandId" value="0x0110" />
+      <IDSymbol name="ExplainAiCommandId" value="0x0111" />
+      <IDSymbol name="ReviewAiCommandId" value="0x0112" />
+      <IDSymbol name="PlanAiCommandId" value="0x0113" />
+      <IDSymbol name="ActualPlanAiCommandId" value="0x0114" />
+      <IDSymbol name="SlowQueriesAiCommandId" value="0x0115" />
+      <IDSymbol name="ExpandWildcardsCommandId" value="0x0102" />
+      <IDSymbol name="QualifyCommandId" value="0x0103" />
+      <IDSymbol name="AddAsCommandId" value="0x0104" />
+      <IDSymbol name="RemoveAsCommandId" value="0x0105" />
+      <IDSymbol name="EncapsulateCommandId" value="0x0106" />
+      <IDSymbol name="RenameCommandId" value="0x0107" />
+      <IDSymbol name="InlineExecCommandId" value="0x0108" />
+      <IDSymbol name="InsertSnippetCommandId" value="0x0109" />
+      <IDSymbol name="AnalyzeCommandId" value="0x010A" />
+      <IDSymbol name="FixIssuesCommandId" value="0x010B" />
+      <IDSymbol name="ToggleAnalysisCommandId" value="0x010C" />
+      <IDSymbol name="InvalidObjectsCommandId" value="0x010D" />
+      <IDSymbol name="HistoryCommandId" value="0x010E" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>

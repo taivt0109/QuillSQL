@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>QuillSQL (16 to 32 pixels)</title>
+  <!-- The same mark with fewer, bolder shapes so it stays readable at 16 to 32 pixels. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#1E1B4B"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <path d="M48 250 V408 A150 46 0 0 0 348 408 V250 Z" fill="#E0E7FF"/>
+  <path d="M48 330 A150 46 0 0 0 348 330" fill="none" stroke="#6366F1" stroke-width="28"/>
+  <ellipse cx="198" cy="250" rx="150" ry="46" fill="#FFFFFF"/>
+  <path d="M232 262 L252 206 C300 132 380 66 480 28 C458 120 386 196 296 240 Z" fill="#FBBF24"/>
+  <path d="M226 276 L246 214 L284 240 Z" fill="#1E1B4B"/>
+</svg>

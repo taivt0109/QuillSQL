@@ -1,0 +1,171 @@
+{
+  "whitespace": {
+    "spacesOrTabs": "spaces",
+    "numberOfSpacesInTabs": 4,
+    "wrapLongLines": true,
+    "wrapLinesLongerThan": 120,
+    "whiteSpaceBeforeSemiColon": "none",
+    "newLines": {
+      "preserveExistingEmptyLinesBetweenStatements": true,
+      "preserveExistingEmptyLinesAfterBatchSeparator": true,
+      "alignGroupOfSingleLineComments": true,
+      "alignMultilineCommentsMatchingPatterns": true,
+      "emptyLinesBetweenStatements": 1,
+      "emptyLinesAfterBatchSeparator": 1
+    }
+  },
+  "lists": {
+    "placeFirstItemOnNewLine": "never",
+    "placeSubsequentItemsOnNewLines": "always",
+    "alignSubsequentItemsWithFirstItem": true,
+    "alignItemsAcrossClauses": true,
+    "indentListItems": true,
+    "alignItemsToTabStops": false,
+    "alignAliases": false,
+    "alignComments": false,
+    "placeCommasBeforeItems": false,
+    "addSpaceBeforeComma": false,
+    "addSpaceAfterComma": true,
+    "commaAlignment": "beforeItem"
+  },
+  "parentheses": {
+    "parenthesisStyle": "compactSimple",
+    "indentParenthesesContents": false,
+    "collapseShortParenthesisContents": false,
+    "collapseParenthesesShorterThan": 80,
+    "addSpacesAroundParentheses": true,
+    "addSpacesInsideParentheses": false
+  },
+  "casing": {
+    "reservedKeywords": "leaveAsIs",
+    "builtInFunctions": "leaveAsIs",
+    "builtInDataTypes": "leaveAsIs",
+    "globalVariables": "leaveAsIs",
+    "useObjectDefinitionCase": false
+  },
+  "dml": {
+    "placeInsertTableOnNewLine": false,
+    "placeDistinctAndTopClausesOnNewLine": false,
+    "addNewLineAfterDistinctAndTopClauses": false,
+    "collapseShortStatements": false,
+    "collapseStatementsShorterThan": 80,
+    "collapseShortSubqueries": false,
+    "collapseSubqueriesShorterThan": 80,
+    "clauses": {
+      "clauseAlignment": "leftAligned",
+      "clauseIndentation": 0
+    },
+    "listItems": {
+      "placeFromTableOnNewLine": "never",
+      "placeWhereConditionOnNewLine": "never",
+      "placeGroupByAndOrderByOnNewLine": "never"
+    }
+  },
+  "ddl": {
+    "parenthesisStyle": "compactSimple",
+    "indentParenthesesContents": false,
+    "alignDataTypesAndConstraints": false,
+    "placeConstraintsOnNewLines": false,
+    "placeConstraintColumnsOnNewLines": "ifLongerThanMaxLineLength",
+    "indentClauses": false,
+    "placeFirstProcedureParameterOnNewLine": "ifMultipleItems",
+    "collapseShortStatements": false,
+    "collapseStatementsShorterThan": 80
+  },
+  "controlFlow": {
+    "placeBeginAndEndOnNewLine": true,
+    "indentBeginAndEndKeywords": false,
+    "indentContentsOfStatements": true,
+    "collapseShortStatements": false,
+    "collapseStatementsShorterThan": 80
+  },
+  "cte": {
+    "parenthesisStyle": "compactSimple",
+    "indentContents": false,
+    "placeNameOnNewLine": false,
+    "indentName": false,
+    "placeColumnsOnNewLine": false,
+    "columnAlignment": "leftAligned",
+    "placeAsOnNewLine": true,
+    "asAlignment": "leftAligned"
+  },
+  "variables": {
+    "alignDataTypesAndValues": true,
+    "addSpaceBetweenDataTypeAndPrecision": false,
+    "placeAssignedValueOnNewLineIfLongerThanMaxLineLength": true,
+    "placeEqualsSignOnNewLine": false
+  },
+  "joinStatements": {
+    "join": {
+      "placeOnNewLine": true,
+      "keywordAlignment": "toFrom",
+      "insertEmptyLineBetweenJoinClauses": false,
+      "placeJoinTableOnNewLine": false,
+      "indentJoinTable": true
+    },
+    "on": {
+      "placeOnNewLine": true,
+      "keywordAlignment": "toJoin",
+      "placeConditionOnNewLine": false,
+      "conditionAlignment": "toOnKeyword"
+    }
+  },
+  "insertStatements": {
+    "columns": {
+      "parenthesisStyle": "expandedToStatement",
+      "indentContents": true,
+      "placeSubsequentColumnsOnNewLines": "always"
+    },
+    "values": {
+      "parenthesisStyle": "compactToStatement",
+      "indentContents": false,
+      "placeSubsequentValuesOnNewLines": "never"
+    }
+  },
+  "functionCalls": {
+    "placeArgumentsOnNewLines": "ifLongerThanMaxLineLength",
+    "addSpacesAroundParentheses": false,
+    "addSpacesAroundArgumentList": false,
+    "addSpaceBetweenEmptyParentheses": false,
+    "addSpaceAfterFunctionCalls": false
+  },
+  "caseExpressions": {
+    "placeExpressionOnNewLine": true,
+    "placeFirstWhenOnNewLine": "always",
+    "whenAlignment": "indentedFromCase",
+    "placeThenOnNewLine": false,
+    "thenAlignment": "indentedFromWhen",
+    "placeElseOnNewLine": true,
+    "alignElseToWhen": true,
+    "placeEndOnNewLine": true,
+    "endAlignment": "toCase",
+    "collapseShortCaseExpressions": false,
+    "collapseCaseExpressionsShorterThan": 80
+  },
+  "operators": {
+    "comparison": {
+      "align": false,
+      "addSpacesAround": true
+    },
+    "arithmetic": {
+      "addSpacesAround": true
+    },
+    "andOr": {
+      "placeOnNewLine": "always",
+      "alignment": "leftAligned",
+      "placeKeywordBeforeCondition": true
+    },
+    "between": {
+      "placeOnNewLine": true,
+      "placeAndKeywordOnNewLine": false,
+      "andAlignment": "toBetween"
+    },
+    "in": {
+      "placeOpeningParenthesisOnNewLine": false,
+      "alignment": "leftAligned",
+      "placeFirstValueOnNewLine": "ifSubsequentValues",
+      "placeSubsequentValuesOnNewLines": "ifLongerThanMaxLineLength",
+      "addSpaceAroundInContents": false
+    }
+  }
+}
