@@ -93,7 +93,7 @@ namespace QuillSql.Compare
             var browse = Ui.Button("Browse…", () =>
             {
                 var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = Path.GetFileName(copyPath.Text) };
-                if (d.ShowDialog(window) == true) copyPath.Text = d.FileName;
+                if (Dialogs.Show(d, window) == true) copyPath.Text = d.FileName;
             });
             browse.IsEnabled = false;
             saveCopy.Checked += (s, e) => { copyPath.IsEnabled = browse.IsEnabled = true; };
@@ -349,7 +349,7 @@ namespace QuillSql.Compare
                 Ui.Command(Glyph.Save, "Save script…", () =>
                 {
                     var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = "deploy.sql" };
-                    if (d.ShowDialog(_host.Owner) == true) File.WriteAllText(d.FileName, sql, new System.Text.UTF8Encoding(true));
+                    if (Dialogs.Show(d, _host.Owner) == true) File.WriteAllText(d.FileName, sql, new System.Text.UTF8Encoding(true));
                 }));
             scriptTools.Margin = new Thickness(12, 6, 12, 4);
             var scriptPanel = new DockPanel();

@@ -34,11 +34,29 @@ namespace QuillSql.Compare
             return row;
         }
 
+        /// <summary>
+        /// Shows a file dialog. For UI tests, when QUILL_TEST_DIALOGS names a folder holding
+        /// `file-dialog.txt`, that file's text is the answer instead (empty = cancel) and it is removed.
+        /// </summary>
+        public static bool? Show(FileDialog d, Window owner)
+        {
+            var folder = Environment.GetEnvironmentVariable("QUILL_TEST_DIALOGS");
+            var answer = string.IsNullOrEmpty(folder) ? null : Path.Combine(folder, "file-dialog.txt");
+            if (answer != null && File.Exists(answer))
+            {
+                var path = File.ReadAllText(answer).Trim();
+                File.Delete(answer);
+                if (path.Length == 0) return false;
+                d.FileName = path;
+                return true;
+            }
+            return owner != null ? d.ShowDialog(owner) : d.ShowDialog();
+        }
         /// <summary>A folder chosen through a save dialog (WPF has no folder picker).</summary>
         public static string PickFolder(Window owner, string start, string title)
         {
             var d = new SaveFileDialog { Title = title, FileName = "Choose this folder", Filter = "Folders|*.none", InitialDirectory = Directory.Exists(start) ? start : null, CheckPathExists = true, OverwritePrompt = false };
-            return d.ShowDialog(owner) == true ? Path.GetDirectoryName(d.FileName) : null;
+            return Dialogs.Show(d, owner) == true ? Path.GetDirectoryName(d.FileName) : null;
         }
 
         public static void OpenFolder(string folder)
@@ -211,7 +229,7 @@ namespace QuillSql.Compare
         public static async Task DataReport(CompareSession session, DataResults results)
         {
             var d = new SaveFileDialog { Filter = "HTML report (*.html)|*.html", FileName = "DataCompareReport.html" };
-            if (d.ShowDialog(session.Host.Owner) != true) return;
+            if (Dialogs.Show(d, session.Host.Owner) != true) return;
             var ok = await Ui.Try(session.Host.Owner, async () => (object)await session.Engine.Request("data_report", new JsonObject { ["session"] = results.Session, ["path"] = d.FileName }));
             if (ok != null) OpenFile(d.FileName);
         }
