@@ -2472,6 +2472,8 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         },
         hidden: f.hidden,
         masking_function: (!f.masking.is_empty()).then(|| f.masking.clone()),
+        bound_default: None,
+        bound_rule: None,
     }
 }
 

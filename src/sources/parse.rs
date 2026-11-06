@@ -1568,7 +1568,13 @@ impl Builder {
         c.expect("TRIGGER")?;
         let names = if c.eat("ALL") { Vec::new() } else { vec![c.multipart()?.pop().unwrap_or_default()] };
         c.expect("ON")?;
-        if c.at("DATABASE") || c.at_seq(&["ALL", "SERVER"]) {
+        if c.eat("DATABASE") {
+            for t in self.db.ddl_triggers.iter_mut().filter(|t| names.is_empty() || names.iter().any(|x| x.eq_ignore_ascii_case(&t.name))) {
+                t.disabled = disable;
+            }
+            return Ok(());
+        }
+        if c.at_seq(&["ALL", "SERVER"]) {
             return Ok(());
         }
         let on = c.object(&self.schema_default())?;
@@ -1889,8 +1895,19 @@ impl Builder {
             }
             "TRIGGER" => {
                 c.expect("ON")?;
-                if c.at("DATABASE") || c.at_seq(&["ALL", "SERVER"]) {
+                if c.at_seq(&["ALL", "SERVER"]) {
                     return c.fail(MessageKind::IgnoredStatement);
+                }
+                if c.eat("DATABASE") {
+                    let encrypted = c.at_seq(&["WITH", "ENCRYPTION"]);
+                    self.db.ddl_triggers.retain(|t| !t.name.eq_ignore_ascii_case(&name.name));
+                    self.db.ddl_triggers.push(DdlTrigger {
+                        name: name.name.clone(),
+                        definition: if encrypted { String::new() } else { definition },
+                        encrypted,
+                        disabled: false,
+                    });
+                    return Ok(());
                 }
                 let on = c.object(&self.schema_default())?;
                 let mut tr = Trigger { name: name.name.clone(), ..Default::default() };
@@ -2654,6 +2671,13 @@ CREATE TABLE dbo.Customer (CustomerId int PRIMARY KEY)\nGO\n";
 
     #[test]
     fn modules_and_settings() {
+        let d = read(&[("t.sql", "CREATE TRIGGER [Audit] ON DATABASE FOR CREATE_TABLE AS PRINT 1
+GO
+DISABLE TRIGGER [Audit] ON DATABASE
+GO
+")]);
+        assert!(d.messages.is_empty(), "{:?}", d.messages);
+        assert!(d.database.ddl_triggers[0].disabled && d.database.ddl_triggers[0].definition.starts_with("CREATE TRIGGER"));
         let r = read(&[(
             "p.sql",
             "SET QUOTED_IDENTIFIER OFF\nGO\nSET ANSI_NULLS ON\nGO\nCREATE PROCEDURE [Sales].[GetOrders] @CustomerId int\nWITH EXECUTE AS OWNER\nAS\nSELECT * FROM Sales.[Order];\n\nGO\n\

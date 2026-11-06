@@ -10,6 +10,8 @@ use super::compare::{Comparison, DiffKind, Difference, ObjectType};
 enum Rule {
     Kind(DiffKind),
     Object { ty: Option<ObjectType>, pattern: Option<Regex> },
+    /// A SQL Compare object type QuillSQL does not compare (`Assembly`): matches nothing.
+    Unknown,
 }
 
 #[derive(Debug, Default)]
@@ -45,9 +47,12 @@ fn parse_rule(spec: &str) -> Result<Vec<Rule>, String> {
             rules.push(Rule::Object { ty: None, pattern: pattern.clone() });
         } else if lower == "staticdata" {
             continue;
-        } else {
-            let t = ObjectType::parse(part).ok_or_else(|| format!("'{part}' is not an object type or difference type"))?;
+        } else if let Some(t) = ObjectType::parse(part) {
             rules.push(Rule::Object { ty: Some(t), pattern: pattern.clone() });
+        } else if crate::commands::enums::SCHEMA_OBJECT_TYPES.iter().any(|n| n.eq_ignore_ascii_case(part.trim())) {
+            rules.push(Rule::Unknown);
+        } else {
+            return Err(format!("'{part}' is not an object type or difference type"));
         }
     }
     Ok(rules)
@@ -73,6 +78,7 @@ impl Selection {
     fn matches(rule: &Rule, d: &Difference) -> bool {
         match rule {
             Rule::Kind(k) => d.kind == *k,
+            Rule::Unknown => false,
             Rule::Object { ty, pattern } => {
                 ty.is_none_or(|t| t == d.object_type)
                     && pattern.as_ref().is_none_or(|p| {
@@ -91,7 +97,7 @@ impl Selection {
             return false;
         }
         let kinds: Vec<&Rule> = self.includes.iter().filter(|r| matches!(r, Rule::Kind(_))).collect();
-        let objects: Vec<&Rule> = self.includes.iter().filter(|r| matches!(r, Rule::Object { .. })).collect();
+        let objects: Vec<&Rule> = self.includes.iter().filter(|r| !matches!(r, Rule::Kind(_))).collect();
         (kinds.is_empty() || d.kind == DiffKind::Equal || kinds.iter().any(|r| Self::matches(r, d)))
             && (objects.is_empty() || objects.iter().any(|r| Self::matches(r, d)))
     }
@@ -142,5 +148,8 @@ mod tests {
         assert!(s.includes(&t) && s.includes(&v) && !s.includes(&p));
         assert!(Selection::new(&["Gadget".into()], &[]).is_err());
         assert!(Selection::new(&["Identical".into()], &[]).unwrap().include_identical);
+        let s = Selection::new(&["Assembly".into()], &[]).unwrap();
+        assert!(!s.includes(&t), "a type QuillSQL does not compare matches nothing");
+        assert!(Selection::new(&[], &["XmlSchemaCollection".into()]).unwrap().includes(&t));
     }
 }

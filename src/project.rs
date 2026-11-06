@@ -78,6 +78,11 @@ impl SourceSpec {
         self.kind == "scripts"
     }
 
+    /// An empty database (`/empty2`).
+    pub fn is_empty_database(&self) -> bool {
+        self.kind == "empty"
+    }
+
     /// `server / database` or the snapshot path.
     pub fn describe(&self) -> String {
         if self.is_snapshot() || self.is_scripts() { self.path.clone() } else { format!("{} / {}", self.server, self.database) }
@@ -182,7 +187,8 @@ impl Project {
     }
 }
 
-fn decode_text(bytes: &[u8]) -> String {
+/// Text of a file in UTF-16 (with or without BOM) or UTF-8.
+pub fn decode_text(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) || (bytes.len() > 1 && bytes[1] == 0 && bytes[0] != 0) {
         let start = if bytes.starts_with(&[0xFF, 0xFE]) { 2 } else { 0 };
         let units: Vec<u16> = bytes[start..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
@@ -246,6 +252,9 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
         if ty.eq_ignore_ascii_case("FolderDataSource") {
             return SourceSpec { kind: "scripts".into(), path: text_of(n, "Path"), ..Default::default() };
         }
+        if ty.eq_ignore_ascii_case("EmptyDatabaseSource") {
+            return SourceSpec { kind: "empty".into(), ..Default::default() };
+        }
         let mut s = SourceSpec::database(&text_of(n, "ServerName"), &text_of(n, "DatabaseName"));
         let auth = text_of(n, "AuthenticationType");
         let user = text_of(n, "Username");
@@ -282,24 +291,15 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
             }
         }
         ProjectKind::Data => {
-            use crate::data::DataOpt::*;
             let int = |name: &str| text_of(root, name).parse::<u64>().ok();
             let mut opts = Vec::new();
-            let bits = |value: Option<u64>, table: &[(u64, crate::data::DataOpt)], out: &mut Vec<String>| {
+            for (value, table) in [(int("MappingOptions").or(Some(0x52)), MAPPING_BITS), (int("ComparisonOptions"), COMPARISON_BITS), (int("SQLOptions").or(Some(0xA)), SQL_BITS)] {
                 if let Some(v) = value {
-                    for (bit, o) in table {
-                        if v & bit != 0 {
-                            out.push(o.name().to_string());
-                        }
-                    }
+                    opts.extend(table.iter().filter(|(bit, _)| v & bit != 0).map(|(_, o)| o.name().to_string()));
                 }
-            };
-            let mapping = int("MappingOptions").or(Some(0x52));
-            bits(mapping, &[(0x1, CaseSensitiveObjectDefinition), (0x2, IgnoreSpaces), (0x4, IgnoreUnderscores), (0x10, IncludeTimestamps), (0x20, IncludeViews), (0x40, IncludeIdentities), (0x200, IncludeGeneratedAlwaysColumns)], &mut opts);
-            bits(int("ComparisonOptions"), &[(0x1, TrimTrailingSpaces), (0x2, ForceBinaryCollation), (0x4, UseChecksumComparison), (0x8, CompressTemporaryFiles), (0x10, TreatEmptyStringAsNull), (0x20, UseFullPrecisionForComparison)], &mut opts);
-            bits(int("SQLOptions").or(Some(0xA)), &[(0x1, DisableTriggers), (0x2, DisableKeys), (0x4, DropConstraintsAndIndexes), (0x8, OutputCommentHeader), (0x10, DontUseTransactions), (0x20, TransportClrBinary), (0x40, DisableDdlTriggers), (0x80, DontOutputComments), (0x100, ReseedIdentity), (0x400, SkipFkChecks), (0x800, AddDatabaseUseStatement)], &mut opts);
+            }
             if int("SessionSettings").is_some_and(|s| s & 0x1 != 0) {
-                opts.push(IncludeIdenticalRecords.name().to_string());
+                opts.push(DataOpt::IncludeIdenticalRecords.name().to_string());
             }
             p.options = opts;
         }
@@ -327,10 +327,15 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
                         }
                     }
                 }
-                "MapOwners" => p.schema_mappings.schemas.push((text_of(ev, "Owner1"), text_of(ev, "Owner2"))),
+                "MapOwners" => match kind {
+                    ProjectKind::Schema => p.schema_mappings.schemas.push((text_of(ev, "Owner1"), text_of(ev, "Owner2"))),
+                    ProjectKind::Data => p.data_mappings.schemas.push((text_of(ev, "Owner1"), text_of(ev, "Owner2"))),
+                },
                 "MapColumn" => {
                     let (Some(t1), c1, c2) = (split_name(&text_of(ev, "Table1")), text_of(ev, "Column1"), text_of(ev, "Column2")) else { continue };
-                    if let Some(m) = p.schema_mappings.tables.iter_mut().find(|m| m.source == t1) {
+                    if kind == ProjectKind::Data {
+                        entry(&mut p.data_mappings, &t1).columns.push((c1, c2));
+                    } else if let Some(m) = p.schema_mappings.tables.iter_mut().find(|m| m.source == t1) {
                         m.columns.push((c1, c2));
                     }
                 }
@@ -381,6 +386,217 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
         p.filter = Some(text[f.range()].to_string());
     }
     Ok(p)
+}
+
+use crate::data::DataOpt;
+
+/// Bits of SQL Data Compare's MappingOptions, ComparisonOptions and SQLOptions project values.
+const MAPPING_BITS: &[(u64, DataOpt)] = &[
+    (0x1, DataOpt::CaseSensitiveObjectDefinition),
+    (0x2, DataOpt::IgnoreSpaces),
+    (0x4, DataOpt::IgnoreUnderscores),
+    (0x10, DataOpt::IncludeTimestamps),
+    (0x20, DataOpt::IncludeViews),
+    (0x40, DataOpt::IncludeIdentities),
+    (0x200, DataOpt::IncludeGeneratedAlwaysColumns),
+];
+const COMPARISON_BITS: &[(u64, DataOpt)] = &[
+    (0x1, DataOpt::TrimTrailingSpaces),
+    (0x2, DataOpt::ForceBinaryCollation),
+    (0x4, DataOpt::UseChecksumComparison),
+    (0x8, DataOpt::CompressTemporaryFiles),
+    (0x10, DataOpt::TreatEmptyStringAsNull),
+    (0x20, DataOpt::UseFullPrecisionForComparison),
+];
+const SQL_BITS: &[(u64, DataOpt)] = &[
+    (0x1, DataOpt::DisableTriggers),
+    (0x2, DataOpt::DisableKeys),
+    (0x4, DataOpt::DropConstraintsAndIndexes),
+    (0x8, DataOpt::OutputCommentHeader),
+    (0x10, DataOpt::DontUseTransactions),
+    (0x20, DataOpt::TransportClrBinary),
+    (0x40, DataOpt::DisableDdlTriggers),
+    (0x80, DataOpt::DontOutputComments),
+    (0x100, DataOpt::ReseedIdentity),
+    (0x400, DataOpt::SkipFkChecks),
+    (0x800, DataOpt::AddDatabaseUseStatement),
+];
+
+/// Indented XML written the way SQL Compare's serializer writes it.
+struct XmlOut {
+    out: String,
+    depth: usize,
+}
+
+impl XmlOut {
+    fn escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    fn line(&mut self, s: &str) {
+        self.out.push_str("\r\n");
+        self.out.push_str(&"  ".repeat(self.depth));
+        self.out.push_str(s);
+    }
+
+    fn value(&mut self, name: &str, value: &str) {
+        if value.is_empty() {
+            self.line(&format!("<{name} />"));
+        } else {
+            self.line(&format!("<{name}>{}</{name}>", Self::escape(value)));
+        }
+    }
+
+    fn open(&mut self, name: &str, attrs: &str) {
+        self.line(&format!("<{name}{attrs}>"));
+        self.depth += 1;
+    }
+
+    fn close(&mut self, name: &str) {
+        self.depth -= 1;
+        self.line(&format!("</{name}>"));
+    }
+}
+
+fn quote_name(n: &ObjectName) -> String {
+    format!("[{}].[{}]", n.schema.replace(']', "]]"), n.name.replace(']', "]]"))
+}
+
+fn bool_text(b: bool) -> &'static str {
+    if b { "True" } else { "False" }
+}
+
+/// Writes a SQL Compare (.scp) or SQL Data Compare (.sdc) project: UTF-16 with a byte order
+/// mark. Passwords are never written. `last_compared` is in .NET's invariant format.
+pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
+    let mut x = XmlOut { out: "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?>".into(), depth: 0 };
+    x.line(&format!("<!--\r\nQuillSQL Compare\r\nVersion:{}-->", env!("CARGO_PKG_VERSION")));
+    x.open("Project", " version=\"5\" type=\"SQLComparisonToolsProject\"");
+    for (element, side) in [("DataSource1", &p.source), ("DataSource2", &p.target)] {
+        if side.is_snapshot() {
+            x.open(element, " version=\"1\" type=\"SnapshotSource\"");
+            x.value("FileName", &side.path);
+            x.close(element);
+        } else if side.is_scripts() {
+            x.open(element, " version=\"2\" type=\"FolderDataSource\"");
+            x.value("Path", &side.path);
+            let name = std::path::Path::new(&side.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            x.value("DatabaseName", &name);
+            x.value("ServerName", "Scripts");
+            x.close(element);
+        } else if side.is_empty_database() || (side.server.is_empty() && side.database.is_empty()) {
+            x.line(&format!("<{element} version=\"1\" type=\"EmptyDatabaseSource\" />"));
+        } else {
+            x.open(element, " version=\"5\" type=\"LiveDatabaseSource\"");
+            x.value("ServerName", &side.server);
+            x.value("DatabaseName", &side.database);
+            x.value("Username", if side.authentication == Authentication::Sql { &side.user } else { "" });
+            x.value("SavePassword", "False");
+            x.value("EncryptConnection", bool_text(side.encrypt));
+            x.value("TrustServerCertificate", bool_text(side.trust_server_certificate));
+            x.value("Password", "");
+            x.value("ScriptFolderLocation", "");
+            x.value("MigrationsFolderLocation", "");
+            x.value(
+                "AuthenticationType",
+                match side.authentication {
+                    Authentication::Windows => "WindowsIntegrated",
+                    Authentication::Sql => "SqlPassword",
+                    Authentication::Entra => "MicrosoftEntraIntegrated",
+                },
+            );
+            x.close(element);
+        }
+    }
+    x.value("LastCompared", last_compared);
+    let schema_options = match p.kind {
+        ProjectKind::Schema => p.options.join(", "),
+        ProjectKind::Data => crate::schema::Options::default_set().iter().map(|o| o.name()).collect::<Vec<_>>().join(", "),
+    };
+    x.value("Options", &schema_options);
+    x.value("InRecycleBin", "False");
+    x.value("Direction", "0");
+    x.line("<ProjectFilter version=\"1\" type=\"SQLCompareDifferenceFilter\" isNull=\"1\" />");
+    x.value("ProjectFilterName", "UnnamedFilter");
+    x.value("UserNote", &p.note);
+    x.line("<SelectedSyncObjects version=\"1\" type=\"SelectedSyncObjects\" isNull=\"1\" />");
+    x.value("SCGroupingStyle", "0");
+    // Schema projects keep SQL Data Compare's defaults.
+    let bits = |table: &[(u64, DataOpt)], default: u64| -> String {
+        if p.kind == ProjectKind::Schema {
+            return default.to_string();
+        }
+        table.iter().filter(|(_, o)| p.options.iter().any(|n| n.eq_ignore_ascii_case(o.name()))).map(|(b, _)| b).sum::<u64>().to_string()
+    };
+    x.value("SQLOptions", &bits(SQL_BITS, 0xA));
+    x.value("MappingOptions", &bits(MAPPING_BITS, 0x52));
+    x.value("ComparisonOptions", &bits(COMPARISON_BITS, 0));
+
+    let mut actions: Vec<Vec<(&str, String)>> = Vec::new();
+    for (a, b) in &p.schema_mappings.schemas {
+        actions.push(vec![("action", "MapOwners".into()), ("Owner1", a.clone()), ("Owner2", b.clone())]);
+    }
+    for t in &p.schema_mappings.tables {
+        actions.push(vec![("action", "MapTables".into()), ("Table1", format!("{}:null", quote_name(&t.source))), ("Table2", format!("null:{}", quote_name(&t.target)))]);
+        for (c1, c2) in &t.columns {
+            actions.push(vec![
+                ("action", "MapColumn".into()),
+                ("Table1", quote_name(&t.source)),
+                ("Column1", c1.clone()),
+                ("Table2", quote_name(&t.target)),
+                ("Column2", c2.clone()),
+            ]);
+        }
+    }
+    for t in &p.data_mappings.tables {
+        let table = quote_name(&t.source);
+        if let Some(target) = &t.target {
+            actions.push(vec![("action", "MapTables".into()), ("Table1", format!("{table}:null")), ("Table2", format!("null:{}", quote_name(target)))]);
+        }
+        if t.excluded {
+            actions.push(vec![("action", "DeselectItem".into()), ("val", format!("{table}:null"))]);
+        }
+        for k in &t.key {
+            match k.strip_prefix("index:") {
+                Some(ix) => actions.push(vec![("action", "UseKey".into()), ("IndexName", ix.to_string()), ("TableName", table.clone())]),
+                None => actions.push(vec![("action", "SelectColumnAsKey".into()), ("ColumnName", k.clone()), ("TableName", table.clone())]),
+            }
+        }
+        for c in &t.excluded_columns {
+            actions.push(vec![("action", "DeselectColumn".into()), ("ColumnName", c.clone()), ("TableName", table.clone())]);
+        }
+        for (action, w) in [("SetLeftWhereClause", &t.where1), ("SetRightWhereClause", &t.where2)] {
+            if let Some(w) = w {
+                actions.push(vec![("action", action.into()), ("TableName", table.clone()), ("IndexName", w.clone())]);
+            }
+        }
+    }
+    if p.kind == ProjectKind::Schema {
+        for d in &p.deselected {
+            actions.push(vec![("action", "DeselectItem".into()), ("val", format!("{}:null", quote_name(&ObjectName::new(&d.schema, &d.name))))]);
+        }
+    }
+    if actions.is_empty() {
+        x.line("<TableActions type=\"ArrayList\" version=\"1\" />");
+    } else {
+        x.open("TableActions", " type=\"ArrayList\" version=\"1\"");
+        for a in actions {
+            x.open("value", " version=\"1\" type=\"SelectTableEvent\"");
+            for (k, v) in a {
+                x.value(k, &v);
+            }
+            x.close("value");
+        }
+        x.close("TableActions");
+    }
+    let identical_records = p.kind == ProjectKind::Data && p.options.iter().any(|o| o == DataOpt::IncludeIdenticalRecords.name());
+    x.value("SessionSettings", if identical_records { "15" } else { "14" });
+    x.value("DCGroupingStyle", "0");
+    x.open("SC_DeploymentOptions", " version=\"1\" type=\"SC_DeploymentOptions\"");
+    x.line("<BackupOptions version=\"1\" type=\"ProjectBackupOptions\" isNull=\"1\" />");
+    x.close("SC_DeploymentOptions");
+    x.close("Project");
+    [0xFF, 0xFE].into_iter().chain(x.out.encode_utf16().flat_map(u16::to_le_bytes)).collect()
 }
 
 fn entry<'a>(m: &'a mut DataMappings, table: &ObjectName) -> &'a mut TableOverride {
@@ -481,6 +697,43 @@ mod tests {
     }
 
     #[test]
+    fn writes_projects_sql_compare_can_read_and_reads_them_back() {
+        let mut p = Project::new(ProjectKind::Schema);
+        p.source = SourceSpec { authentication: Authentication::Sql, user: "sa".into(), password: Some("secret".into()), ..SourceSpec::database("dev", "Shop") };
+        p.target = SourceSpec { kind: "snapshot".into(), path: "C:\\snap\\prod.snp".into(), ..Default::default() };
+        p.options = vec!["IgnoreComments".into(), "IgnoreWhiteSpace".into()];
+        p.schema_mappings.schemas.push(("dev".into(), "dbo".into()));
+        p.schema_mappings.tables.push(TableMapping { source: ObjectName::new("dbo", "Old"), target: ObjectName::new("dbo", "New"), columns: vec![("A".into(), "B".into())] });
+        p.note = "a & b".into();
+        let bytes = export_vendor(&p, "11/07/2026 14:03:09");
+        let text = decode_text(&bytes);
+        assert!(bytes.starts_with(&[0xFF, 0xFE]) && !text.contains("secret"));
+        assert!(text.starts_with("<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?>\r\n<!--"));
+        assert!(text.contains("\r\n  <DataSource1 version=\"5\" type=\"LiveDatabaseSource\">\r\n    <ServerName>dev</ServerName>"));
+        assert!(text.contains("<Password />") && text.contains("<AuthenticationType>SqlPassword</AuthenticationType>"));
+        assert!(text.contains("<UserNote>a &amp; b</UserNote>"));
+        let back = import_vendor(&bytes, ProjectKind::Schema).unwrap();
+        assert_eq!((back.source.server.as_str(), back.source.user.as_str(), back.source.authentication), ("dev", "sa", Authentication::Sql));
+        assert!(back.target.is_snapshot() && back.target.path.ends_with("prod.snp"));
+        assert_eq!(back.schema_mappings, p.schema_mappings);
+        assert!(back.options.contains(&"IgnoreComments".to_string()) && back.options.len() == 2);
+        assert_eq!(back.note, "a & b");
+        let mut e = Project::new(ProjectKind::Schema);
+        e.target = SourceSpec { kind: "empty".into(), ..Default::default() };
+        assert!(import_vendor(&export_vendor(&e, ""), ProjectKind::Schema).unwrap().target.is_empty_database());
+
+        let mut d = Project::new(ProjectKind::Data);
+        d.data_mappings.tables.push(TableOverride { source: ObjectName::new("dbo", "T"), key: vec!["Code".into()], where1: Some("Id > 5".into()), ..Default::default() });
+        let back = import_vendor(&export_vendor(&d, ""), ProjectKind::Data).unwrap();
+        let (mut want, mut got) = (d.options.clone(), back.options.clone());
+        want.sort();
+        got.sort();
+        assert_eq!(got, want);
+        assert_eq!(back.data_mappings.tables[0].key, ["Code"]);
+        assert_eq!(back.data_mappings.tables[0].where1.as_deref(), Some("Id > 5"));
+    }
+
+    #[test]
     fn imports_data_compare_options() {
         let sdc = r#"<Project version="5" type="SQLComparisonToolsProject">
   <DataSource1 version="5" type="LiveDatabaseSource"><ServerName>a</ServerName><DatabaseName>x</DatabaseName><AuthenticationType>WindowsIntegrated</AuthenticationType></DataSource1>
@@ -489,6 +742,8 @@ mod tests {
   <TableActions type="ArrayList" version="1">
     <value version="1" type="SelectTableEvent"><action>SetLeftWhereClause</action><TableName>[dbo].[T]</TableName><IndexName>Id &gt; 5</IndexName></value>
     <value version="1" type="SelectTableEvent"><action>SelectColumnAsKey</action><TableName>[dbo].[T]</TableName><ColumnName>Code</ColumnName></value>
+    <value version="1" type="SelectTableEvent"><action>MapOwners</action><Owner1>dev</Owner1><Owner2>dbo</Owner2></value>
+    <value version="1" type="SelectTableEvent"><action>MapColumn</action><Table1>[dbo].[T]</Table1><Column1>Amount</Column1><Column2>Total</Column2></value>
   </TableActions>
 </Project>"#;
         let p = import_vendor(sdc.as_bytes(), ProjectKind::Data).unwrap();
@@ -497,5 +752,7 @@ mod tests {
         }
         let t = &p.data_mappings.tables[0];
         assert_eq!((t.where1.as_deref(), t.key.as_slice()), (Some("Id > 5"), &["Code".to_string()][..]));
+        assert_eq!(t.columns, [("Amount".to_string(), "Total".to_string())]);
+        assert_eq!(p.data_mappings.schemas, [("dev".to_string(), "dbo".to_string())]);
     }
 }

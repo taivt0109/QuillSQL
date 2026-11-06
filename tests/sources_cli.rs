@@ -56,7 +56,7 @@ fn compares_and_writes_scripts_folders() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("[dbo].[Customer]") && !out.contains("[audit].[Log]"), "{out}");
     let (code, _) = quill(&[&format!("/scripts1:{}", s(&a)), &format!("/scripts2:{}", s(&b)), &format!("/filter:{}", s(&f)), "/exclude:Table"]);
-    assert_eq!(code, 64);
+    assert_eq!(code, 8);
     let (code, out) = quill(&[&format!("/scripts1:{}", s(&a)), &format!("/scripts2:{}", s(&b)), &format!("/filter:{}", s(&f)), "/include:Table"]);
     assert_eq!(code, 8, "{out}");
     let (code, out) = quill(&[&format!("/scripts1:{}", s(&a)), &format!("/scripts2:{}", s(&b)), &format!("/filter:{}", s(&f)), "/include:Identical"]);
