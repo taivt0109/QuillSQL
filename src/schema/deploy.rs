@@ -570,6 +570,27 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// A DML trigger's text: encryption as for modules, and WITH APPEND (deprecated, refused
+    /// from SQL Server 2012) taken out where the target no longer takes it.
+    fn trigger_text(&mut self, name: &ObjectName, definition: &str, target_encrypted: bool) -> String {
+        let mut text = self.encryption(definition, target_encrypted);
+        if let Some(at) = with_append(&text) {
+            let removed = self.has(Feature::NoWithAppend);
+            self.warn(Warning {
+                severity: Severity::High,
+                object: name.to_string(),
+                message: format!(
+                    "The trigger {name} contains the WITH APPEND clause which is {} in the target database version.",
+                    if removed { "deprecated" } else { "not supported" }
+                ),
+            });
+            if removed {
+                text.replace_range(at, "");
+            }
+        }
+        text
+    }
+
     /// The module's statement with its existence check.
     fn module_statement(&self, name: &ObjectName, m: Module<'a>, check: Check, sql: &str) -> String {
         match m {
@@ -693,7 +714,7 @@ impl<'a> Planner<'a> {
             self.warn(warn::nondecryptable("trigger", &name.to_string()));
             return;
         }
-        let text = self.encryption(&tr.definition, false);
+        let text = self.trigger_text(&name, &tr.definition, false);
         let code = "TR";
         let mut statements = vec![self.ex.module(&name, code, Check::Create, &ddl::module_sql(&text, "CREATE", &name.quoted()))];
         if tr.disabled {
@@ -1475,27 +1496,61 @@ impl<'a> Planner<'a> {
         if s.lock_escalation != t.lock_escalation && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&table, &s.lock_escalation));
         }
-        if !o.has(Opt::IgnoreChangeTracking) && s.change_tracking != t.change_tracking {
-            if t.change_tracking.is_some() {
-                let sql = self.ex.change_tracking(&name, Check::Drop, &format!("ALTER TABLE {table} DISABLE CHANGE_TRACKING"));
-                self.group(Phase::DisableChangeTracking, "Disabling table change tracking", vec![sql]);
-            }
-            if let Some(ct) = &s.change_tracking {
-                if t.change_tracking.is_some() {
-                    self.warn(warn::change_tracking_reenable(&label));
-                } else {
-                    self.warn(warn::change_tracking_enable(&label));
-                }
-                statements.push(self.change_tracking_on(&name, ct));
-            }
-        }
         if disturbed {
             self.disturbed.insert(name.clone());
         }
         self.module_step(Phase::CreateObjects, format!("Altering {name}"), statements, &ModuleSettings::default());
         self.step(Phase::CreateDefaults, format!("Altering {name}"), after_defaults);
         self.sub_objects(s, t);
+        self.change_tracking(s, t);
         self.bind_columns(s, Some(&rebind));
+    }
+
+    /// Change tracking of a table altered in place. It needs the primary key, so a key that is
+    /// dropped and created again takes change tracking off and on around it.
+    fn change_tracking(&mut self, s: &'a Table, t: &'a Table) {
+        let name = t.object_name();
+        let label = name.to_string();
+        let ignore = self.opts.has(Opt::IgnoreChangeTracking);
+        let pk_dropped = t.indexes.iter().any(|i| i.primary_key && self.dropped_sub.contains(&(name.clone(), self.key(&i.name))));
+        let wanted = if ignore { t.change_tracking.as_ref() } else { s.change_tracking.as_ref() };
+        let (disable, enable) = match (&t.change_tracking, wanted) {
+            (Some(_), _) if pk_dropped => {
+                if wanted.is_some() {
+                    self.warn(warn::change_tracking_reenable(&label));
+                }
+                (true, wanted)
+            }
+            (Some(a), Some(b)) if a != b => {
+                self.warn(warn::change_tracking_reenable(&label));
+                (true, wanted)
+            }
+            (Some(_), None) => (true, None),
+            (None, Some(_)) => {
+                self.warn(warn::change_tracking_enable(&label));
+                if t.primary_key().is_none() && self.opts.has(Opt::IgnoreIndexes)
+                    && let Some(pk) = s.primary_key()
+                {
+                    // The key is deployed although indexes are ignored: change tracking needs it.
+                    self.warn(Warning {
+                        severity: Severity::Medium,
+                        object: label.clone(),
+                        message: format!("Table change tracking requires a primary key. To enable change tracking on table {label}, primary key {} will be included in the deployment.", quote(&pk.name)),
+                    });
+                    self.create_indexes(&name, &Host::of_table(s), vec![pk]);
+                }
+                (false, wanted)
+            }
+            _ => (false, None),
+        };
+        if disable {
+            let sql = self.ex.change_tracking(&name, Check::Drop, &format!("ALTER TABLE {} DISABLE CHANGE_TRACKING", name.quoted()));
+            self.group(Phase::DisableChangeTracking, "Disabling table change tracking", vec![sql]);
+        }
+        if let Some(ct) = enable {
+            let sql = self.change_tracking_on(&name, ct);
+            self.ranked(Phase::CreateObjects, "", &name, vec![sql]);
+        }
     }
 
     /// Indexes, checks, foreign keys and triggers of a table altered in place.
@@ -1644,7 +1699,7 @@ impl<'a> Planner<'a> {
                         let trig = ObjectName::new(&name.schema, &a.name);
                         let mut statements = Vec::new();
                         if !same_text {
-                            let text = self.encryption(&a.definition, b.encrypted);
+                            let text = self.trigger_text(&trig, &a.definition, b.encrypted);
                             statements.push(ddl::module_sql(&text, "ALTER", &trig.quoted()));
                         }
                         if a.disabled != b.disabled || !same_text {
@@ -2288,6 +2343,22 @@ fn function_class(r: &Routine) -> u8 {
     }
 }
 
+/// Byte range of a trigger's `WITH APPEND` (the words and the space before them).
+fn with_append(text: &str) -> Option<std::ops::Range<usize>> {
+    use super::text::Tok;
+    let tokens = super::text::tokenize(text);
+    let mut pos = 0;
+    let starts: Vec<usize> = tokens.iter().map(|t| {
+        let p = pos;
+        pos += t.text.len();
+        p
+    }).collect();
+    let words: Vec<usize> = (0..tokens.len()).filter(|&i| tokens[i].kind == Tok::Word).collect();
+    let pair = words.windows(2).find(|w| tokens[w[0]].text.eq_ignore_ascii_case("WITH") && tokens[w[1]].text.eq_ignore_ascii_case("APPEND"))?;
+    let from = if pair[0] > 0 && tokens[pair[0] - 1].kind == Tok::Space { starts[pair[0] - 1] } else { starts[pair[0]] };
+    Some(from..starts[pair[1]] + tokens[pair[1]].text.len())
+}
+
 fn trigger_order(trigger: &ObjectName, order: &str, event: &str) -> String {
     format!("EXEC sp_settriggerorder N'{}', '{}', '{event}', null", trigger.quoted().replace('\'', "''"), title(order))
 }
@@ -2741,6 +2812,41 @@ mod tests {
         assert_eq!(Planner::new(&cmp, &src, &src, &opts, &Mappings::default(), &settings).src_deps.len(), 1);
         let opts = opts.with(Opt::IgnoreSynonymDependencies);
         assert!(Planner::new(&cmp, &src, &src, &opts, &Mappings::default(), &settings).src_deps.is_empty());
+    }
+
+    #[test]
+    fn change_tracking_goes_off_while_the_key_changes() {
+        let pk = |n: &str, c: &str| Index {
+            name: n.into(),
+            kind: IndexKind::Clustered,
+            primary_key: true,
+            unique: true,
+            columns: vec![IndexColumn { name: c.into(), descending: false }],
+            allow_row_locks: true,
+            allow_page_locks: true,
+            ..Default::default()
+        };
+        let mut a = col("a", "int");
+        a.nullable = false;
+        let mut b = col("b", "int");
+        b.nullable = false;
+        let mut t = table("T", vec![a, b]);
+        t.change_tracking = Some(ChangeTracking { track_columns_updated: false });
+        t.indexes = vec![pk("PK", "a")];
+        let tgt = db(vec![t.clone()]);
+        t.indexes = vec![pk("PK", "b")];
+        let src = db(vec![t]);
+        let s = script(&src, &tgt, &Options::default_set());
+        let order = ["ALTER TABLE [dbo].[T] DISABLE CHANGE_TRACKING", "ALTER TABLE [dbo].[T] DROP CONSTRAINT [PK]", "ADD CONSTRAINT [PK] PRIMARY KEY CLUSTERED ([b])", "ALTER TABLE [dbo].[T] ENABLE CHANGE_TRACKING"];
+        let pos: Vec<usize> = order.iter().map(|p| s.sql.find(p).unwrap_or_else(|| panic!("{p}\n{}", s.sql))).collect();
+        assert!(pos.windows(2).all(|w| w[0] < w[1]), "{}", s.sql);
+        assert!(has_warning(&s, "The change tracking on table [dbo].[T] needs to be disabled and re-enabled."));
+    }
+
+    #[test]
+    fn with_append_goes_on_new_servers() {
+        assert_eq!(with_append("CREATE TRIGGER t ON x FOR INSERT WITH APPEND AS SELECT 1"), Some(32..44));
+        assert_eq!(with_append("CREATE TRIGGER t ON x FOR INSERT AS SELECT 1"), None);
     }
 
     #[test]
