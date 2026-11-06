@@ -2,11 +2,13 @@
 #
 #   irm https://raw.githubusercontent.com/taivt0109/QuillSQL/main/install.ps1 | iex
 #
-# It installs the SSMS extension into every SSMS 21 or later on this machine, and the `quill`
-# command line tool into %LOCALAPPDATA%\QuillSQL\bin (added to your PATH). Nothing needs admin.
+# It installs the SSMS extension into every SSMS 21 or later on this machine, the `quill`
+# command line tool into %LOCALAPPDATA%\QuillSQL\bin (added to your PATH), and QuillCompare.exe
+# next to it, with a Start menu entry and .qsc/.qdc projects opening in it. Nothing needs admin.
 # Options, as environment variables set before running it:
 #   $env:QUILLSQL_VERSION   = '0.3.0'   install this version instead of the latest
 #   $env:QUILLSQL_NO_CLI    = '1'       skip the command line tool
+#   $env:QUILLSQL_NO_APP    = '1'       skip QuillCompare.exe (Schema and Data Compare without SSMS)
 #   $env:QUILLSQL_UNINSTALL = '1'       remove QuillSQL instead
 #   $env:QUILLSQL_ROOT_SUFFIX = 'Exp'   use an SSMS instance started with /rootsuffix
 #   $env:QUILLSQL_UPDATE_URL = 'https://...'  read the release from a mirror of the GitHub API
@@ -61,6 +63,10 @@ function Install-QuillSql {
         }
         Clear-EditorCache
         Remove-Item $bin -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path ([Environment]::GetFolderPath('Programs')) 'QuillSQL Compare.lnk') -Force -ErrorAction SilentlyContinue
+        foreach ($key in 'HKCU:\Software\Classes\.qsc', 'HKCU:\Software\Classes\.qdc', 'HKCU:\Software\Classes\QuillSQL.CompareProject') {
+            Remove-Item $key -Recurse -Force -ErrorAction SilentlyContinue
+        }
         $path = [Environment]::GetEnvironmentVariable('Path', 'User')
         if ($path) {
             [Environment]::SetEnvironmentVariable('Path', (($path -split ';') | Where-Object { $_ -and $_ -ne $bin }) -join ';', 'User')
@@ -116,8 +122,30 @@ function Install-QuillSql {
         }
         Write-Host "Installed the quill command line tool to $bin"
     }
+    if (-not $env:QUILLSQL_NO_APP) {
+        $zip = Get-Verified 'QuillCompare.zip'
+        New-Item -ItemType Directory -Force $bin | Out-Null
+        Expand-Archive $zip -DestinationPath $bin -Force
+        $app = Join-Path $bin 'QuillCompare.exe'
+        # .qsc (schema) and .qdc (data) projects open in QuillCompare.
+        $class = 'HKCU:\Software\Classes\QuillSQL.CompareProject'
+        New-Item -Force "$class\shell\open\command" | Out-Null
+        Set-ItemProperty $class -Name '(default)' -Value 'QuillSQL Compare project'
+        New-Item -Force "$class\DefaultIcon" | Out-Null
+        Set-ItemProperty "$class\DefaultIcon" -Name '(default)' -Value "`"$app`",0"
+        Set-ItemProperty "$class\shell\open\command" -Name '(default)' -Value "`"$app`" `"%1`""
+        foreach ($ext in '.qsc', '.qdc') {
+            New-Item -Force "HKCU:\Software\Classes\$ext" | Out-Null
+            Set-ItemProperty "HKCU:\Software\Classes\$ext" -Name '(default)' -Value 'QuillSQL.CompareProject'
+        }
+        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) 'QuillSQL Compare.lnk'))
+        $shortcut.TargetPath = $app
+        $shortcut.Description = 'Schema and Data Compare for SQL Server'
+        $shortcut.Save()
+        Write-Host "Installed QuillSQL Compare to $bin (Start menu: QuillSQL Compare)"
+    }
     Remove-Item $download -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host 'Done. Start SSMS; QuillSQL is under Tools > QuillSQL. It checks for updates once a day.' -ForegroundColor Green
+    Write-Host 'Done. Start SSMS; QuillSQL is under Tools > QuillSQL (Schema Compare and Data Compare too). It checks for updates once a day.' -ForegroundColor Green
 }
 
 Install-QuillSql

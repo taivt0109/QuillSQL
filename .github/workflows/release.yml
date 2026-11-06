@@ -41,6 +41,7 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item vsix/QuillSql.Vsix/bin/Release/QuillSql.Vsix.vsix dist/QuillSQL.vsix
           Copy-Item target/release/quill.exe dist/quill.exe
+          Copy-Item vsix/QuillCompare/bin/Release/QuillCompare.zip dist/QuillCompare.zip
           Get-ChildItem dist | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } |
             Set-Content dist/SHA256SUMS.txt -Encoding ascii
 

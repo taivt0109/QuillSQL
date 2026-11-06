@@ -482,6 +482,28 @@
           <LocCanonicalName>.QuillSQL.OpenLogFolder</LocCanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidQuillSqlCmdSet" id="SchemaCompareCommandId" priority="0x0200" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="DatabaseGroup" />
+        <Icon guid="ImageCatalogGuid" id="CompareSchemas" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>Schema Compare...</ButtonText>
+          <CanonicalName>.QuillSQL.SchemaCompare</CanonicalName>
+          <LocCanonicalName>.QuillSQL.SchemaCompare</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="DataCompareCommandId" priority="0x0201" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="DatabaseGroup" />
+        <Icon guid="ImageCatalogGuid" id="DataCompare" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>Data Compare...</ButtonText>
+          <CanonicalName>.QuillSQL.DataCompare</CanonicalName>
+          <LocCanonicalName>.QuillSQL.DataCompare</LocCanonicalName>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -565,6 +587,8 @@
       <IDSymbol name="ShowCardCommandId" value="0x0136" />
       <IDSymbol name="AiChatCommandId" value="0x0137" />
       <IDSymbol name="TabColorCommandId" value="0x0138" />
+      <IDSymbol name="SchemaCompareCommandId" value="0x0139" />
+      <IDSymbol name="DataCompareCommandId" value="0x013A" />
       <IDSymbol name="TextGroup" value="0x1030" />
       <IDSymbol name="RunGroup" value="0x1031" />
       <IDSymbol name="TabGroup" value="0x1032" />

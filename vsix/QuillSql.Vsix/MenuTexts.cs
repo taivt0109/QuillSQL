@@ -54,6 +54,8 @@ namespace QuillSql.Vsix
             [0x0136] = "Show Object Card",
             [0x0137] = "AI Chat",
             [0x0138] = "Tab Color for This Connection...",
+            [0x0139] = "Schema Compare...",
+            [0x013A] = "Data Compare...",
         };
     }
 }

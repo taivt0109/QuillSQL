@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Compare windows: shared by the SSMS extension and QuillCompare.exe, so no Visual Studio references. -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <RootNamespace>QuillSql.Compare</RootNamespace>
+    <AssemblyName>QuillSql.Compare</AssemblyName>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Product>QuillSQL</Product>
+    <Company>QuillSQL</Company>
+    <Version>0.3.3</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.VisualBasic" />
+  </ItemGroup>
+</Project>
