@@ -340,33 +340,19 @@ namespace QuillSql.Vsix
             {
                 return null;
             }
+            // Tables, views, procedures and functions get their card from CardPopup instead.
+            if (CardPopup.IsOpen)
+            {
+                return null;
+            }
             var key = Commands.MetadataKey(out _);
-            var target = ConnectionResolver.TryGetActive();
             var snapshot = point.Value.Snapshot;
             var position = point.Value.Position;
             var text = snapshot.GetText();
             await TaskScheduler.Default;
             var reply = EngineProcess.Shared.Request("hover", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + position);
             var description = reply == null ? null : Json.Parse<TextReply>(reply)?.Result?.Text;
-            // A table, view, procedure or function gets its card, read from the database.
-            ObjectDetails details = null;
-            if (Settings.Current.ObjectCards && target != null && target.CanQuery)
-            {
-                var at = EngineProcess.Shared.Request("object_at", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + position);
-                var found = at == null ? null : Json.Parse<ObjectAtReply>(at)?.Result;
-                if (found != null)
-                {
-                    try
-                    {
-                        details = ObjectScripts.Load(target, found.Schema + "." + found.Name);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error("reading object details", ex);
-                    }
-                }
-            }
-            if (string.IsNullOrEmpty(description) && details == null)
+            if (string.IsNullOrEmpty(description))
             {
                 return null;
             }
@@ -381,12 +367,6 @@ namespace QuillSql.Vsix
                 end++;
             }
             var span = snapshot.CreateTrackingSpan(start, Math.Max(0, end - start), SpanTrackingMode.EdgeInclusive);
-            if (details != null)
-            {
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-                Log.Verbose("object card: " + details.FullName + "; " + ObjectScripts.StorageLine(details));
-                return new QuickInfoItem(span, ObjectScripts.Card(details));
-            }
             Log.Verbose("quick info: " + description.Replace("\n", " / "));
             var lines = description.Split('\n').Select(l => (object)new ClassifiedTextElement(new ClassifiedTextRun("text", l)));
             return new QuickInfoItem(span, new ContainerElement(ContainerElementStyle.Stacked, lines));
@@ -414,17 +394,26 @@ namespace QuillSql.Vsix
                 ThreadHelper.ThrowIfNotOnUIThread();
                 try
                 {
-                    if (Broker.IsQuickInfoActive(view) || !SqlBuffers.IsSql(view.TextBuffer, Adapters))
+                    if (!Settings.Current.Enabled || !SqlBuffers.IsSql(view.TextBuffer, Adapters))
                     {
                         return;
                     }
                     var point = e.TextPosition.GetPoint(view.TextBuffer, PositionAffinity.Successor);
                     Log.Verbose("mouse hover at " + (point?.Position ?? -1));
-                    if (point.HasValue)
+                    if (!point.HasValue)
                     {
-                        var tracking = point.Value.Snapshot.CreateTrackingPoint(point.Value.Position, PointTrackingMode.Positive);
-                        _ = Broker.TriggerQuickInfoAsync(view, tracking, QuickInfoSessionOptions.TrackMouse);
+                        return;
                     }
+                    // Objects get their card in a popup of our own, since SSMS may answer the hover
+                    // with its tooltip first; columns, aliases and variables use Quick Info.
+                    var tracking = point.Value.Snapshot.CreateTrackingPoint(point.Value.Position, PointTrackingMode.Positive);
+                    CardPopup.ShowAtMouse(view, point.Value.Position, () =>
+                    {
+                        if (!Broker.IsQuickInfoActive(view))
+                        {
+                            _ = Broker.TriggerQuickInfoAsync(view, tracking, QuickInfoSessionOptions.TrackMouse);
+                        }
+                    });
                 }
                 catch (Exception ex)
                 {

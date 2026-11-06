@@ -260,7 +260,7 @@ The plan commands show everything they send in the Output window. Optional setti
 
 - **Find Invalid Objects** lists procedures, views and functions that reference objects that no
   longer exist, in the Output window.
-- **Query History...** (Ctrl+B, Ctrl+H) searches every query you ran (F5) and every query window
+- **Query History...** (Ctrl+B, Ctrl+H, or the button on the Standard toolbar) searches every query you ran (F5) and every query window
   you closed, with its server and database. Open one in a new window or copy it. The last 5000
   are kept in `%LOCALAPPDATA%\QuillSQL\history.jsonl`.
 

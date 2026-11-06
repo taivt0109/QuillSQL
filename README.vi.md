@@ -267,7 +267,7 @@ Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ 
 ### Công cụ database
 
 - **Find Invalid Objects:** liệt kê procedure, view và function đang tham chiếu tới object không còn tồn tại. Kết quả hiện trong cửa sổ Output.
-- **Query History...** (Ctrl+B, Ctrl+H): tìm trong mọi query bạn đã chạy (F5) và mọi cửa sổ query đã đóng, kèm server và database. Có thể mở lại trong cửa sổ mới hoặc sao chép. 5000 mục gần nhất được lưu trong `%LOCALAPPDATA%\QuillSQL\history.jsonl`.
+- **Query History...** (Ctrl+B, Ctrl+H, hoặc nút trên toolbar Standard): tìm trong mọi query bạn đã chạy (F5) và mọi cửa sổ query đã đóng, kèm server và database. Có thể mở lại trong cửa sổ mới hoặc sao chép. 5000 mục gần nhất được lưu trong `%LOCALAPPDATA%\QuillSQL\history.jsonl`.
 
 ### Lệnh chỉnh sửa
 

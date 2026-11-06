@@ -221,3 +221,15 @@ fn a_second_table_after_a_comma_whether_or_not_the_alias_has_as() {
         assert!(labels(sql).iter().any(|l| l == "Customers"), "{sql}: {:?}", labels(sql));
     }
 }
+
+#[test]
+fn a_new_statement_or_clause_after_a_table_and_its_alias() {
+    let l = labels("select * from dbo.Customers c\n\nsel|");
+    assert_eq!(l.first().map(String::as_str), Some("SELECT"), "{l:?}");
+    let l = labels("select * from dbo.Customers AS c\r\n\r\nwh|");
+    assert_eq!(l.first().map(String::as_str), Some("WHERE"), "{l:?}");
+    let l = labels("select * from dbo.Customers c le|");
+    assert!(l.iter().any(|x| x == "LEFT JOIN"), "{l:?}");
+    // Still nothing while the alias itself is being typed.
+    assert!(labels("select * from dbo.Customers cu|").is_empty());
+}

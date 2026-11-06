@@ -2,6 +2,7 @@
 <CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
   <Extern href="stdidcmd.h" />
   <Extern href="vsshlids.h" />
+  <Include href="KnownImageIds.vsct" />
 
   <Commands package="guidQuillSqlPackage">
     <Menus>
@@ -42,6 +43,10 @@
       </Group>
       <Group guid="guidQuillSqlCmdSet" id="TabGroup" priority="0x0450">
         <Parent guid="guidQuillSqlCmdSet" id="QuillSqlMenu" />
+      </Group>
+      <!-- On the Standard toolbar, after New Query and the rest. -->
+      <Group guid="guidQuillSqlCmdSet" id="ToolbarGroup" priority="0xF000">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_TOOL_STANDARD" />
       </Group>
       <Group guid="guidQuillSqlCmdSet" id="ContextGroup" priority="0x0700">
         <Parent guid="guidSqlQueryWindowContext" id="SqlQueryWindowContextMenu" />
@@ -176,6 +181,9 @@
       </Button>
       <Button guid="guidQuillSqlCmdSet" id="HistoryCommandId" priority="0x0102" type="Button">
         <Parent guid="guidQuillSqlCmdSet" id="DatabaseGroup" />
+        <Icon guid="ImageCatalogGuid" id="History" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <CommandFlag>IconAndText</CommandFlag>
         <CommandFlag>TextChanges</CommandFlag>
         <Strings>
           <ButtonText>Query History...</ButtonText>
@@ -460,6 +468,9 @@
     <CommandPlacement guid="guidQuillSqlCmdSet" id="QuillSqlMenu" priority="0x0100">
       <Parent guid="guidQuillSqlCmdSet" id="ContextGroup" />
     </CommandPlacement>
+    <CommandPlacement guid="guidQuillSqlCmdSet" id="HistoryCommandId" priority="0x0100">
+      <Parent guid="guidQuillSqlCmdSet" id="ToolbarGroup" />
+    </CommandPlacement>
   </CommandPlacements>
 
   <KeyBindings>
@@ -531,6 +542,7 @@
       <IDSymbol name="RunGroup" value="0x1031" />
       <IDSymbol name="TabGroup" value="0x1032" />
       <IDSymbol name="ContextGroup" value="0x1033" />
+      <IDSymbol name="ToolbarGroup" value="0x1034" />
       <IDSymbol name="AskAiCommandId" value="0x0110" />
       <IDSymbol name="ExplainAiCommandId" value="0x0111" />
       <IDSymbol name="ReviewAiCommandId" value="0x0112" />

@@ -88,6 +88,20 @@ const STATEMENT_KEYWORDS: &[&str] = &[
     "BEGIN", "END", "WHILE", "RETURN", "CREATE", "ALTER", "DROP", "TRUNCATE", "PRINT", "USE",
 ];
 
+/// What may follow a table and its alias in FROM.
+const CLAUSE_KEYWORDS: &[&str] = &[
+    "WHERE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "CROSS APPLY", "OUTER APPLY",
+    "GROUP BY", "ORDER BY", "HAVING", "UNION", "UNION ALL", "EXCEPT", "INTERSECT", "OPTION",
+];
+
+/// Whether the name before token `k` is an alias already written after a table: `t x` or `t AS x`.
+fn alias_written(head: &[Token], k: usize) -> bool {
+    let mut words = (0..k).rev().filter(|&j| !head[j].is_comment());
+    let (Some(alias), Some(before)) = (words.next(), words.next()) else { return false };
+    let named = |t: &Token| matches!(t.kind, Kind::Bracket | Kind::Quoted) || (t.kind == Kind::Word && !is_reserved(&t.text.to_ascii_uppercase()));
+    named(&head[alias]) && (named(&head[before]) || head[before].kind == Kind::RParen || head[before].text.eq_ignore_ascii_case("AS"))
+}
+
 const GLOBAL_VARIABLES: &[&str] = &[
     "@@ERROR", "@@FETCH_STATUS", "@@IDENTITY", "@@ROWCOUNT", "@@SERVERNAME", "@@SPID",
     "@@TRANCOUNT", "@@VERSION",
@@ -470,6 +484,8 @@ enum Context {
     Views,
     /// After `ALTER FUNCTION` or `DROP FUNCTION`.
     Functions,
+    /// After a table and its alias: the next clause, or a new statement.
+    AfterSource,
     Nothing,
 }
 
@@ -630,7 +646,7 @@ fn wants(context: Context, kind: &str) -> bool {
         Context::Expression => matches!(kind, "scalar_function" | "table" | "view"),
         Context::Views => kind == "view",
         Context::Functions => matches!(kind, "scalar_function" | "table_function"),
-        Context::InsertColumns | Context::InsertTarget | Context::ExecArgs | Context::Nothing => false,
+        Context::InsertColumns | Context::InsertTarget | Context::ExecArgs | Context::AfterSource | Context::Nothing => false,
     }
 }
 
@@ -768,6 +784,8 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         Some((Kind::LParen | Kind::Comma, _)) if a.in_insert_column_list(k) => Context::InsertColumns,
         Some((Kind::Word, w)) if matches!(w.as_str(), "AS") && clause == "FROM" => Context::Nothing,
         Some((Kind::Word | Kind::Bracket | Kind::Quoted, w)) if !qualifier.is_empty() || is_reserved(w) => Context::Expression,
+        // After a table and its alias comes the next clause or statement.
+        Some((Kind::Word | Kind::Bracket | Kind::Quoted, _)) if (clause == "FROM" || clause == "JOIN") && alias_written(&head, k) => Context::AfterSource,
         // A name directly after a table name is an alias being typed.
         Some((Kind::Word | Kind::Bracket | Kind::Quoted | Kind::RParen, _)) if clause == "FROM" || clause == "JOIN" => Context::Nothing,
         _ => Context::Expression,
@@ -981,6 +999,11 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                     items.push(Item { label: f.to_string(), insert, kind: "function", detail: "built-in function".into() });
                 }
                 for kw in STATEMENT_KEYWORDS {
+                    items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
+                }
+            }
+            Context::AfterSource => {
+                for kw in CLAUSE_KEYWORDS.iter().chain(STATEMENT_KEYWORDS) {
                     items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
                 }
             }

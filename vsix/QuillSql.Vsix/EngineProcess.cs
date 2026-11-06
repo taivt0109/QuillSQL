@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace QuillSql.Vsix
 {
@@ -28,15 +29,33 @@ namespace QuillSql.Vsix
         /// </summary>
         public string Request(string op, string fields)
         {
-            lock (_gate)
+            // A request stuck behind another must not wait forever either.
+            if (!Monitor.TryEnter(_gate, TimeoutMilliseconds * 2))
+            {
+                Log.Write("engine busy; " + op + " skipped");
+                return null;
+            }
+            try
             {
                 try
                 {
                     EnsureStarted();
                     var id = ++_nextId;
                     var line = "{\"id\":" + id + ",\"op\":" + Json.Str(op) + (string.IsNullOrEmpty(fields) ? "" : "," + fields) + "}";
-                    _process.StandardInput.WriteLine(line);
-                    _process.StandardInput.Flush();
+                    // Writing blocks once the pipe is full, if the engine stops reading.
+                    var input = _process.StandardInput;
+                    var sent = Task.Run(() =>
+                    {
+                        input.WriteLine(line);
+                        input.Flush();
+                    });
+                    if (!sent.Wait(TimeoutMilliseconds))
+                    {
+                        Log.Write("engine stopped reading; " + op + " not sent");
+                        _ = sent.ContinueWith(t => t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                        Stop();
+                        return null;
+                    }
                     if (!_replies.TryTake(out var reply, TimeoutMilliseconds) || reply == null)
                     {
                         Log.Write("engine did not answer " + op + " (" + line.Length + " chars): " + (line.Length > 400 ? line.Substring(0, 400) + "..." : line));
@@ -51,6 +70,10 @@ namespace QuillSql.Vsix
                     Stop();
                     return null;
                 }
+            }
+            finally
+            {
+                Monitor.Exit(_gate);
             }
         }
 
