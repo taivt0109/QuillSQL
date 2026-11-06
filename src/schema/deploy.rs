@@ -339,7 +339,7 @@ impl<'a> Planner<'a> {
     }
 
     fn module_step(&mut self, phase: Phase, print: impl Into<String>, statements: Vec<String>, settings: &ModuleSettings) {
-        self.steps.push(Step { settings: Some(settings.clone()), ..Step::new(phase, print, statements) });
+        self.push(Step { settings: Some(settings.clone()), ..Step::new(phase, print, statements) });
     }
 
     fn selected(&self) -> Vec<&'a Difference> {

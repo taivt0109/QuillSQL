@@ -252,6 +252,11 @@ impl<'a> Planner<'a> {
             if s.is_some() {
                 self.unbind_xml_columns(t);
             }
+            // Message types that validate against it are dropped first and come back.
+            let collection = tn.quoted();
+            for m in tgt.message_types.iter().filter(|m| m.xml_collection.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(&collection))) {
+                self.objects.rebuild.insert(ObjectName::new(KEY_MESSAGE_TYPE, &m.name));
+            }
             let sql = self.ex.listed(&test(&tn), Check::Drop, &format!("DROP XML SCHEMA COLLECTION {tn}"));
             self.ranked_step(Phase::XmlSchemaCollections, 0, "Dropping XML schema collections", vec![sql], true);
         }
@@ -1322,14 +1327,38 @@ impl<'a> Planner<'a> {
             }
         };
         // Grants on a re-created object are made again.
-        self.recreate.insert(ObjectName::new(if ty.schema_scoped() { &key.schema } else { "" }, n));
+        let name = ObjectName::new(if ty.schema_scoped() { &key.schema } else { "" }, n);
+        self.recreate.insert(name.clone());
         self.core(Phase::CreateObjects, format!("Creating {label}"), key.clone(), statements);
+        self.regrant(ty, &name);
+    }
+
+    /// The source's permissions on an object re-created only because something it uses is
+    /// (selected objects get theirs with the other permissions).
+    fn regrant(&mut self, ty: ObjectType, name: &ObjectName) {
+        if self.cmp.differences.iter().any(|d| d.object_type == ty && d.selected && d.kind != DiffKind::Equal && d.name == *name) || self.opts.has(Opt::IgnorePermissions) {
+            return;
+        }
+        let (class, schema, object) = match securable_class(ty) {
+            Some(class) => (class, None, name.name.as_str()),
+            None => ("OBJECT", Some(name.schema.as_str()), name.name.as_str()),
+        };
+        let grants: Vec<String> = self
+            .src
+            .permissions
+            .iter()
+            .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == Some(object))
+            .map(Permission::grant_sql)
+            .collect();
+        let label = if schema.is_some() { name.to_string() } else { format!("{class}:: {}", quote(object)) };
+        self.step(Phase::Permissions, format!("Altering permissions on {label}"), grants);
     }
 
     /// A Service Broker object that is not deployed itself but uses one that is re-created.
     fn broker_rebuild(&mut self, key: &ObjectName) {
         self.objects.done.insert(key.clone());
         let ty = match key.schema.as_str() {
+            KEY_MESSAGE_TYPE => ObjectType::MessageType,
             KEY_CONTRACT => ObjectType::Contract,
             KEY_SERVICE => ObjectType::Service,
             KEY_EVENT_NOTIFICATION => ObjectType::EventNotification,

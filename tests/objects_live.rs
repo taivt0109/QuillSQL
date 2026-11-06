@@ -69,7 +69,7 @@ fn changed() -> String {
         .replace("CREATE DEFAULT dbo.Zero AS 0", "CREATE DEFAULT dbo.Zero AS 1")
         .replace("decimal(10, 2)", "decimal(12, 2)")
         .replace("VALUES (2020, 2021, 2022)", "VALUES (2021, 2022, 2023)")
-        .replace("ON (Yr, Qty) WITH NORECOMPUTE", "ON (Yr)")
+        .replace("(Yr, Qty) WITH NORECOMPUTE", "(Yr)")
         .replace("LABEL = 'Confidential'", "LABEL = 'Public'")
         .replace("FOR CREATE_PROCEDURE AS SET NOCOUNT ON", "FOR CREATE_PROCEDURE, DROP_PROCEDURE AS SET NOCOUNT ON")
         .replace("[//Quill/Typed] SENT BY TARGET", "[//Quill/Typed] SENT BY ANY")
@@ -104,6 +104,9 @@ fn script(server: &Server, from: &str, to: &str, opts: &Options) -> (deploy::Dep
 /// Deploys `from` onto `to` and checks that nothing is left to do.
 fn converge(server: &Server, from: &str, to: &str, opts: &Options) -> deploy::DeploymentScript {
     let (script, db1) = script(server, from, to, opts);
+    if let Ok(dir) = std::env::var("QUILL_TEST_SCRIPTS") {
+        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{from}-{to}.sql")), &script.sql);
+    }
     if let Err(e) = deploy::execute(&server.spec(to), &script, |_, _| {}) {
         panic!("{e}\n\n{}", script.sql);
     }
@@ -217,11 +220,13 @@ fn versioning_on_and_off() {
     server.create(b, plain);
     let s = converge(&server, b, a, &options());
     assert!(s.sql.contains("SET (SYSTEM_VERSIONING = OFF)") && s.sql.contains("DROP TABLE [dbo].[T_History]"), "{}", s.sql);
-    // A rebuild keeps the data of both tables.
-    let changed = versioned.replace("Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, Name nvarchar(50) NULL", "Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, Name int NULL");
-    server.create(a, &versioned.replace("N'one'", "N'1'"));
-    server.create(b, &changed.replace("N'one'", "1"));
-    let s = converge(&server, a, b, &options());
+    // A rebuild (the IDENTITY can't be added in place) keeps the data of both tables.
+    let changed = versioned
+        .replace("Id int NOT NULL CONSTRAINT PK_T", "Id int IDENTITY(1, 1) NOT NULL CONSTRAINT PK_T")
+        .replace("INSERT INTO dbo.T (Id, Name) VALUES (1, N'one');", "INSERT INTO dbo.T (Name) VALUES (N'one');");
+    server.create(a, versioned);
+    server.create(b, &changed);
+    let s = converge(&server, b, a, &options());
     assert!(s.sql.contains("Rebuilding [dbo].[T]"), "{}", s.sql);
     server.drop(a);
     server.drop(b);
