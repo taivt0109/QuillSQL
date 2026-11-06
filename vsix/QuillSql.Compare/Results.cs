@@ -301,6 +301,7 @@ namespace QuillSql.Compare
             menu.Items.Add(Ui.MenuItem("Exclude selected objects", () => tick(false)));
             menu.Items.Add(new Separator());
             menu.Items.Add(Ui.MenuItem("View object deployment script", async () => await ObjectScript(), Glyph.Code));
+            Dialogs.RegisterMenu(menu);
             return menu;
         }
 
