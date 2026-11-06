@@ -305,3 +305,53 @@ fn objects_round_trip_through_scripts_folders() {
     server.drop(a);
     server.drop(b);
 }
+
+fn count(server: &Server, database: &str, sql: &str) -> String {
+    let rt = db::runtime().unwrap();
+    rt.block_on(async {
+        let mut c = db::connect_async(&server.spec(database)).await.unwrap();
+        let rows = db::query(&mut c, sql).await.unwrap();
+        rows[0].get::<&str, _>(0).unwrap_or_default().to_string()
+    })
+}
+
+#[test]
+fn tables_on_recreated_clr_types_and_schemes_are_rebuilt_twice() {
+    let Some(server) = server() else { return };
+    let (a, b) = ("QD_objects_Two1", "QD_objects_Two2");
+    let base = |hex: &str, range: &str| {
+        format!(
+            "CREATE ASSEMBLY QuillClr FROM {} WITH PERMISSION_SET = SAFE;
+            GO
+            CREATE TYPE dbo.Point EXTERNAL NAME QuillClr.Point;
+            GO
+            CREATE TABLE dbo.Shapes (Id int NOT NULL CONSTRAINT PK_Shapes PRIMARY KEY, Pos dbo.Point NULL);
+            GO
+            INSERT INTO dbo.Shapes VALUES (1, CONVERT(dbo.Point, '3,4')), (2, NULL);
+            GO
+            CREATE PARTITION FUNCTION pfYears (int) AS RANGE {range} FOR VALUES (2020, 2021);
+            GO
+            CREATE PARTITION SCHEME psYears AS PARTITION pfYears ALL TO ([PRIMARY]);
+            GO
+            CREATE TABLE dbo.Parted (Id int NOT NULL, Yr int NOT NULL, CONSTRAINT PK_Parted PRIMARY KEY (Id, Yr)) ON psYears (Yr);
+            GO
+            INSERT INTO dbo.Parted VALUES (1, 2019), (2, 2021), (3, 2025);",
+            clr(hex)
+        )
+    };
+    let one = base(include_str!("fixtures/objects/clr.hex"), "RIGHT");
+    let two = base(include_str!("fixtures/objects/clr3.hex"), "LEFT");
+    for (from, to) in [(&two, &one), (&one, &two)] {
+        server.create(a, from);
+        server.create(b, to);
+        let s = converge(&server, a, b, &options());
+        for text in ["Rebuild table (Unbind CLR types and partition schemes) [dbo].[Shapes]", "Rebuild table (Unbind CLR types and partition schemes) [dbo].[Parted]", "DROP ASSEMBLY [QuillClr]", "DROP PARTITION FUNCTION [pfYears]"] {
+            assert!(s.sql.contains(text), "{text}\n{}", s.sql);
+        }
+        assert_eq!(count(&server, b, "SELECT CONVERT(nvarchar(20), Pos.ToString()) FROM dbo.Shapes WHERE Id = 1"), "3,4");
+        assert_eq!(count(&server, b, "SELECT CONVERT(nvarchar(20), COUNT(*)) FROM dbo.Parted"), "3");
+        assert_eq!(count(&server, b, "SELECT CONVERT(nvarchar(20), COUNT(*)) FROM dbo.Shapes"), "2");
+    }
+    server.drop(a);
+    server.drop(b);
+}
