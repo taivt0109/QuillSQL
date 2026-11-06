@@ -19,6 +19,7 @@ tiberius = { version = "0.13.0", default-features = false, features = ["tds80", 
 tokio = { version = "1", features = ["rt", "net", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 tiberius = { version = "0.13.0", default-features = false, features = ["winauth"] }

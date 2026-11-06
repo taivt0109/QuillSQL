@@ -13,6 +13,7 @@ pub mod lexer;
 pub mod options;
 pub mod plan;
 pub mod refactor;
+pub mod schema;
 pub mod snippets;
 pub mod script;
 pub mod style;
