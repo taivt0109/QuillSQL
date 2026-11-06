@@ -1,9 +1,13 @@
 //! Comparison sources besides live databases: scripts folders, source control and SQL Compare
 //! snapshots.
 
+pub mod expr;
 pub mod folder;
 mod objects;
 pub mod parse;
 pub mod scm;
 pub mod snp;
+pub mod snp_write;
+pub mod sqlproj;
+pub mod staging;
 pub mod script;

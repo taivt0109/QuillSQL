@@ -82,6 +82,39 @@ fn compares_and_writes_scripts_folders() {
 }
 
 #[test]
+fn reads_and_writes_ssdt_projects() {
+    let proj = r#"<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <DSP>Microsoft.Data.Tools.Schema.Sql.Sql160DatabaseSchemaProvider</DSP>
+    <DefaultFileStructure>BySchemaAndSchemaType</DefaultFileStructure>
+  </PropertyGroup>
+  <ItemGroup>
+    <Build Include="dbo\Tables\Customer.sql" />
+  </ItemGroup>
+</Project>
+"#;
+    let ssdt = folder("ssdt", &[("Db.sqlproj", proj), ("dbo/Tables/Customer.sql", CUSTOMER), ("dbo/Tables/NotBuilt.sql", AUDIT)]);
+    let a = folder("ssdt-src", &[("Tables/dbo.Customer.sql", CUSTOMER), ("Tables/audit.Log.sql", AUDIT), ("Security/Schemas/audit.sql", SCHEMA)]);
+    // Only the project's Build items are read.
+    let (code, out) = quill(&[&format!("/scripts1:{}", s(&a)), &format!("/scripts2:{}", s(&ssdt))]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("[audit].[Log]") && !out.contains("[dbo].[Customer]"), "{out}");
+    let (code, out) = quill(&[&format!("/scripts1:{}", s(&a)), &format!("/scripts2:{}", s(&ssdt)), "/synchronize"]);
+    assert_eq!(code, 0, "{out}");
+    let new_file = ssdt.join("audit").join("Tables").join("audit.Log.sql");
+    assert!(new_file.is_file(), "{out}");
+    let text = std::fs::read_to_string(ssdt.join("Db.sqlproj")).unwrap();
+    assert!(text.contains(r#"<Build Include="audit\Tables\audit.Log.sql" />"#) && text.contains("Customer.sql"), "{text}");
+    assert!(ssdt.join("QuillDatabaseProperties.xml").is_file());
+    let (code, out) = quill(&[&format!("/scripts1:{}", s(&a)), &format!("/scripts2:{}", s(&ssdt))]);
+    assert_eq!(code, 63, "{out}");
+    for d in [a, ssdt] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+#[test]
 fn reports_scripts_folder_problems() {
     let (code, out) = quill(&["/scripts1:C:\\no\\such\\folder", "/scripts2:C:\\no\\such\\folder"]);
     assert_eq!(code, 60, "{out}");

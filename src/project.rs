@@ -519,7 +519,10 @@ pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
     x.value("Options", &schema_options);
     x.value("InRecycleBin", "False");
     x.value("Direction", "0");
-    x.line("<ProjectFilter version=\"1\" type=\"SQLCompareDifferenceFilter\" isNull=\"1\" />");
+    match &p.filter {
+        Some(f) if p.kind == ProjectKind::Schema => x.line(f),
+        _ => x.line("<ProjectFilter version=\"1\" type=\"SQLCompareDifferenceFilter\" isNull=\"1\" />"),
+    }
     x.value("ProjectFilterName", "UnnamedFilter");
     x.value("UserNote", &p.note);
     x.line("<SelectedSyncObjects version=\"1\" type=\"SelectedSyncObjects\" isNull=\"1\" />");
