@@ -30,7 +30,8 @@ pub(super) fn xml_key(x: &str) -> String {
         out.push(c);
         after_tag = c == '>';
     }
-    out
+    // `<a />` and `<a/>` are the same element.
+    out.replace(" />", "/>").replace(" >", ">")
 }
 
 impl Comparer<'_> {
@@ -569,7 +570,10 @@ impl Comparer<'_> {
         d.opt_prop("Sensitivity classification label id", x.label_id.as_deref(), y.label_id.as_deref());
         d.opt_prop("Sensitivity classification information type", x.information_type.as_deref(), y.information_type.as_deref());
         d.opt_prop("Sensitivity classification information type id", x.information_type_id.as_deref(), y.information_type_id.as_deref());
-        d.opt_prop("Sensitivity classification rank", x.rank.as_deref(), y.rank.as_deref());
+        // Snapshots don't keep the rank.
+        if x.rank.is_some() && y.rank.is_some() {
+            d.opt_prop("Sensitivity classification rank", x.rank.as_deref(), y.rank.as_deref());
+        }
     }
 
     pub(super) fn clr_signature(&self, d: &mut Diffs, a: &Routine, b: &Routine) {

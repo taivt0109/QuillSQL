@@ -3,6 +3,7 @@
 
 pub mod datafolder;
 pub mod expr;
+pub mod events;
 pub mod folder;
 mod objects;
 pub mod parse;

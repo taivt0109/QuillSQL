@@ -203,7 +203,7 @@ impl Reader {
         let rows = db::query(
             conn,
             "SELECT o.object_id, RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name, o.parent_object_id FROM sys.objects AS o
-             WHERE o.type NOT IN ('S', 'IT', 'SQ')",
+             WHERE o.type NOT IN ('S', 'IT')",
         )
         .await?;
         for r in &rows {
@@ -1345,7 +1345,7 @@ fn level1_class(kind: &str) -> &'static str {
 
 /// Graph tables: the index SQL Server makes on the graph id is left out (it comes with the
 /// table), and other indexes name the graph columns by their pseudo columns.
-fn graph_indexes(t: &mut Table) {
+pub fn graph_indexes(t: &mut Table) {
     t.indexes.retain(|ix| !ix.name.starts_with("GRAPH_UNIQUE_INDEX_"));
     let edge = t.graph.as_deref() == Some("EDGE");
     let pseudo = |c: &str| {
