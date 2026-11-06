@@ -65,8 +65,26 @@ const XML_SPATIAL: &str = include_str!("fixtures/compare/sources_xml_spatial.sql
 const BINDINGS: &str = include_str!("fixtures/compare/sources_bindings.sql");
 const SHOP_DATA: &str = include_str!("fixtures/compare/shop_data.sql");
 
-/// Object types our .snp files do not carry yet.
-const NOT_IN_SNP: [ObjectType; 3] = [ObjectType::Default, ObjectType::Rule, ObjectType::DdlTrigger];
+/// Object types our .snp files do not carry in full yet (the objects fixture).
+const NOT_IN_SNP: [ObjectType; 17] = [
+    ObjectType::Assembly,
+    ObjectType::Contract,
+    ObjectType::EventNotification,
+    ObjectType::MessageType,
+    ObjectType::PartitionFunction,
+    ObjectType::PartitionScheme,
+    ObjectType::Queue,
+    ObjectType::Route,
+    ObjectType::SecurityPolicy,
+    ObjectType::Service,
+    ObjectType::ServiceBinding,
+    ObjectType::XmlSchemaCollection,
+    ObjectType::Function,
+    ObjectType::Role,
+    ObjectType::StoredProcedure,
+    ObjectType::Table,
+    ObjectType::UserDefinedType,
+];
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("quill-sources-{name}-{}", std::process::id()));
@@ -96,9 +114,7 @@ fn makescripts_reads_back_identical() {
         assert_identical(&live, &f.database, &opts.clone().without(Opt::IgnoreWhiteSpace), name);
         // A SQL Compare snapshot of the database reads back the same.
         let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
-        let c = schema::compare(&snp, &live, &opts, &Mappings::default());
-        let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal && !NOT_IN_SNP.contains(&d.object_type)).collect();
-        assert!(left.is_empty(), "{name} snapshot: {left:#?}");
+        assert_identical(&snp, &live, &opts, &format!("{name} snapshot"));
         // DDL triggers are not compared; they still come back.
         let ddl = |d: &Database| d.ddl_triggers.iter().map(|t| (t.name.clone(), t.disabled)).collect::<Vec<_>>();
         assert_eq!(ddl(&f.database), ddl(&live), "{name}");
@@ -289,5 +305,22 @@ fn deploys_to_and_from_a_scripts_folder() {
     let _ = std::fs::remove_dir_all(&dir);
     for name in ["QD_sources_Old", "QD_sources_New", "QD_sources_Empty"] {
         server.drop(name);
+    }
+}
+
+#[test]
+fn the_other_objects_round_trip_through_snapshots() {
+    let Some(server) = server() else { return };
+    let clr = |hex: &str| format!("0x{}", hex.trim());
+    let objects = include_str!("fixtures/objects/objects.sql").replace("{CLR}", &clr(include_str!("fixtures/objects/clr.hex")));
+    server.create("QD_sources_Objects", &objects);
+    let live = catalog::read_database(&server.spec("QD_sources_Objects")).unwrap();
+    server.drop("QD_sources_Objects");
+    let opts = Options::default_set().without(Opt::IgnoreFileGroups).with(Opt::IgnoreCertificatesAndCryptoKeys);
+    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+    for (x, y) in [(&snp, &live), (&live, &snp)] {
+        let c = schema::compare(x, y, &opts, &Mappings::default());
+        let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal && !NOT_IN_SNP.contains(&d.object_type)).collect();
+        assert!(left.is_empty(), "{left:#?}");
     }
 }

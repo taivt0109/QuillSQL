@@ -76,8 +76,8 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
 
     s.tables = c.member(Cur::table_item)?;
     s.functions = c.member(Cur::function)?;
-    c.member(|c| c.default_or_rule(false))?;
-    c.member(|c| c.default_or_rule(true))?;
+    s.defaults = c.member(|c| c.default_or_rule(false))?;
+    s.rules = c.member(|c| c.default_or_rule(true))?;
     s.users = c.member(Cur::user)?;
     s.roles = c.member(Cur::role)?;
     s.types = c.member(Cur::user_type)?;
@@ -118,7 +118,7 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     c.member(Cur::partition_scheme)?;
     s.schemas = c.member(Cur::schema)?;
     c.member(Cur::trigger)?; // database-level list; DML triggers live in their table or view
-    c.member(Cur::ddl_trigger)?;
+    s.ddl_triggers = c.member(Cur::ddl_trigger)?;
     c.member(Cur::service_binding)?;
     c.member(Cur::certificate)?;
     c.member(Cur::symmetric_key)?;
@@ -157,6 +157,9 @@ struct Snap {
     schemas: Vec<RawSchema>,
     sequences: Vec<(Sequence, Vec<RawPerm>)>,
     synonyms: Vec<(Synonym, Vec<RawPerm>)>,
+    defaults: Vec<BindableObject>,
+    rules: Vec<BindableObject>,
+    ddl_triggers: Vec<RawDdlTrigger>,
     dependencies: Vec<(u8, String, u8, String)>,
     props: Vec<RawProp>,
     /// Comments blob store: module and default text by id.
@@ -240,6 +243,11 @@ struct RawModule {
     routine: Routine,
     text_id: i32,
     perms: Vec<RawPerm>,
+}
+
+struct RawDdlTrigger {
+    trigger: DdlTrigger,
+    text_id: i32,
 }
 
 struct RawView {
@@ -1416,19 +1424,19 @@ impl Cur<'_> {
         Ok(RawView { view, text_id, perms, triggers })
     }
 
-    fn default_or_rule(&mut self, rule: bool) -> R<()> {
+    fn default_or_rule(&mut self, rule: bool) -> R<BindableObject> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let name = self.s()?;
+        let schema = self.s()?;
         if (!rule && v > 1.0) || (rule && v >= 7.0) {
             self.i32()?;
         }
-        self.str()?;
+        let definition = self.s()?;
         self.eprops()?;
         if v >= 11.45 {
             self.ss()?;
         }
-        Ok(())
+        Ok(BindableObject { schema, name, definition })
     }
 
     fn user_type(&mut self) -> R<UserType> {
@@ -1946,15 +1954,17 @@ impl Cur<'_> {
         Ok(())
     }
 
-    fn ddl_trigger(&mut self) -> R<()> {
+    fn ddl_trigger(&mut self) -> R<RawDdlTrigger> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        for _ in 0..5 {
-            self.bool()?;
-        }
-        self.i32()?;
+        let mut t = DdlTrigger { name: self.s()?, ..Default::default() };
+        self.str()?; // schema
+        self.i32()?; // object id
+        self.bool()?; // case-sensitive
+        t.disabled = self.bool()?;
+        let clr = self.bool()?;
+        t.settings = ModuleSettings { quoted_identifier: self.bool()?, ansi_nulls: self.bool()? };
+        let text_id = self.i32()?;
+        // Event codes are not mapped to names: only CLR triggers compare them.
         if v >= 7.0 {
             self.coll(Cur::i32)?;
         } else {
@@ -1963,20 +1973,17 @@ impl Cur<'_> {
                 self.str()?;
             }
         }
-        for _ in 0..3 {
-            self.str()?;
+        let method = [self.s()?, self.s()?, self.s()?];
+        if clr {
+            t.clr_method = Some(method.iter().map(|p| quote(p)).collect::<Vec<_>>().join("."));
         }
-        if v >= 7.1 {
-            self.execute_as()?;
-        } else {
-            self.str()?;
-        }
+        t.execute_as = if v >= 7.1 { self.execute_as()? } else { self.str()?.filter(|x| !x.is_empty()) };
         self.eprops()?;
-        self.bool()?;
+        t.encrypted = self.bool()?;
         if v >= 11.45 {
             self.ss()?;
         }
-        Ok(())
+        Ok(RawDdlTrigger { trigger: t, text_id })
     }
 
     fn service_binding(&mut self) -> R<()> {
@@ -2101,6 +2108,15 @@ impl Snap {
         self.encrypted.contains(&(id as i64 as u64))
     }
 
+    fn ddl_trigger(&self, raw: RawDdlTrigger) -> DdlTrigger {
+        let mut t = raw.trigger;
+        t.encrypted |= self.is_encrypted(raw.text_id);
+        if !t.encrypted && t.clr_method.is_none() {
+            t.definition = self.text(raw.text_id);
+        }
+        t
+    }
+
     fn trigger(&self, raw: RawTrigger) -> Trigger {
         let mut t = raw.trigger;
         t.encrypted |= self.is_encrypted(raw.text_id);
@@ -2219,6 +2235,9 @@ impl Snap {
             object_perms(&sq.schema, &sq.name, &perms);
             db.sequences.push(sq);
         }
+        db.defaults = std::mem::take(&mut self.defaults);
+        db.rules = std::mem::take(&mut self.rules);
+        db.ddl_triggers = std::mem::take(&mut self.ddl_triggers).into_iter().map(|t| self.ddl_trigger(t)).collect();
         for (syn, perms) in std::mem::take(&mut self.synonyms) {
             object_perms(&syn.schema, &syn.name, &perms);
             db.synonyms.push(syn);
