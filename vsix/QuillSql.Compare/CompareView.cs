@@ -445,6 +445,7 @@ namespace QuillSql.Compare
             {
                 _schemaResults = new SchemaResults(_session, result);
                 _schemaResults.ReviewRenames += async renames => await MapRenames(renames);
+                _schemaResults.FilterChanged += () => { _dirty = true; UpdateTitle(); };
             }
         }
 
@@ -640,6 +641,7 @@ namespace QuillSql.Compare
                     })));
             }
             if (folder) wizard.DeployLabel = "Update the scripts folder";
+            else if (live) wizard.BackupDefaults = async differential => await Ui.Try(_host.Owner, () => _engine.RequestObject("backup_defaults", new JsonObject { ["session"] = session, ["differential"] = differential }));
             var outcome = wizard.Run();
             if (outcome.Choice == DeployWizard.Choice.None) return;
             var sql = outcome.Script.Str("sql") ?? "";
@@ -661,10 +663,12 @@ namespace QuillSql.Compare
                 }
             }
             SetBusy(true, "Deploying…");
-            var done = await Ui.Try(_host.Owner, () => _engine.RequestObject("deploy", new JsonObject { ["session"] = session }, Progress));
+            var request = new JsonObject { ["session"] = session };
+            if (outcome.Backup != null) request["backup"] = outcome.Backup;
+            var done = await Ui.Try(_host.Owner, () => _engine.RequestObject("deploy", request, Progress));
             SetBusy(false, done == null ? (folder ? "The scripts folder was not updated." : "The deployment failed and was rolled back.")
                 : done.ContainsKey("written") ? "Updated the scripts folder: " + Ui.Plural(done.List("written").Count, "file written", "files written") + ", " + done.List("deleted").Count + " deleted."
-                : "Deployed (" + done.Long("batches") + " batches).");
+                : "Deployed (" + done.Long("batches") + " batches)" + (done.Str("backup") != null ? "; backup in " + done.Str("backup") : "") + ".");
             if (done == null) return;
             if (outcome.Recompare) await Compare();
             Ui.Message(_host.Owner, "QuillSQL Compare", "Deployment was successful.", Ui.Tone.Info, "OK");

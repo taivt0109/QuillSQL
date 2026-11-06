@@ -43,6 +43,8 @@ namespace QuillSql.Compare
             public bool Recompare;
             public string SaveCopyTo;
             public JsonObject Script;
+            /// <summary>Backup options for `deploy`, when the target is backed up first.</summary>
+            public JsonObject Backup;
         }
 
         private readonly ICompareHost _host;
@@ -73,21 +75,22 @@ namespace QuillSql.Compare
         /// <summary>The first deployment method: deploying, or updating a scripts folder.</summary>
         public string DeployLabel { get; set; } = "Deploy using QuillSQL Compare";
 
+        /// <summary>The backup page's starting folder and file name (differential?); null when the target cannot be backed up.</summary>
+        public Func<bool, Task<JsonObject>> BackupDefaults { get; set; }
+
         public Outcome Run()
         {
             var outcome = new Outcome();
             var window = Ui.Dialog(_host.Owner, "Deployment", null, 1000, 720);
-            var steps = new List<string> { "Deployment method" };
-            if (_schema) steps.Add("Dependencies");
-            steps.Add("Review");
+            var steps = new List<string>();
             var page = 0;
 
             // Page 1: deployment method.
             var deploy = new RadioButton { Content = DeployLabel, IsChecked = _target != null, IsEnabled = _target != null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
             var recompare = Ui.Check("Recompare after deployment", true);
             var backup = Ui.Check("Back up target before deployment", false);
-            backup.IsEnabled = false;
-            backup.ToolTip = "Backups are not available yet; back up the target with SQL Server first.";
+            backup.IsEnabled = BackupDefaults != null;
+            backup.ToolTip = BackupDefaults != null ? "A native SQL Server backup of the target runs before the deployment" : "Not available for this target";
             var saveCopy = Ui.Check("Save a copy of the deployment script:", false);
             var copyPath = new TextBox { Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare", "Scripts", "deploy_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".sql"), Width = 460, IsEnabled = false };
             var browse = Ui.Button("Browse…", () =>
@@ -152,6 +155,26 @@ namespace QuillSql.Compare
             reviewBody.Children.Add(Ui.Card(review, 0));
             JsonObject made = null;
 
+            // Backup of target: a native SQL Server backup, with SQL Compare's options.
+            var provider = new ComboBox { ItemsSource = new[] { "Native SQL Server" }, SelectedIndex = 0, Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
+            provider.ToolTip = "Redgate SQL Backup is not available; QuillSQL uses SQL Server's BACKUP DATABASE.";
+            var folderBox = new TextBox();
+            var fileBox = new TextBox { IsEnabled = false };
+            var auto = Ui.Check("Name file automatically", true);
+            auto.Checked += (s, e) => fileBox.IsEnabled = false;
+            auto.Unchecked += (s, e) => fileBox.IsEnabled = true;
+            var overwrite = Ui.Check("Overwrite existing backup files of the same name", false);
+            var differential = Ui.Check("Differential backup", false);
+            var backupStatus = Ui.Text("", brush: CompareTheme.High, wrap: TextWrapping.Wrap);
+            var folderNote = Ui.Text("A folder on the SQL Server machine, as the server sees it.", 12, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            var backupPage = Ui.Column(Ui.Form(
+                Ui.Field("Perform a full backup using", provider),
+                Ui.Field("Folder", folderBox),
+                Ui.Field(null, folderNote),
+                Ui.Field("File name", fileBox),
+                Ui.Field("Backup options", Ui.Column(auto, overwrite, differential))), backupStatus);
+            var defaultsLoaded = false;
+
             var title = Ui.Title("");
             var lead = Ui.Text("", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
             lead.Margin = new Thickness(0, 4, 0, 14);
@@ -174,6 +197,17 @@ namespace QuillSql.Compare
             buttons.Children.Add(right);
             buttons.Children.Add(sides);
 
+            void fillSteps()
+            {
+                steps.Clear();
+                steps.Add("Deployment method");
+                if (backup.IsChecked == true && deploy.IsChecked == true && BackupDefaults != null) steps.Add("Backup of target");
+                if (_schema) steps.Add("Dependencies");
+                steps.Add("Review");
+                if (IsLoadedPage()) show();
+            }
+            bool IsLoadedPage() => stepRow.Children.Count > 0;
+
             void show()
             {
                 stepRow.Children.Clear();
@@ -191,6 +225,24 @@ namespace QuillSql.Compare
                     lead.Text = "Choose whether to deploy the changes now or to create a script for them.";
                     content.Content = methodPage;
                     next.Content = "Next >";
+                }
+                else if (name == "Backup of target")
+                {
+                    title.Text = "Backup of target";
+                    lead.Text = "Back up " + _target + " before the deployment runs. If the backup fails, nothing is deployed.";
+                    content.Content = backupPage;
+                    next.Content = "Next >";
+                    if (!defaultsLoaded)
+                    {
+                        defaultsLoaded = true;
+                        window.Dispatcher.BeginInvoke(new Action(async () =>
+                        {
+                            var d = await BackupDefaults(differential.IsChecked == true);
+                            if (d == null) return;
+                            if (folderBox.Text.Length == 0) folderBox.Text = d.Str("folder") ?? "";
+                            if (fileBox.Text.Length == 0) fileBox.Text = d.Str("file") ?? "";
+                        }));
+                    }
                 }
                 else if (name == "Dependencies")
                 {
@@ -227,11 +279,27 @@ namespace QuillSql.Compare
                         if (Ui.Message(window, "Confirm deployment", message, Ui.Tone.Warning, "Deploy now", "Cancel") != 0) return;
                         outcome.Choice = Choice.Deploy;
                         outcome.Recompare = recompare.IsChecked == true;
+                        if (steps.Contains("Backup of target"))
+                        {
+                            outcome.Backup = new JsonObject
+                            {
+                                ["folder"] = folderBox.Text.Trim(),
+                                ["file"] = fileBox.Text.Trim(),
+                                ["nameAutomatically"] = auto.IsChecked == true,
+                                ["overwrite"] = overwrite.IsChecked == true,
+                                ["differential"] = differential.IsChecked == true,
+                            };
+                        }
                         if (saveCopy.IsChecked == true && copyPath.Text.Trim().Length > 0) outcome.SaveCopyTo = copyPath.Text.Trim();
                     }
                     outcome.Script = made;
                     window.Close();
                     return;
+                }
+                if (steps[page] == "Backup of target")
+                {
+                    backupStatus.Text = folderBox.Text.Trim().Length == 0 ? "Folder cannot be empty" : auto.IsChecked != true && fileBox.Text.Trim().Length == 0 ? "Enter a file name to continue" : "";
+                    if (backupStatus.Text.Length > 0) return;
                 }
                 page++;
                 if (steps[page] == "Review")
@@ -253,8 +321,11 @@ namespace QuillSql.Compare
                 show();
             }
 
-            back.Click += (s, e) => { if (page > 0) { page--; show(); } };
+            deploy.Checked += (s, e) => fillSteps();
+            backup.Checked += (s, e) => fillSteps();
+            backup.Unchecked += (s, e) => fillSteps();
             next.Click += async (s, e) => await forward();
+            fillSteps();
             show();
             window.Content = Ui.WithFooter(body, buttons);
             window.ShowDialog();

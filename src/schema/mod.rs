@@ -1,5 +1,6 @@
 //! Schema compare: options, text comparison and the object-by-object comparison.
 
+pub mod backup;
 pub mod cast;
 pub mod compare;
 pub mod ddl;
@@ -9,6 +10,7 @@ pub mod exists;
 pub mod features;
 pub mod linediff;
 pub mod options;
+pub mod filter_edit;
 pub mod print;
 pub mod renames;
 pub mod report;
