@@ -350,6 +350,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             console::verbose("Nothing to deploy.");
             return Ok(exit::SUCCESS);
         }
+        common::make_backup(args, target)?;
         console::verbose("Synchronizing databases...");
         let ran = deploy::execute(target, script, |i, n| console::verbose(&format!("Running batch {} of {n}", i + 1)))
             .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("Synchronization failed due to database error: {e}")))?;
