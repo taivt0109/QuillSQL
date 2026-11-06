@@ -135,6 +135,18 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 Ok(json!({"version": r.get::<&str, _>(0), "database": r.get::<&str, _>(1)}))
             })
         }
+        // Runs one statement on the source's server (Create database).
+        "execute" => {
+            let side: SourceSpec = field(request, "source")?;
+            let sql: String = field(request, "sql")?;
+            let spec = side.connection(1)?;
+            let rt = crate::db::runtime()?;
+            rt.block_on(async {
+                let mut c = crate::db::connect_async(&spec).await?;
+                crate::db::execute(&mut c, &sql).await
+            })?;
+            Ok(json!(true))
+        }
         "project_load" => {
             let path: String = field(request, "path")?;
             serde_json::to_value(Project::load(std::path::Path::new(&path))?).map_err(|e| e.to_string())

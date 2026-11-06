@@ -23,7 +23,11 @@ namespace QuillSql.Vsix
         private static readonly ConditionalWeakTable<object, object> Extended = new ConditionalWeakTable<object, object>();
         private static DispatcherTimer _retry;
         private static object _explorer;
-        private static Type _itemType, _explorerType, _nodeType, _contextType, _menuHandlerType;
+        private static Type _itemType, _schemaItemType, _dataItemType, _explorerType, _nodeType, _contextType, _menuHandlerType;
+        private static ModuleBuilder _module;
+
+        /// <summary>The package, for opening Compare windows from the menu.</summary>
+        internal static AsyncPackage HostPackage;
         private static int _attempts;
 
         public static void Start()
@@ -70,7 +74,10 @@ namespace QuillSql.Vsix
                 _nodeType = FindType(Ns + "INodeInformation");
                 _contextType = FindType(Ns + "INodeContext");
                 _menuHandlerType = FindType(Ns + "IMenuHandler");
-                _itemType = MakeItemType(FindType(Ns + "ToolsMenuItemBase"));
+                var itemBase = FindType(Ns + "ToolsMenuItemBase");
+                _itemType = MakeItemType(itemBase, "QuillSql.TabColorMenuItem", typeof(ObjectExplorerCallbacks));
+                _schemaItemType = MakeItemType(itemBase, "QuillSql.CompareSchemaMenuItem", typeof(CompareSchemaCallbacks));
+                _dataItemType = MakeItemType(itemBase, "QuillSql.CompareDataMenuItem", typeof(CompareDataCallbacks));
                 changed.AddEventHandler(actionContext, new EventHandler(OnSelectionChanged));
                 Log.Write("Object Explorer menu ready");
                 return true;
@@ -82,11 +89,15 @@ namespace QuillSql.Vsix
             }
         }
 
-        /// <summary>A subclass of ToolsMenuItemBase whose Invoke and Clone call back into QuillSQL.</summary>
-        private static Type MakeItemType(Type itemBase)
+        /// <summary>A subclass of ToolsMenuItemBase whose Invoke and Clone call `callbacks`' static methods.</summary>
+        private static Type MakeItemType(Type itemBase, string name, Type callbacks)
         {
-            var assembly = AppDomain.CurrentDomain.DefineDynamicAssembly(new AssemblyName("QuillSql.ObjectExplorerItems"), AssemblyBuilderAccess.Run);
-            var type = assembly.DefineDynamicModule("Items").DefineType("QuillSql.TabColorMenuItem", TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.Sealed, itemBase);
+            if (_module == null)
+            {
+                var assembly = AppDomain.CurrentDomain.DefineDynamicAssembly(new AssemblyName("QuillSql.ObjectExplorerItems"), AssemblyBuilderAccess.Run);
+                _module = assembly.DefineDynamicModule("Items");
+            }
+            var type = _module.DefineType(name, TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.Sealed, itemBase);
             const BindingFlags Members = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
             var baseConstructor = itemBase.GetConstructor(Members, null, Type.EmptyTypes, null);
@@ -103,7 +114,7 @@ namespace QuillSql.Vsix
                 var method = type.DefineMethod(name, access | MethodAttributes.Virtual | MethodAttributes.HideBySig, returns, Type.EmptyTypes);
                 var body = method.GetILGenerator();
                 body.Emit(OpCodes.Ldarg_0);
-                body.Emit(OpCodes.Call, typeof(ObjectExplorerCallbacks).GetMethod(callback));
+                body.Emit(OpCodes.Call, callbacks.GetMethod(callback));
                 body.Emit(OpCodes.Ret);
                 type.DefineMethodOverride(method, overridden);
             }
@@ -112,11 +123,24 @@ namespace QuillSql.Vsix
             return type.CreateType();
         }
 
-        public static object NewItem()
+        public static object NewItem() => Item(_itemType, "QuillSQL: Tab Color...");
+
+        public static object NewSchemaItem() => Item(_schemaItemType, "QuillSQL: Compare Schema With...");
+
+        public static object NewDataItem() => Item(_dataItemType, "QuillSQL: Compare Data With...");
+
+        private static object Item(Type type, string text)
         {
-            var item = Activator.CreateInstance(_itemType);
-            _itemType.GetProperty("Text")?.SetValue(item, Loc.T("QuillSQL: Tab Color..."));
+            var item = Activator.CreateInstance(type);
+            type.GetProperty("Text")?.SetValue(item, Loc.T(text));
             return item;
+        }
+
+        /// <summary>The connection of the node a menu item belongs to.</summary>
+        public static object Connection(object item)
+        {
+            var node = item.GetType().GetProperty("Parent")?.GetValue(item);
+            return node == null ? null : ConnectionResolver.Get(node, "Connection");
         }
 
         private static void OnSelectionChanged(object sender, EventArgs e)
@@ -141,7 +165,13 @@ namespace QuillSql.Vsix
                     return;
                 }
                 Extended.Add(menu, null);
-                menu.GetType().GetMethod("AddChild", new[] { typeof(string), typeof(object) })?.Invoke(menu, new object[] { string.Empty, NewItem() });
+                var addChild = menu.GetType().GetMethod("AddChild", new[] { typeof(string), typeof(object) });
+                addChild?.Invoke(menu, new object[] { string.Empty, NewItem() });
+                if (path == "Server/Database" && _schemaItemType != null)
+                {
+                    addChild?.Invoke(menu, new object[] { string.Empty, NewSchemaItem() });
+                    addChild?.Invoke(menu, new object[] { string.Empty, NewDataItem() });
+                }
                 Log.Verbose("tab color item added to the " + path + " menu");
             }
             catch (Exception ex)
@@ -192,5 +222,44 @@ namespace QuillSql.Vsix
         }
 
         public static object Clone(object item) => ObjectExplorerMenu.NewItem();
+    }
+
+    /// <summary>"QuillSQL: Compare Schema With..." on a database: a Compare window with it as the source.</summary>
+    public static class CompareSchemaCallbacks
+    {
+        public static void Invoke(object item) => CompareCallbacks.Open(item, false);
+
+        public static object Clone(object item) => ObjectExplorerMenu.NewSchemaItem();
+    }
+
+    /// <summary>"QuillSQL: Compare Data With..." on a database.</summary>
+    public static class CompareDataCallbacks
+    {
+        public static void Invoke(object item) => CompareCallbacks.Open(item, true);
+
+        public static object Clone(object item) => ObjectExplorerMenu.NewDataItem();
+    }
+
+    internal static class CompareCallbacks
+    {
+        public static void Open(object item, bool data)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                var names = ObjectExplorerMenu.Names(item);
+                var connection = ObjectExplorerMenu.Connection(item);
+                string password = null;
+                var source = connection == null || names == null ? null : ComparePane.SourceFrom(connection, names.Item2, out password);
+                if (ObjectExplorerMenu.HostPackage != null)
+                {
+                    ComparePane.Open(ObjectExplorerMenu.HostPackage, data, source, password);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("compare from Object Explorer", ex);
+            }
+        }
     }
 }

@@ -18,3 +18,26 @@ jobs:
       - name: Build the SSMS extension
         shell: pwsh
         run: ./vsix/build.ps1
+
+  # Schema and data compare against a real SQL Server.
+  compare-live:
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Quill_ci_Passw0rd!
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Quill_ci_Passw0rd!' -Q 'SELECT 1' -b"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --test compare_live -- --test-threads=2
+        env:
+          QUILL_TEST_SERVER: localhost,1433
+          QUILL_TEST_USER: sa
+          QUILL_TEST_PASSWORD: Quill_ci_Passw0rd!

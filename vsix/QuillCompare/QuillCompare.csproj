@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- QuillCompare.exe: Schema and Data Compare without SSMS. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>QuillCompare</RootNamespace>
+    <AssemblyName>QuillCompare</AssemblyName>
+    <ApplicationIcon>..\..\assets\logo\quillsql.ico</ApplicationIcon>
+    <StartupObject>QuillCompare.Program</StartupObject>
+    <Product>QuillSQL Compare</Product>
+    <Company>QuillSQL</Company>
+    <Version>0.3.3</Version>
+    <RepoRoot>$(MSBuildProjectDirectory)\..\..</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\QuillSql.Compare\QuillSql.Compare.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="$(RepoRoot)\target\release\quill.exe" Link="quill.exe" CopyToOutputDirectory="PreserveNewest" />
+    <Resource Include="$(RepoRoot)\assets\logo\png\quillsql-32.png" Link="quillsql-32.png" />
+  </ItemGroup>
+</Project>

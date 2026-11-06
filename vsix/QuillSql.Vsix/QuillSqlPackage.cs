@@ -15,6 +15,8 @@ namespace QuillSql.Vsix
     [ProvideMenuResource("Menus.ctmenu", 1)]
     // The AI chat docks on the right, like the tool windows people keep open beside a script.
     [ProvideToolWindow(typeof(AiChatPane), Style = VsDockStyle.Tabbed, Window = "3ae79031-e1bc-11d0-8f78-00a0c9110057", Orientation = ToolWindowOrientation.Right)]
+    // Compare windows open as document tabs, several at a time.
+    [ProvideToolWindow(typeof(ComparePane), MultiInstances = true, Style = VsDockStyle.MDI)]
     // Load with the shell so suggestions work in the first query window.
     [ProvideAutoLoad(Microsoft.VisualStudio.VSConstants.UICONTEXT.ShellInitialized_string, PackageAutoLoadFlags.BackgroundLoad)]
     [Guid("a4d6f0c1-7e2b-4c39-8f15-2b9e6d3a1c74")]
@@ -71,6 +73,8 @@ namespace QuillSql.Vsix
         private const int ShowCardCommandId = 0x0136;
         private const int AiChatCommandId = 0x0137;
         private const int TabColorCommandId = 0x0138;
+        private const int SchemaCompareCommandId = 0x0139;
+        private const int DataCompareCommandId = 0x013A;
 
         private EditorWatcher _watcher;
 
@@ -97,6 +101,8 @@ namespace QuillSql.Vsix
             add(HistoryCommandId, QueryHistory.ShowWindow);
             add(AiChatCommandId, () => AiChatPane.Open(this));
             add(TabColorCommandId, TabColorDialog.ForActiveWindow);
+            add(SchemaCompareCommandId, () => ComparePane.Open(this, false));
+            add(DataCompareCommandId, () => ComparePane.Open(this, true));
             add(AskAiCommandId, () => AiAssistant.AskForSql(this));
             add(ExplainAiCommandId, () => AiAssistant.Explain(this));
             add(ReviewAiCommandId, () => AiAssistant.Review(this));
@@ -145,6 +151,7 @@ namespace QuillSql.Vsix
                     QueryHistory.Start(dte);
                 }
                 TabColorizer.Start();
+                ObjectExplorerMenu.HostPackage = this;
                 ObjectExplorerMenu.Start();
                 Updater.Start(this, false);
             }

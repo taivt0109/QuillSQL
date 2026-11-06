@@ -9,3 +9,12 @@ if (-not $msbuild) { throw 'MSBuild from Visual Studio 2022 was not found.' }
 if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE." }
 
 Write-Host "Built $PSScriptRoot\QuillSql.Vsix\bin\Release\QuillSql.Vsix.vsix"
+
+# QuillCompare.exe: the Compare windows without SSMS, with its library; quill.exe is installed beside it.
+& $msbuild "$PSScriptRoot\QuillCompare\QuillCompare.csproj" /restore /t:Rebuild /p:Configuration=Release /v:minimal /nologo
+if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for QuillCompare with exit code $LASTEXITCODE." }
+$app = "$PSScriptRoot\QuillCompare\bin\Release\net48"
+$zip = "$PSScriptRoot\QuillCompare\bin\Release\QuillCompare.zip"
+Remove-Item $zip -ErrorAction SilentlyContinue
+Compress-Archive -Path "$app\QuillCompare.exe", "$app\QuillCompare.exe.config", "$app\QuillSql.Compare.dll" -DestinationPath $zip
+Write-Host "Built $zip"
