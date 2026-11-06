@@ -772,6 +772,16 @@ pub fn user(db: &Database, p: &Principal, o: &Options) -> String {
         s.push_str(&format!(" WITH DEFAULT_SCHEMA={}", quote(ds)));
     }
     out.batch(&s);
+    // CREATE USER gives CONNECT: SQL Compare writes only its absence, Data Tools style
+    // (WriteAsDataToolsPermissions) writes the grant.
+    if !o.has(Opt::IgnorePermissions) {
+        let denied = db.permissions.iter().any(|x| x.class == "DATABASE" && x.grantee == p.name && x.permission.eq_ignore_ascii_case("CONNECT"));
+        if p.no_connect && !o.has(Opt::WriteAsDataToolsPermissions) {
+            out.line(&format!("REVOKE CONNECT TO {}", quote(&p.name)));
+        } else if !p.no_connect && !denied && o.has(Opt::WriteAsDataToolsPermissions) {
+            out.line(&format!("GRANT CONNECT TO {}", quote(&p.name)));
+        }
+    }
     database_permissions(&mut out, db, &p.name, o);
     out.s
 }
