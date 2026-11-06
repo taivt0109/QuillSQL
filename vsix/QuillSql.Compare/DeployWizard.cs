@@ -43,7 +43,7 @@ namespace QuillSql.Compare
             public bool Recompare;
             public string SaveCopyTo;
             public JsonObject Script;
-            /// <summary>Backup options for `deploy`, when the target is backed up first.</summary>
+            /// <summary>The backup settings chosen (without the password), for the project; null when not backing up.</summary>
             public JsonObject Backup;
         }
 
@@ -54,12 +54,12 @@ namespace QuillSql.Compare
         private readonly List<Change> _changes;
         private readonly List<Dependency> _dependencies;
         private readonly bool _includeDependencies;
-        private readonly Func<bool, List<int>, Task<JsonObject>> _makeScript;
+        private readonly Func<bool, List<int>, JsonObject, Task<JsonObject>> _makeScript;
 
         /// <param name="target">The target as shown, or null when only a script can be made.</param>
         /// <param name="dependencies">Schema: objects the selection needs; null for data.</param>
-        /// <param name="makeScript">Makes the script: with all dependencies, or with these extra differences.</param>
-        public DeployWizard(ICompareHost host, string source, string target, string selectedText, List<Change> changes, List<Dependency> dependencies, bool includeDependencies, Func<bool, List<int>, Task<JsonObject>> makeScript)
+        /// <param name="makeScript">Makes the script: with all dependencies, or with these extra differences, and the backup (or null).</param>
+        public DeployWizard(ICompareHost host, string source, string target, string selectedText, List<Change> changes, List<Dependency> dependencies, bool includeDependencies, Func<bool, List<int>, JsonObject, Task<JsonObject>> makeScript)
         {
             _host = host;
             _source = source;
@@ -75,8 +75,11 @@ namespace QuillSql.Compare
         /// <summary>The first deployment method: deploying, or updating a scripts folder.</summary>
         public string DeployLabel { get; set; } = "Deploy using QuillSQL Compare";
 
-        /// <summary>The backup page's starting folder and file name (differential?); null when the target cannot be backed up.</summary>
-        public Func<bool, Task<JsonObject>> BackupDefaults { get; set; }
+        /// <summary>What the target's server offers for backups (`backup_defaults`); null when the target cannot be backed up.</summary>
+        public Func<Task<JsonObject>> BackupDefaults { get; set; }
+
+        /// <summary>The project's backup settings, to start from.</summary>
+        public JsonObject BackupSettings { get; set; }
 
         public Outcome Run()
         {
@@ -88,9 +91,10 @@ namespace QuillSql.Compare
             // Page 1: deployment method.
             var deploy = new RadioButton { Content = DeployLabel, IsChecked = _target != null, IsEnabled = _target != null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
             var recompare = Ui.Check("Recompare after deployment", true);
-            var backup = Ui.Check("Back up target before deployment", false);
+            var saved = BackupSettings ?? new JsonObject();
+            var backup = Ui.Check("Back up target before deployment", BackupDefaults != null && saved.Bool("enabled"));
             backup.IsEnabled = BackupDefaults != null;
-            backup.ToolTip = BackupDefaults != null ? "A native SQL Server backup of the target runs before the deployment" : "Not available for this target";
+            backup.ToolTip = BackupDefaults != null ? "The backup is the first statement of the deployment script" : "Not available for this target";
             var saveCopy = Ui.Check("Save a copy of the deployment script:", false);
             var copyPath = new TextBox { Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare", "Scripts", "deploy_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".sql"), Width = 460, IsEnabled = false };
             var browse = Ui.Button("Browse…", () =>
@@ -101,7 +105,7 @@ namespace QuillSql.Compare
             browse.IsEnabled = false;
             saveCopy.Checked += (s, e) => { copyPath.IsEnabled = browse.IsEnabled = true; };
             saveCopy.Unchecked += (s, e) => { copyPath.IsEnabled = browse.IsEnabled = false; };
-            var deployOptions = Ui.Column(recompare, backup, saveCopy, Ui.Row(copyPath, browse));
+            var deployOptions = Ui.Column(recompare, saveCopy, Ui.Row(copyPath, browse));
             deployOptions.Margin = new Thickness(26, 0, 0, 18);
             var script = new RadioButton { Content = "Create a deployment script", IsChecked = _target == null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
             var scriptNote = Ui.Text("The script opens in " + (_host is Window ? "the program registered for .sql files" : "a new query window") + "; nothing is changed on the target.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
@@ -109,7 +113,8 @@ namespace QuillSql.Compare
             deploy.Checked += (s, e) => deployOptions.IsEnabled = true;
             script.Checked += (s, e) => deployOptions.IsEnabled = false;
             deployOptions.IsEnabled = _target != null;
-            var methodPage = Ui.Column(deploy, deployOptions, script, scriptNote);
+            backup.Margin = new Thickness(0, 18, 0, 0);
+            var methodPage = Ui.Column(deploy, deployOptions, script, scriptNote, backup);
             if (_target == null)
             {
                 var why = Ui.Text("The target is a snapshot, an empty database or a source control revision, so the changes can only be scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
@@ -155,25 +160,80 @@ namespace QuillSql.Compare
             reviewBody.Children.Add(Ui.Card(review, 0));
             JsonObject made = null;
 
-            // Backup of target: a native SQL Server backup, with SQL Compare's options.
-            var provider = new ComboBox { ItemsSource = new[] { "Native SQL Server" }, SelectedIndex = 0, Width = 220, HorizontalAlignment = HorizontalAlignment.Left };
-            provider.ToolTip = "SQL Backup is not available; QuillSQL uses SQL Server's BACKUP DATABASE.";
-            var folderBox = new TextBox();
-            var fileBox = new TextBox { IsEnabled = false };
-            var auto = Ui.Check("Name file automatically", true);
+            // Backup of target: SQL Compare's options for a native backup or SQL Backup.
+            var provider = new ComboBox { Width = 260, HorizontalAlignment = HorizontalAlignment.Left };
+            provider.Items.Add(new ComboBoxItem { Content = "Native SQL Server" });
+            provider.Items.Add(new ComboBoxItem { Content = "SQL Backup", IsEnabled = false, ToolTip = "SQL Backup is not installed on the target's server" });
+            provider.SelectedIndex = 0;
+            var folderBox = new TextBox { Text = saved.Str("folder") ?? "" };
+            var fileBox = new TextBox { Text = saved.Str("file") ?? "", IsEnabled = saved.ContainsKey("nameAutomatically") && !saved.Bool("nameAutomatically") };
+            var auto = Ui.Check("Name file automatically", !fileBox.IsEnabled);
             auto.Checked += (s, e) => fileBox.IsEnabled = false;
             auto.Unchecked += (s, e) => fileBox.IsEnabled = true;
-            var overwrite = Ui.Check("Overwrite existing backup files of the same name", false);
-            var differential = Ui.Check("Differential backup", false);
+            var overwrite = Ui.Check("Overwrite existing backup files of the same name", saved.Bool("overwrite"));
+            var differential = Ui.Check("Differential backup", saved.Bool("differential"));
+            var levels = new[] { "Highest speed", "High speed", "Standard speed", "Best compression" };
+            var compression = new Slider { Minimum = 1, Maximum = 4, IsSnapToTickEnabled = true, TickFrequency = 1, TickPlacement = System.Windows.Controls.Primitives.TickPlacement.BottomRight, Width = 260, Value = Math.Max(1, Math.Min(4, saved.Long("compressionLevel") == 0 ? 1 : saved.Long("compressionLevel"))) };
+            var compressionText = Ui.Text(levels[(int)compression.Value - 1], brush: CompareTheme.Muted);
+            compression.ValueChanged += (s, e) => compressionText.Text = levels[(int)compression.Value - 1];
+            var encrypt = Ui.Check("Encrypt backup", (saved.Str("encryption") ?? "none") != "none");
+            var password = new PasswordBox { Width = 260, HorizontalAlignment = HorizontalAlignment.Left };
+            var confirm = new PasswordBox { Width = 260, HorizontalAlignment = HorizontalAlignment.Left };
+            var strong = Ui.Check("256-bit encryption", saved.Str("encryption") != "aes128");
+            var threads = new TextBox { Width = 60, HorizontalAlignment = HorizontalAlignment.Left, Text = Math.Max(1, saved.Long("threadCount")).ToString() };
+            var multi = Ui.Check("Use multiple threads", saved.Long("threadCount") > 1);
+            var sqbOptions = Ui.Form(
+                Ui.Field("Compression", Ui.Row(compression, new Border { Width = 10 }, compressionText)),
+                Ui.Field(null, encrypt),
+                Ui.Field("Password", password),
+                Ui.Field("Confirm password", confirm),
+                Ui.Field(null, strong),
+                Ui.Field(null, Ui.Row(multi, threads)));
+            sqbOptions.Visibility = Visibility.Collapsed;
+            JsonObject caps = null;
+            provider.SelectionChanged += (s, e) =>
+            {
+                var sqb = provider.SelectedIndex == 1;
+                sqbOptions.Visibility = sqb ? Visibility.Visible : Visibility.Collapsed;
+                // The default folder follows the provider while it has not been changed.
+                if (caps != null)
+                {
+                    var from = sqb ? caps.Str("nativeFolder") : caps.Str("sqbFolder");
+                    if (folderBox.Text == from || folderBox.Text.Length == 0) folderBox.Text = sqb ? caps.Str("sqbFolder") : caps.Str("nativeFolder");
+                }
+            };
             var backupStatus = Ui.Text("", brush: CompareTheme.High, wrap: TextWrapping.Wrap);
-            var folderNote = Ui.Text("A folder on the SQL Server machine, as the server sees it.", 12, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
-            var backupPage = Ui.Column(Ui.Form(
-                Ui.Field("Perform a full backup using", provider),
-                Ui.Field("Folder", folderBox),
-                Ui.Field(null, folderNote),
-                Ui.Field("File name", fileBox),
-                Ui.Field("Backup options", Ui.Column(auto, overwrite, differential))), backupStatus);
-            var defaultsLoaded = false;
+            var folderNote = Ui.Text("A folder on the SQL Server machine, as the server sees it. The backup is the first statement of the script, and a command to restore it is at the end.", 12, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            var backupPage = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = Ui.Column(Ui.Form(
+                    Ui.Field("Perform a full backup using", provider),
+                    Ui.Field("Folder", folderBox),
+                    Ui.Field(null, folderNote),
+                    Ui.Field("File name", fileBox),
+                    Ui.Field("Backup options", Ui.Column(auto, overwrite, differential))), sqbOptions, backupStatus),
+            };
+            JsonObject backupRequest()
+            {
+                if (!steps.Contains("Backup of target")) return null;
+                var sqb = provider.SelectedIndex == 1;
+                int.TryParse(threads.Text, out var n);
+                return new JsonObject
+                {
+                    ["enabled"] = true,
+                    ["provider"] = sqb ? "sqb" : "native",
+                    ["differential"] = differential.IsChecked == true,
+                    ["folder"] = folderBox.Text.Trim(),
+                    ["file"] = fileBox.Text.Trim(),
+                    ["nameAutomatically"] = auto.IsChecked == true,
+                    ["overwrite"] = overwrite.IsChecked == true,
+                    ["compressionLevel"] = sqb ? (int)compression.Value : 1,
+                    ["encryption"] = sqb && encrypt.IsChecked == true ? (strong.IsChecked == true ? "aes256" : "aes128") : "none",
+                    ["threadCount"] = sqb && multi.IsChecked == true ? Math.Max(1, Math.Min(32, n)) : 1,
+                    ["password"] = sqb && encrypt.IsChecked == true ? password.Password : null,
+                };
+            }            var defaultsLoaded = false;
 
             var title = Ui.Title("");
             var lead = Ui.Text("", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
@@ -201,7 +261,7 @@ namespace QuillSql.Compare
             {
                 steps.Clear();
                 steps.Add("Deployment method");
-                if (backup.IsChecked == true && deploy.IsChecked == true && BackupDefaults != null) steps.Add("Backup of target");
+                if (backup.IsChecked == true && BackupDefaults != null) steps.Add("Backup of target");
                 if (_schema) steps.Add("Dependencies");
                 steps.Add("Review");
                 if (IsLoadedPage()) show();
@@ -229,7 +289,7 @@ namespace QuillSql.Compare
                 else if (name == "Backup of target")
                 {
                     title.Text = "Backup of target";
-                    lead.Text = "Back up " + _target + " before the deployment runs. If the backup fails, nothing is deployed.";
+                    lead.Text = "Back up " + _target + " before the deployment. If the backup fails, the rest of the script does not run.";
                     content.Content = backupPage;
                     next.Content = "Next >";
                     if (!defaultsLoaded)
@@ -237,9 +297,14 @@ namespace QuillSql.Compare
                         defaultsLoaded = true;
                         window.Dispatcher.BeginInvoke(new Action(async () =>
                         {
-                            var d = await BackupDefaults(differential.IsChecked == true);
+                            var d = await BackupDefaults();
                             if (d == null) return;
-                            if (folderBox.Text.Length == 0) folderBox.Text = d.Str("folder") ?? "";
+                            caps = d.Obj("capabilities") ?? new JsonObject();
+                            var installed = caps.Long("sqbVersion") > 0;
+                            ((ComboBoxItem)provider.Items[1]).IsEnabled = installed;
+                            if (installed) ((ComboBoxItem)provider.Items[1]).ToolTip = "SQL Backup " + caps.Long("sqbVersion") + " is installed on the target's server";
+                            if (installed && saved.Str("provider") == "sqb") provider.SelectedIndex = 1;
+                            if (folderBox.Text.Length == 0) folderBox.Text = (provider.SelectedIndex == 1 ? caps.Str("sqbFolder") : caps.Str("nativeFolder")) ?? "";
                             if (fileBox.Text.Length == 0) fileBox.Text = d.Str("file") ?? "";
                         }));
                     }
@@ -279,26 +344,26 @@ namespace QuillSql.Compare
                         if (Ui.Message(window, "Confirm deployment", message, Ui.Tone.Warning, "Deploy now", "Cancel") != 0) return;
                         outcome.Choice = Choice.Deploy;
                         outcome.Recompare = recompare.IsChecked == true;
-                        if (steps.Contains("Backup of target"))
-                        {
-                            outcome.Backup = new JsonObject
-                            {
-                                ["folder"] = folderBox.Text.Trim(),
-                                ["file"] = fileBox.Text.Trim(),
-                                ["nameAutomatically"] = auto.IsChecked == true,
-                                ["overwrite"] = overwrite.IsChecked == true,
-                                ["differential"] = differential.IsChecked == true,
-                            };
-                        }
+
                         if (saveCopy.IsChecked == true && copyPath.Text.Trim().Length > 0) outcome.SaveCopyTo = copyPath.Text.Trim();
                     }
                     outcome.Script = made;
+                    if (BackupDefaults != null)
+                    {
+                        outcome.Backup = backupRequest() ?? new JsonObject { ["enabled"] = false };
+                        outcome.Backup.Remove("password");
+                    }
                     window.Close();
                     return;
                 }
                 if (steps[page] == "Backup of target")
                 {
-                    backupStatus.Text = folderBox.Text.Trim().Length == 0 ? "Folder cannot be empty" : auto.IsChecked != true && fileBox.Text.Trim().Length == 0 ? "Enter a file name to continue" : "";
+                    var sqbChecks = provider.SelectedIndex == 1 && encrypt.IsChecked == true;
+                    backupStatus.Text = folderBox.Text.Trim().Length == 0 ? "Folder cannot be empty"
+                        : auto.IsChecked != true && fileBox.Text.Trim().Length == 0 ? "Enter a file name to continue"
+                        : sqbChecks && password.Password.Length == 0 ? "No password provided"
+                        : sqbChecks && password.Password != confirm.Password ? "Passwords must match"
+                        : "";
                     if (backupStatus.Text.Length > 0) return;
                 }
                 page++;
@@ -308,7 +373,7 @@ namespace QuillSql.Compare
                     content.Content = Ui.Text("Creating the deployment script…", brush: CompareTheme.Muted);
                     foreach (var r in (List<DependencyRow>)depGrid.ItemsSource) r.Source.Deploy = r.Deploy;
                     var extra = _dependencies.Where(d => d.Deploy).Select(d => d.Index).ToList();
-                    made = await _makeScript(allDeps.IsChecked == true, extra);
+                    made = await _makeScript(allDeps.IsChecked == true, extra, backupRequest());
                     if (made == null)
                     {
                         page--;
@@ -322,6 +387,7 @@ namespace QuillSql.Compare
             }
 
             deploy.Checked += (s, e) => fillSteps();
+            script.Checked += (s, e) => fillSteps();
             backup.Checked += (s, e) => fillSteps();
             backup.Unchecked += (s, e) => fillSteps();
             next.Click += async (s, e) => await forward();

@@ -1115,6 +1115,7 @@ impl Reader {
                 member_of: Vec::new(),
                 certificate: text(&r, 6),
                 asymmetric_key: text(&r, 7),
+                no_connect: false,
             });
         }
         let rows = db::query(
@@ -1135,8 +1136,9 @@ impl Reader {
     }
 
     async fn permissions(&mut self, conn: &mut Connection) -> Result<(), String> {
-        // CONNECT for users comes with CREATE USER. Other securables are named in the query:
-        // (schema, name) for types and XML schema collections, the name for the rest.
+        // CONNECT for users comes with CREATE USER: only its absence (no_connect), DENY and WITH
+        // GRANT OPTION are kept. Other securables are named in the query: (schema, name) for types
+        // and XML schema collections, the name for the rest.
         let rows = db::query(
             conn,
             "SELECT p.class, p.major_id, p.permission_name, p.state_desc, g.name,
@@ -1160,10 +1162,21 @@ impl Reader {
              JOIN sys.database_principals AS g ON g.principal_id = p.grantee_principal_id
              WHERE (p.class IN (0, 1, 3, 5, 6, 10, 15, 16, 17, 18, 19, 23, 24, 25, 26, 29))
                AND (p.minor_id = 0 OR p.class = 1) AND g.name NOT IN (N'dbo', N'sys', N'INFORMATION_SCHEMA')
-               AND NOT (p.class = 0 AND p.permission_name = 'CONNECT')
+               AND NOT (p.class = 0 AND p.permission_name = 'CONNECT' AND p.state = 'G')
              ORDER BY p.class, p.major_id, g.name, p.permission_name, p.minor_id",
         )
         .await?;
+        let connected = db::query(
+            conn,
+            "SELECT g.name FROM sys.database_permissions AS p
+             JOIN sys.database_principals AS g ON g.principal_id = p.grantee_principal_id
+             WHERE p.class = 0 AND p.permission_name = 'CONNECT'",
+        )
+        .await?;
+        let connected: Vec<String> = connected.iter().map(|r| s(r, 0)).collect();
+        for p in self.db.principals.iter_mut().filter(|p| !p.is_role()) {
+            p.no_connect = !connected.iter().any(|c| c == &p.name);
+        }
         for r in rows {
             let mut p = Permission { grantee: s(&r, 4), permission: s(&r, 2), state: s(&r, 3), column: text(&r, 5), ..Default::default() };
             match i(&r, 0) {

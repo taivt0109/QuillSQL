@@ -293,24 +293,29 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let verbose = args.has("verbose");
     let source1 = common::source(args, 1)?.ok_or_else(|| ArgError::new(exit::USAGE, "give database 1: /server1 and /database1"))?;
     let source2 = if args.has("makescripts") { None } else { common::source(args, 2)? };
-    // A scripts folder is loaded into a temporary database on the other side's server.
+    // A scripts folder is read without a server; when its data needs one, it is loaded into a
+    // temporary database on the other side's server.
     let host = [Some(&source1), source2.as_ref()].into_iter().flatten().find_map(|s| match s {
         Source::Live(spec) => Some(spec.clone()),
         _ => None,
     });
-    let stage = |s: &Source| -> Result<Option<crate::sources::staging::Staging>, ArgError> {
-        let Source::Scripts { path, revision } = s else { return Ok(None) };
-        let host = host.as_ref().ok_or_else(|| ArgError::new(exit::USAGE, "a scripts folder needs the other database to be live, to load its data"))?;
+    let open = |s: Source, n: u8| -> Result<Opened, ArgError> {
+        let Source::Scripts { path, revision } = s else { return Ok(Opened::Live(live(s, n)?)) };
         if verbose {
             eprintln!("Reading database scripts from '{}'...", path.display());
         }
-        crate::sources::staging::stage(path, revision.as_deref(), host).map(Some).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))
+        match crate::sources::datafolder::read(&path, revision.as_deref()).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))? {
+            Ok(f) => Ok(Opened::Folder(Box::new(f))),
+            Err(reason) => {
+                let host = host.as_ref().ok_or_else(|| ArgError::new(exit::USAGE, format!("{reason}; reading the folder needs the other database to be live")))?;
+                if verbose {
+                    eprintln!("{reason}: loading the folder into a temporary database on {}", host.server);
+                }
+                crate::sources::staging::stage(&path, revision.as_deref(), host).map(|s| Opened::Staged(Box::new(s))).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))
+            }
+        }
     };
-    let staged1 = stage(&source1)?;
-    let spec1 = match &staged1 {
-        Some(s) => s.spec.clone(),
-        None => live(source1, 1)?,
-    };
+    let side1 = open(source1, 1)?;
     let read = |spec: &ConnectionSpec| {
         if verbose {
             eprintln!("Reading the schema of {}...", spec.describe());
@@ -318,26 +323,31 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         crate::catalog::read_database_with(spec, false).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
     };
     if let Some(dir) = args.get("makescripts") {
-        let db1 = read(&spec1)?;
-        return make_scripts(&spec1, &db1, &options, Path::new(dir), args);
+        let Opened::Live(spec1) = &side1 else { return Err(ArgError::new(exit::USAGE, "/makescripts needs database 1 to be a live database")) };
+        let db1 = read(spec1)?;
+        return make_scripts(spec1, &db1, &options, Path::new(dir), args);
     }
     let source2 = source2.ok_or_else(|| ArgError::new(exit::USAGE, "give database 2: /server2 and /database2"))?;
-    let staged2 = stage(&source2)?;
-    let spec2 = match &staged2 {
-        Some(s) => s.spec.clone(),
-        None => live(source2, 2)?,
-    };
-    let mut db1 = read(&spec1)?;
-    let mut db2 = read(&spec2)?;
+    let mut side2 = open(source2, 2)?;
     // A scripts folder is named by its folder, as SQL Data Compare does.
-    let label = |staged: &Option<crate::sources::staging::Staging>, spec: &ConnectionSpec, db: &mut Database| match staged {
-        Some(s) => {
-            db.name = s.folder.database.name.clone();
-            db.name.clone()
-        }
-        None => describe(spec, db),
+    let model = |side: &Opened| -> Result<(Database, String), ArgError> {
+        Ok(match side {
+            Opened::Live(spec) => {
+                let db = read(spec)?;
+                let label = describe(spec, &db);
+                (db, label)
+            }
+            Opened::Staged(s) => {
+                let mut db = read(&s.spec)?;
+                db.name = s.folder.database.name.clone();
+                let label = db.name.clone();
+                (db, label)
+            }
+            Opened::Folder(f) => (f.folder.database.clone(), f.folder.database.name.clone()),
+        })
     };
-    let (label1, label2) = (label(&staged1, &spec1, &mut db1), label(&staged2, &spec2, &mut db2));
+    let (db1, label1) = model(&side1)?;
+    let (db2, label2) = model(&side2)?;
     let (mut user, keys) = overrides(args, &db1, case_sensitive)?;
     if let Some(p) = &project {
         user.schemas.extend(p.data_mappings.schemas.iter().cloned());
@@ -366,7 +376,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
     }
     let deselected: Vec<crate::catalog::ObjectName> = project.iter().flat_map(|p| p.deselected.iter().map(|d| crate::catalog::ObjectName::new(&d.schema, &d.name))).collect();
-    let result = compare::compare(&spec1, &spec2, &db1, &db2, &options, &user, |p| rules.includes(p) && !deselected.contains(&p.source), parallel, |p, r| {
+    let result = compare::compare_sources(side1.rows(), side2.rows(), &db1, &db2, &options, &user, |p| rules.includes(p) && !deselected.contains(&p.source), parallel, |p, r| {
         if verbose {
             eprintln!("Compared {} ({} rows differ)", p.source, r.count(RowKind::Different) + r.count(RowKind::OnlyIn1) + r.count(RowKind::OnlyIn2));
         }
@@ -408,12 +418,18 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     }
     let mut script = None;
     if args.has("scriptfile") || args.has("synchronize") {
-        let mut settings = sync::SyncSettings::new(&label1, &label2, &spec2.database);
+        let target_database = side2.spec().map(|s| s.database.clone()).unwrap_or_else(|| db2.name.clone());
+        let mut settings = sync::SyncSettings::new(&label1, &label2, &target_database);
         settings.transaction_isolation_level = args.get("transactionIsolationLevel").unwrap_or("SERIALIZABLE").to_ascii_uppercase();
         settings.kinds = rules.kinds;
         settings.max_transaction_bytes = (max_mb > 0).then_some(max_mb * 1_048_576);
-        settings.source_connection = Some(spec1.clone());
-        let s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        settings.source_connection = side1.spec().cloned();
+        let mut s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        let live2 = match &side2 {
+            Opened::Live(s) => Some(s),
+            _ => None,
+        };
+        common::add_backup(args, project.as_ref().map(|p| &p.backup), live2, &mut s)?;
         common::write_script(args, &s)?;
         common::report_warnings(args, &s);
         common::check_warnings(args, &s)?;
@@ -423,7 +439,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         return Err(ArgError::new(exit::NOT_IDENTICAL, "Exiting with code 79 as /assertidentical was specified"));
     }
     if let Some(out) = args.get("outputProject") {
-        save_project(out, project.as_ref(), &spec1, &spec2, &options, &user, args)?;
+        let (Opened::Live(spec1), Opened::Live(spec2)) = (&side1, &side2) else {
+            return Err(ArgError::new(exit::USAGE, "/outputProject is not supported with scripts folders"));
+        };
+        save_project(out, project.as_ref(), spec1, spec2, &options, &user, args)?;
     }
     if args.has("synchronize")
         && let Some(script) = &script
@@ -432,8 +451,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             if !quiet {
                 console::log("Nothing to deploy.");
             }
+        } else if let Opened::Folder(f) = &mut side2 {
+            // A scripts folder read without a server: its data scripts are written again.
+            let files = f.write_back(&result, rules.kinds).map_err(|e| ArgError::new(exit::IO_ERROR, e))?;
+            if !quiet {
+                console::log(&format!("Deployed the data of {} to {label2}: {} data script(s) written.", db1.name, files.len()));
+            }
         } else {
-            common::make_backup(args, &spec2)?;
+            let spec2 = side2.spec().cloned().ok_or_else(|| ArgError::new(exit::USAGE, "database 2 is not a database"))?;
             let ran = deploy::execute(&spec2, script, |i, n| {
                 if verbose {
                     eprintln!("Running batch {} of {n}", i + 1);
@@ -444,7 +469,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
                 console::log(&format!("Deployed the data of {} to {} ({ran} batches).", db1.name, label2));
             }
             // Deploying to a scripts folder: the changed tables' data scripts are written again.
-            if let Some(s) = &staged2 {
+            if let Opened::Staged(s) = &side2 {
                 let changed: Vec<crate::catalog::ObjectName> = result.tables.iter().filter(|t| t.error.is_none() && !t.identical()).map(|t| t.pair.target.clone()).collect();
                 let files = s.write_back(&db2, &changed).map_err(|e| ArgError::new(exit::IO_ERROR, e))?;
                 if !quiet {
@@ -457,6 +482,32 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         return Ok(exit::EXECUTION_FAILED);
     }
     Ok(exit::SUCCESS)
+}
+
+/// One side of a data comparison.
+enum Opened {
+    Live(ConnectionSpec),
+    /// A scripts folder read without a server.
+    Folder(Box<crate::sources::datafolder::DataFolder>),
+    /// A scripts folder loaded into a temporary database.
+    Staged(Box<crate::sources::staging::Staging>),
+}
+
+impl Opened {
+    fn spec(&self) -> Option<&ConnectionSpec> {
+        match self {
+            Opened::Live(s) => Some(s),
+            Opened::Staged(s) => Some(&s.spec),
+            Opened::Folder(_) => None,
+        }
+    }
+
+    fn rows(&self) -> compare::RowSource<'_> {
+        match self {
+            Opened::Folder(f) => compare::RowSource::Memory(&f.memory),
+            other => compare::RowSource::Live(other.spec().unwrap()),
+        }
+    }
 }
 
 /// `server.database`, as the summary and the script header name a database.
