@@ -627,7 +627,7 @@ impl<'a> Comparer<'a> {
         }
     }
 
-    fn index_props(&self, d: &mut Diffs, a: &Index, b: &Index, _memory_optimized: bool) {
+    fn index_props(&self, d: &mut Diffs, a: &Index, b: &Index, memory_optimized: bool) {
         let o = self.opts;
         d.prop("Primary key", a.primary_key, b.primary_key);
         d.prop("Unique", a.unique, b.unique);
@@ -637,7 +637,8 @@ impl<'a> Comparer<'a> {
         if !o.has(Opt::IgnoreFileGroups) {
             self.storage(d, &a.storage, &b.storage);
         }
-        if !o.has(Opt::IgnoreStatisticsNorecompute) {
+        // A rebuilt memory-optimized table's statistics are updated WITH NORECOMPUTE.
+        if !o.has(Opt::IgnoreStatisticsNorecompute) && !memory_optimized {
             d.prop("STATISTICS_NORECOMPUTE", a.no_recompute, b.no_recompute);
         }
         if !o.has(Opt::IgnoreStatisticsIncremental) {
