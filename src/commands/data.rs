@@ -296,7 +296,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         if verbose {
             eprintln!("Reading the schema of {}...", spec.describe());
         }
-        crate::catalog::read_database(spec).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
+        crate::catalog::read_database_with(spec, false).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
     };
     if let Some(dir) = args.get("makescripts") {
         let db1 = read(&spec1)?;

@@ -842,12 +842,12 @@ pub fn check_warnings(args: &Args, script: &deploy::DeploymentScript) -> Result<
     Ok(())
 }
 
-/// Reads one side of the comparison.
-pub fn load(source: &Source, _args: &Args) -> Result<Database, ArgError> {
+/// Reads one side of the comparison; `decrypt` reads encrypted modules over the admin connection.
+pub fn load(source: &Source, _args: &Args, decrypt: bool) -> Result<Database, ArgError> {
     match source {
         Source::Live(spec) => {
             console::verbose(&format!("Connecting to database '{}' on '{}'...", spec.database, spec.server));
-            catalog::read_database(spec).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
+            catalog::read_database_with(spec, decrypt).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
         }
         Source::Snapshot(path) => {
             console::verbose(&format!("Loading database snapshot from file: {}...", path.display()));

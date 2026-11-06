@@ -204,7 +204,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         if Path::new(path).exists() && !args.has("force") {
             return Err(ArgError::new(exit::IO_ERROR, format!("Unable to write snapshot to file '{path}' because the file already exists.")));
         }
-        let db = common::load(&source1, args)?;
+        let db = common::load(&source1, args, options.has(crate::schema::Opt::DecryptPost2kEncryptedObjects))?;
         console::verbose(&format!("Creating database snapshot file '{path}' from database '{}'...", db.name));
         common::save_snapshot(&db, Path::new(path))?;
         console::log(&format!(
@@ -623,7 +623,7 @@ fn load(source: &Source, args: &Args, options: &Options) -> Result<(Database, Op
             let (db, folder) = sources::load(path, revision.as_deref(), args, options)?;
             Ok((db, Some(folder)))
         }
-        _ => Ok((common::load(source, args)?, None)),
+        _ => Ok((common::load(source, args, options.has(crate::schema::Opt::DecryptPost2kEncryptedObjects))?, None)),
     }
 }
 

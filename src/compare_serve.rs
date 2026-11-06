@@ -94,13 +94,14 @@ fn session(request: &Value) -> Result<u64, String> {
     request.get("session").and_then(Value::as_u64).ok_or_else(|| "'session' is missing".to_string())
 }
 
-fn load_side(side: &SourceSpec, n: u8, progress: &dyn Fn(&str)) -> Result<Database, String> {
+/// `decrypt` follows DecryptPost2kEncryptedObjects; data compare never needs module text.
+fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<Database, String> {
     if side.is_snapshot() {
         let bytes = std::fs::read(&side.path).map_err(|e| format!("{}: {e}", side.path))?;
         return serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| format!("{} is not a snapshot: {e}", side.path));
     }
     progress(&format!("Reading {}", side.describe()));
-    catalog::read_database(&side.connection(n)?)
+    catalog::read_database_with(&side.connection(n)?, decrypt)
 }
 
 fn schema_options(p: &Project) -> Result<Options, String> {
@@ -164,15 +165,16 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         "snapshot" => {
             let side: SourceSpec = field(request, "source")?;
             let path: String = field(request, "path")?;
-            let db = load_side(&side, 1, progress)?;
+            let db = load_side(&side, 1, true, progress)?;
             std::fs::write(&path, serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"tables": db.tables.len()}))
         }
         "schema_compare" => {
             let project: Project = field(request, "project")?;
             let opts = schema_options(&project)?;
-            let db1 = load_side(&project.source, 1, progress)?;
-            let db2 = load_side(&project.target, 2, progress)?;
+            let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
+            let db1 = load_side(&project.source, 1, decrypt, progress)?;
+            let db2 = load_side(&project.target, 2, decrypt, progress)?;
             progress("Comparing");
             let mut comparison = schema::compare(&db1, &db2, &opts, &project.schema_mappings);
             for d in &mut comparison.differences {
@@ -238,8 +240,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             if project.source.is_snapshot() || project.target.is_snapshot() {
                 opts = opts.without(DataOpt::IncludeViews).without(DataOpt::UseChecksumComparison);
             }
-            let db1 = load_side(&project.source, 1, progress)?;
-            let db2 = load_side(&project.target, 2, progress)?;
+            let db1 = load_side(&project.source, 1, false, progress)?;
+            let db2 = load_side(&project.target, 2, false, progress)?;
             let (pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
             let tables: Vec<Value> = pairs
                 .iter()
@@ -277,9 +279,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let opts = data_options(&project)?;
             let (s1, s2) = (project.source.connection(1)?, project.target.connection(2)?);
             progress(&format!("Reading {}", project.source.describe()));
-            let db1 = catalog::read_database(&s1)?;
+            let db1 = catalog::read_database_with(&s1, false)?;
             progress(&format!("Reading {}", project.target.describe()));
-            let db2 = catalog::read_database(&s2)?;
+            let db2 = catalog::read_database_with(&s2, false)?;
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
             let result = crate::data::compare::compare(
