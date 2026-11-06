@@ -235,7 +235,7 @@ pub const DEPLOY: [Switch; 21] = [
         repeatable: false,
         help: "Deprecated: use /include:Identical",
     },
-    Switch { name: "makebackup", aliases: &["mb"], takes_value: false, repeatable: false, help: "Back up database 2 before deploying (not supported yet)" },
+    Switch { name: "makebackup", aliases: &["mb"], takes_value: false, repeatable: false, help: "Back up database 2 before deploying (native SQL Server backup)" },
     Switch { name: "backupprovider", aliases: &["bpr"], takes_value: true, repeatable: false, help: "native or sqb" },
     Switch { name: "backuptype", aliases: &["bt"], takes_value: true, repeatable: false, help: "full or differential" },
     Switch { name: "backupfolder", aliases: &["bd"], takes_value: true, repeatable: false, help: "Folder for the backup" },
@@ -515,11 +515,36 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 }
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
+/// `/makebackup`: a native SQL Server backup of database 2 just before deploying, with
+/// `/backuptype`, `/backupfolder`, `/backupfile` and `/backupoverwriteexisting`.
+pub fn make_backup(args: &Args, target: &crate::db::ConnectionSpec) -> Result<(), ArgError> {
+    if !args.has("makebackup") {
+        return Ok(());
+    }
+    if args.get("backupprovider").is_some_and(|p| p.eq_ignore_ascii_case("sqb")) {
+        return Err(ArgError::new(exit::UNAVAILABLE, "/backupprovider:sqb (Redgate SQL Backup) is not supported by QuillSQL; use /backupprovider:native."));
+    }
+    for name in ["backupcompression", "backupencryption", "backuppassword", "backupnumberofthreads"] {
+        if args.has(name) {
+            console::warn(&format!("/{name} applies to Redgate SQL Backup only and is ignored for a native backup."));
+        }
+    }
+    let o = crate::schema::backup::BackupOptions {
+        folder: args.get("backupfolder").unwrap_or_default().to_string(),
+        file: args.get("backupfile").unwrap_or_default().to_string(),
+        name_automatically: !args.has("backupfile"),
+        overwrite: args.has("backupoverwriteexisting"),
+        differential: args.get("backuptype").is_some_and(|t| t.eq_ignore_ascii_case("differential")),
+    };
+    let path = crate::schema::backup::run(target, &o, &crate::schema::backup::stamp(), &|m: &str| console::verbose(m))
+        .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
+    console::verbose(&format!("Backed up database 2 to {path}"));
+    Ok(())
+}
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
-    // Scripts folders and source control are schema compare only so far.
-    const FOLDERS: [&str; 6] = ["scripts1", "scripts2", "sourcecontrol1", "sourcecontrol2", "revision1", "revision2"];
-    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"].into_iter().chain(FOLDERS) {
-        if args.has(name) && (command == "data" || !FOLDERS.contains(&name)) {
+    let _ = command;
+    for name in ["backup1", "backup2", "sca1", "sca2"] {
+        if args.has(name) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }
     }
@@ -860,9 +885,14 @@ pub fn load(source: &Source, _args: &Args, decrypt: bool) -> Result<Database, Ar
     }
 }
 
+/// Writes a SQL Compare snapshot (`.snp`), or QuillSQL's JSON model for a `.json` path.
 pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
-    let json = serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?;
-    std::fs::write(path, json).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", path.display())))
+    let bytes = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+        serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?
+    } else {
+        crate::sources::snp_write::write(db)
+    };
+    std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", path.display())))
 }
 
 pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {

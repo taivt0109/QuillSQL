@@ -127,6 +127,23 @@ fn data_results_operations() {
         .unwrap();
     let sql = script["sql"].as_str().unwrap();
     assert!(sql.contains("DELETE") && !sql.contains("UPDATE") && !sql.contains("INSERT"), "{sql}");
+
+    // Back up target before deployment: a native full backup with the automatic name, then the script.
+    let defaults = serve.call("backup_defaults", json!({"session": s})).unwrap();
+    assert!(defaults["file"].as_str().unwrap().starts_with(&format!("FULL_{}_{tgt}_", host.replace([',', '\\'], "_"))), "{defaults}");
+    let done = serve.call("deploy", json!({"session": s, "backup": {"nameAutomatically": true, "overwrite": true}})).unwrap();
+    let file = done["backup"].as_str().unwrap().to_string();
+    assert!(file.ends_with(".bak") && file.contains(&tgt), "{done}");
+    let rt = db::runtime().unwrap();
+    let sets = rt.block_on(async {
+        let mut c = db::connect_async(&spec("msdb")).await.unwrap();
+        db::query(&mut c, &format!("SELECT COUNT(*) FROM dbo.backupset s JOIN dbo.backupmediafamily f ON f.media_set_id = s.media_set_id WHERE s.database_name = N'{tgt}' AND f.physical_device_name = N'{file}'")).await.unwrap()[0].get::<i32, _>(0).unwrap()
+    });
+    assert_eq!(sets, 1);
+    // The backup file stays on the server otherwise (xp_delete_files: SQL Server 2019 and later).
+    run(&spec("master"), &format!("BEGIN TRY EXEC master.sys.xp_delete_files N'{file}' END TRY BEGIN CATCH END CATCH"));
+    let bad = serve.call("deploy", json!({"session": s, "backup": {"folder": "Z:\\no\\such\\folder"}}));
+    assert!(bad.unwrap_err().contains("nothing was deployed"));
     std::fs::remove_dir_all(dir).ok();
     drop(serve);
     for name in [&src, &tgt] {

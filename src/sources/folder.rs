@@ -381,6 +381,15 @@ pub struct Folder {
     pub origins: Origins,
     /// Problems with RedGateDatabaseInfo.xml.
     pub warnings: Vec<String>,
+    /// The SSDT database project of the folder, if it has one.
+    pub project: Option<super::sqlproj::SqlProj>,
+}
+
+impl Folder {
+    /// SQL Compare compares folders with a database project with SsdtCompatibleOptions on.
+    pub fn is_ssdt(&self) -> bool {
+        self.project.is_some()
+    }
 }
 
 /// The `.sql` files that hold objects: everything except the Data folder's top level and
@@ -421,9 +430,20 @@ pub fn read(dir: &Path) -> Result<Folder, String> {
     if !dir.is_dir() {
         return Err(format!("The scripts folder '{}' could not be found.", dir.display()));
     }
-    let (info, warnings) = FolderInfo::read(dir);
+    let (mut info, mut warnings) = FolderInfo::read(dir);
+    let project = super::sqlproj::find(dir);
+    let mut files = script_files(dir, &info);
+    if let Some(p) = &project {
+        files = p.sql_files(dir, files);
+        if info.file.is_none() {
+            // The project's DSP gives the version; no settings file is expected next to it.
+            warnings.clear();
+            info.database_version = p.version.unwrap_or(info.database_version);
+            info.is_azure = p.azure;
+        }
+    }
     let mut reader = parse::Reader::new(info.defaults());
-    for file in script_files(dir, &info) {
+    for file in files {
         let bytes = std::fs::read(&file).map_err(|e| format!("An error occurred while reading from the scripts folder '{}': {e}", dir.display()))?;
         reader.add_file(&file, &decode(&bytes, &info.encoding));
     }
@@ -437,7 +457,7 @@ pub fn read(dir: &Path) -> Result<Folder, String> {
         edition: String::new(),
         engine_edition: info.engine_edition.as_deref().map(engine_edition_number).unwrap_or(if info.is_azure { 5 } else { 0 }),
     };
-    Ok(Folder { path: dir.to_path_buf(), info, database, messages: result.messages, origins: result.origins, warnings })
+    Ok(Folder { path: dir.to_path_buf(), info, database, messages: result.messages, origins: result.origins, warnings, project })
 }
 
 /// The pre- and post-deployment scripts of a folder (`Custom Scripts\Pre-Deployment\*.sql`).
@@ -551,7 +571,12 @@ pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(Obj
 
 /// Chooses a file for every object: its current file, else the default path (numbered when
 /// another object already has that file).
-fn assign_paths(keys: &[ObjectKey], info: &FolderInfo, origins: &HashMap<ObjectKey, PathBuf>) -> HashMap<ObjectKey, PathBuf> {
+fn assign_paths(
+    keys: &[ObjectKey],
+    info: &FolderInfo,
+    origins: &HashMap<ObjectKey, PathBuf>,
+    project: Option<&super::sqlproj::SqlProj>,
+) -> HashMap<ObjectKey, PathBuf> {
     let mut used: HashMap<String, ObjectKey> = HashMap::new();
     let mut out = HashMap::new();
     let lower = |p: &Path| p.to_string_lossy().to_lowercase();
@@ -565,7 +590,10 @@ fn assign_paths(keys: &[ObjectKey], info: &FolderInfo, origins: &HashMap<ObjectK
         if out.contains_key(k) {
             continue;
         }
-        let ideal = default_path(info, k);
+        let ideal = match project {
+            Some(p) => p.ideal_path(k),
+            None => default_path(info, k),
+        };
         let stem = ideal.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let parent = ideal.parent().map(Path::to_path_buf).unwrap_or_default();
         let mut n = 0;
@@ -594,7 +622,7 @@ pub fn write_all(db: &Database, dir: &Path, o: &Options) -> Result<usize, String
     }
     let scripts = object_scripts(db, &info, o);
     let keys: Vec<ObjectKey> = scripts.iter().map(|(k, _)| k.clone()).collect();
-    let paths = assign_paths(&keys, &info, &HashMap::new());
+    let paths = assign_paths(&keys, &info, &HashMap::new(), None);
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for (k, text) in &scripts {
         let p = dir.join(&paths[k]);
@@ -748,7 +776,7 @@ pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &
             keys.push(k.clone());
         }
     }
-    let paths = assign_paths(&keys, &target.info, &origins);
+    let paths = assign_paths(&keys, &target.info, &origins, target.project.as_ref());
     let mut dirty: Vec<PathBuf> = Vec::new();
     for k in &keys {
         if before.get(k) != after_map.get(k) {
@@ -783,9 +811,16 @@ pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &
         changes.written.push(rel);
     }
     if target.info.file.is_none() {
-        let mut info = FolderInfo::for_database(&target.database);
-        info.collation = target.info.collation.clone();
-        std::fs::write(target.path.join(INFO_FILE), info.xml()).map_err(|e| format!("{}: {e}", target.path.display()))?;
+        // A folder read without settings has no server version to record.
+        let info = FolderInfo { collation: target.info.collation.clone(), database_version: target.info.database_version, ..Default::default() };
+        // Next to a database project SQL Compare writes RedGateDatabaseProperties.xml.
+        let name = if target.project.is_some() { INFO_FILES[0] } else { INFO_FILE };
+        std::fs::write(target.path.join(name), info.xml()).map_err(|e| format!("{}: {e}", target.path.display()))?;
+    }
+    if let Some(p) = &target.project {
+        let had: Vec<&PathBuf> = origins.values().collect();
+        let added: Vec<PathBuf> = changes.written.iter().filter(|w| !had.contains(w)).cloned().collect();
+        p.update(&added, &changes.deleted)?;
     }
     Ok(changes)
 }
@@ -822,7 +857,7 @@ mod tests {
         assert_eq!(file_stem("", "x."), "x_");
         let table = FileKind::Object(ObjectType::Table);
         let keys = vec![(table, "a".into(), "b.c".into()), (table, "a.b".into(), "c".into())];
-        let paths = assign_paths(&keys, &info, &HashMap::new());
+        let paths = assign_paths(&keys, &info, &HashMap::new(), None);
         assert_ne!(paths[&keys[0]], paths[&keys[1]]);
         assert!(paths[&keys[1]].to_string_lossy().ends_with("a.b.c1.sql"));
     }
