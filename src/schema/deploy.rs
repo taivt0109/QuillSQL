@@ -23,6 +23,7 @@ use crate::catalog::*;
 use crate::db::{literal, quote};
 
 mod objects;
+mod unbind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Severity {
@@ -105,6 +106,8 @@ enum Phase {
     /// Views, functions, procedures, tables, Service Broker objects and security policies,
     /// dependants first.
     DropObjects,
+    /// The first rebuild of tables that use a re-created CLR type or partition scheme.
+    UnbindRebuild,
     DropSequences,
     /// Rules, then defaults (CREATE RULE / CREATE DEFAULT objects).
     DropBindables,
@@ -194,7 +197,9 @@ pub fn generate(
     settings: &ScriptSettings,
 ) -> Result<DeploymentScript, String> {
     opts.validate()?;
+    let prepared = unbind::prepare(comparison, source, target, opts);
     let mut p = Planner::new(comparison, source, target, opts, mappings, settings);
+    p.prepared = &prepared;
     p.plan();
     Ok(p.emit())
 }
@@ -246,6 +251,7 @@ struct Planner<'a> {
     table_filegroups: BTreeSet<String>,
     object_filegroups: BTreeSet<String>,
     objects: objects::State,
+    prepared: &'a unbind::Prepared,
 }
 
 impl<'a> Planner<'a> {
@@ -299,6 +305,7 @@ impl<'a> Planner<'a> {
             table_filegroups: BTreeSet::new(),
             object_filegroups: BTreeSet::new(),
             objects: objects::State::default(),
+            prepared: &unbind::NOTHING,
         }
     }
 
@@ -373,6 +380,7 @@ impl<'a> Planner<'a> {
     fn plan(&mut self) {
         let selected = self.selected();
         self.ddl_triggers();
+        self.unbind_by_rebuild();
         for d in &selected {
             match d.object_type {
                 ObjectType::Table => self.table(d),
@@ -823,6 +831,7 @@ impl<'a> Planner<'a> {
         match (s, t) {
             (Some(s), None) => self.create_table(s),
             (None, Some(t)) => self.drop_table(t),
+            (Some(s), Some(_)) if let Some(copy) = self.unbound_copy(&tn) => self.rebuild_from_copy(s, copy),
             (Some(s), Some(t)) => self.alter_table(s, t),
             _ => {}
         }
