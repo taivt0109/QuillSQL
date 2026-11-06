@@ -10,7 +10,8 @@ use crate::catalog::Database;
 use crate::data::compare::{self, DataComparison, TableResult};
 use crate::data::mapping::{DataMappings, TableOverride, TablePair};
 use crate::data::store::{self, RowKind};
-use crate::data::{DataOpt, DataOptions};
+use crate::data::{DataOpt, DataOptions, sync};
+use crate::schema::deploy;
 use crate::db::ConnectionSpec;
 
 const ACTIONS: [Switch; 9] = [
@@ -68,7 +69,7 @@ const ACTIONS: [Switch; 9] = [
 ];
 
 fn switches() -> Vec<Switch> {
-    common::GENERAL.into_iter().chain(common::SOURCE1).chain(common::SOURCE2).chain(ACTIONS).collect()
+    common::GENERAL.into_iter().chain(common::SOURCE1).chain(common::SOURCE2).chain(ACTIONS).chain(common::DEPLOY).collect()
 }
 
 const SUMMARY: &str = "Compares the data of two databases table by table and deploys the differences.";
@@ -253,14 +254,44 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     if args.has("assertidentical") {
         return Ok(if identical && failed.is_empty() { exit::SUCCESS } else { exit::NOT_IDENTICAL });
     }
-    if !failed.is_empty() {
-        return Ok(exit::EXECUTION_FAILED);
-    }
-    if identical && !rules.kinds[RowKind::Identical as usize] {
+    if identical && failed.is_empty() && !rules.kinds[RowKind::Identical as usize] {
         if !quiet {
             println!("The data is identical.");
         }
         return Ok(exit::IDENTICAL);
+    }
+    if args.has("scriptfile") || args.has("synchronize") {
+        let settings = sync::SyncSettings {
+            source: format!("{}.{}", spec1.server, db1.name),
+            target: format!("{}.{}", spec2.server, db2.name),
+            target_database: db2.name.clone(),
+            transaction_isolation_level: args.get("transactionIsolationLevel").unwrap_or("SERIALIZABLE").to_ascii_uppercase(),
+            kinds: rules.kinds,
+        };
+        let script = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        common::write_script(args, &script)?;
+        common::report_warnings(args, &script);
+        common::check_warnings(args, &script)?;
+        if args.has("synchronize") {
+            if script.is_empty() {
+                if !quiet {
+                    println!("Nothing to deploy.");
+                }
+            } else {
+                let ran = deploy::execute(&spec2, &script, |i, n| {
+                    if verbose {
+                        eprintln!("Running batch {} of {n}", i + 1);
+                    }
+                })
+                .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
+                if !quiet {
+                    println!("Deployed the data of {} to {} ({ran} batches).", db1.name, spec2.describe());
+                }
+            }
+        }
+    }
+    if !failed.is_empty() {
+        return Ok(exit::EXECUTION_FAILED);
     }
     Ok(exit::SUCCESS)
 }

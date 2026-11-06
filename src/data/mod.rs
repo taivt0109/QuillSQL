@@ -5,6 +5,7 @@ pub mod compare;
 pub mod mapping;
 pub mod options;
 pub mod store;
+pub mod sync;
 pub mod value;
 
 pub use options::{DataOpt, DataOptions};
