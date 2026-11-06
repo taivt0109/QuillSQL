@@ -5,7 +5,7 @@ use std::path::Path;
 use regex::{Regex, RegexBuilder};
 
 use super::common::{self, Source};
-use crate::args::{self, ArgError, Args, Switch, exit};
+use crate::args::{ArgError, Args, Switch, exit};
 use crate::catalog::Database;
 use crate::data::compare::{self, DataComparison, TableResult};
 use crate::data::mapping::{DataMappings, TableOverride, TablePair};
@@ -76,18 +76,16 @@ const SUMMARY: &str = "Compares the data of two databases table by table and dep
 
 pub fn run(argv: &[String]) -> u8 {
     let switches = switches();
-    let args = match args::parse(&switches, argv) {
-        Ok(a) => a,
-        Err(e) => return common::fail(e),
+    let rules = common::shared_rules();
+    let cli = common::Cli {
+        command: "data",
+        product: "QuillSQL Data Compare Command Line",
+        summary: SUMMARY,
+        switches: &switches,
+        rules: &rules,
+        require_one_of: &["auth", "database1", "backup1", "project", "scripts1", "sourcecontrol1"],
     };
-    if args.has("help") || argv.is_empty() {
-        print!("{}", args::usage("data", SUMMARY, &switches));
-        return exit::SUCCESS;
-    }
-    match execute(&args) {
-        Ok(code) => code,
-        Err(e) => common::fail(e),
-    }
+    common::run(&cli, argv, execute)
 }
 
 fn regex(p: &str) -> Result<Regex, ArgError> {
