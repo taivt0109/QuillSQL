@@ -91,6 +91,9 @@ fn makescripts_reads_back_identical() {
         assert!(f.messages.is_empty(), "{:?}", f.messages);
         assert_identical(&f.database, &live, &opts, name);
         assert_identical(&live, &f.database, &opts.clone().without(Opt::IgnoreWhiteSpace), name);
+        // A SQL Compare snapshot of the database reads back the same.
+        let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+        assert_identical(&snp, &live, &opts, &format!("{name} snapshot"));
         // DDL triggers are not compared; they still come back.
         let ddl = |d: &Database| d.ddl_triggers.iter().map(|t| (t.name.clone(), t.disabled)).collect::<Vec<_>>();
         assert_eq!(ddl(&f.database), ddl(&live), "{name}");

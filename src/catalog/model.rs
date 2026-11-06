@@ -701,6 +701,10 @@ pub struct Principal {
     /// Roles this principal is a member of (fixed roles included).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub member_of: Vec<String>,
+    /// A user without the CONNECT permission CREATE USER gives (revoked). DENY CONNECT and
+    /// GRANT CONNECT WITH GRANT OPTION are kept as permissions.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_connect: bool,
 }
 
 impl Principal {
