@@ -207,10 +207,16 @@ fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
 fn execute(args: &Args) -> Result<u8, ArgError> {
     let spec1 = live(common::source(args, 1)?.ok_or_else(|| ArgError::new(exit::USAGE, "give database 1: /server1 and /database1"))?, 1)?;
     let spec2 = live(common::source(args, 2)?.ok_or_else(|| ArgError::new(exit::USAGE, "give database 2: /server2 and /database2"))?, 2)?;
-    let mut options = match args.get("options") {
-        Some(list) => DataOptions::parse(list).map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?,
+    let project = common::project(args)?;
+    // As in SQL Data Compare, /options add to the project's options.
+    let mut options = match &project {
+        Some(p) => DataOptions::parse(&p.options.join(",")).map_err(|e| ArgError::new(exit::DATA_ERROR, e))?,
         None => DataOptions::default_set(),
     };
+    if let Some(list) = args.get("options") {
+        let extra = DataOptions::parse(list).map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?;
+        options = if project.is_some() { extra.iter().fold(options, |o, x| o.with(x)) } else { extra };
+    }
     let rules = Rules::new(args)?;
     if rules.kinds[RowKind::Identical as usize] {
         options = options.with(DataOpt::IncludeIdenticalRecords);
@@ -228,7 +234,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     };
     let db1 = read(&spec1)?;
     let db2 = read(&spec2)?;
-    let user = overrides(args, &db1)?;
+    let mut user = overrides(args, &db1)?;
+    if let Some(p) = &project {
+        for t in &p.data_mappings.tables {
+            if !user.tables.iter().any(|u| u.source == t.source) {
+                user.tables.push(t.clone());
+            }
+        }
+    }
     let verbose = args.has("verbose");
     let result = compare::compare(&spec1, &spec2, &db1, &db2, &options, &user, |p| rules.includes(p), parallel, |p, r| {
         if verbose {
@@ -267,6 +280,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             target_database: db2.name.clone(),
             transaction_isolation_level: args.get("transactionIsolationLevel").unwrap_or("SERIALIZABLE").to_ascii_uppercase(),
             kinds: rules.kinds,
+            tables: None,
         };
         let script = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
         common::write_script(args, &script)?;

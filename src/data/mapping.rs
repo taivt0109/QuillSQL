@@ -233,7 +233,14 @@ fn pair(
         is_view: view,
     };
     let index_of = |name: &str, p: &TablePair| p.columns.iter().position(|c| c.source.eq_ignore_ascii_case(name));
-    if let Some(custom) = over.map(|t| &t.key).filter(|k| !k.is_empty()) {
+    // `index:<name>` picks an index of database 1 by name.
+    let by_index: Option<Vec<String>> = over
+        .and_then(|t| t.key.first())
+        .and_then(|k| k.strip_prefix("index:"))
+        .and_then(|name| i1.iter().find(|i| i.name.eq_ignore_ascii_case(name)))
+        .map(|ix| ix.columns.iter().map(|c| c.name.clone()).collect());
+    let custom_key = by_index.as_ref().or(over.map(|t| &t.key)).filter(|k| !k.is_empty());
+    if let Some(custom) = custom_key {
         p.key = custom.iter().filter_map(|k| index_of(k, &p)).collect();
         p.key_name = Some("custom".into());
         if p.key.len() != custom.len() {

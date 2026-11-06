@@ -22,6 +22,8 @@ pub struct SyncSettings {
     pub transaction_isolation_level: String,
     /// Row kinds to deploy: Different → UPDATE, OnlyIn1 → INSERT, OnlyIn2 → DELETE.
     pub kinds: [bool; 4],
+    /// Tables (source names) to deploy; `None` = every compared table.
+    pub tables: Option<Vec<ObjectName>>,
 }
 
 /// Statements per batch; the transaction spans batches.
@@ -38,6 +40,7 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
         .tables
         .iter()
         .filter(|t| t.error.is_none() && !t.pair.is_view)
+        .filter(|t| settings.tables.as_ref().is_none_or(|only| only.contains(&t.pair.source)))
         .filter(|t| {
             (settings.kinds[RowKind::Different as usize] && t.count(RowKind::Different) > 0)
                 || (settings.kinds[RowKind::OnlyIn1 as usize] && t.count(RowKind::OnlyIn1) > 0)
