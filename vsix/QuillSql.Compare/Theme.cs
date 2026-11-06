@@ -14,7 +14,7 @@ namespace QuillSql.Compare
     /// </summary>
     public static class CompareTheme
     {
-        public static Brush Background, Panel, Foreground, Muted, Border, Accent, AccentText, Added, Removed, Changed, High, Medium, Success;
+        public static Brush Background, Panel, Foreground, Muted, Border, Accent, AccentText, Added, Removed, Changed, ChangedStrong, High, Medium, Success;
         public static FontFamily Code = new FontFamily("Cascadia Mono, Consolas");
         public static FontFamily Icons = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
         public static FontFamily Font = new FontFamily("Segoe UI");
@@ -127,6 +127,7 @@ namespace QuillSql.Compare
             Added = set("Q.Added", pick(0xFFDFF6DD, 0xFF2F3A1F));
             Removed = set("Q.Removed", pick(0xFFFDE7E9, 0xFF442726));
             Changed = set("Q.Changed", pick(0xFFFFF4CE, 0xFF433519));
+            ChangedStrong = set("Q.ChangedStrong", pick(0xFFFFD86B, 0xFF7A5C14));
             High = set("Q.Critical", pick(0xFFC42B1C, 0xFFFF99A4));
             Medium = set("Q.Caution", pick(0xFF9D5D00, 0xFFFCE100));
             Success = set("Q.Success", pick(0xFF0F7B0F, 0xFF6CCB5F));

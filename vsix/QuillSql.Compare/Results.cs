@@ -17,14 +17,18 @@ namespace QuillSql.Compare
         public sealed class Row : INotifyPropertyChanged
         {
             private bool _selected;
+            private string _group;
             public int Index { get; set; }
             public string Type { get; set; }
             public string Name { get; set; }
             public string Status { get; set; }
+            /// <summary>Different, only in source, only in target, identical: the order of the groups.</summary>
+            public int Rank { get; set; }
             public string Marker { get; set; }
             public Brush MarkerFill { get; set; }
             public Brush MarkerInk { get; set; }
             public string Kind { get; set; }
+            public string Tip { get; set; }
             public JsonObject Data { get; set; }
 
             public bool Selected
@@ -33,53 +37,83 @@ namespace QuillSql.Compare
                 set { _selected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Selected))); }
             }
 
+            /// <summary>The group the row is shown in, for the current Group by choice.</summary>
+            public string Group
+            {
+                get => _group;
+                set { _group = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Group))); }
+            }
+
             public event PropertyChangedEventHandler PropertyChanged;
         }
 
+        public enum Grouping { Difference, ObjectType, None }
+
         private readonly CompareSession _session;
         private readonly ObservableCollection<Row> _rows = new ObservableCollection<Row>();
-        private readonly ICollectionView _view;
+        private readonly ListCollectionView _view;
         private readonly DataGrid _grid;
         private readonly RichTextBox _left = SideBox(), _right = SideBox();
-        private readonly TextBlock _leftTitle, _rightTitle, _summary;
+        private readonly TextBlock _leftTitle, _rightTitle, _summary, _diffCount;
         private readonly TreeView _properties = new TreeView();
         private readonly CheckBox _showIdentical;
-        private readonly TextBox _filter = Ui.SearchBox("Filter objects", 260);
+        private readonly TextBox _find = Ui.SearchBox("Group objects as you type", 240);
+        private readonly ComboBox _groupBy = new ComboBox { Width = 170, VerticalAlignment = VerticalAlignment.Center };
+        private readonly HashSet<string> _excludedTypes = new HashSet<string>();
+        private readonly Button _filterButton;
+        private readonly Border _filterPane;
+        private readonly StackPanel _typeList = new StackPanel();
+        private readonly string _sourceName, _targetName;
+        private readonly List<int> _diffLines = new List<int>();
+        private int _diffAt = -1;
+        private bool _ignoreTypeEvents;
 
         public long Session { get; }
+
+        /// <summary>The comparison's suggested table renames; raised when the user asks to review them.</summary>
+        public event Action<List<JsonObject>> ReviewRenames;
 
         public SchemaResults(CompareSession session, JsonObject result)
         {
             _session = session;
             Session = result.Long("session");
+            _sourceName = result.Str("sourceName");
+            _targetName = result.Str("targetName");
             foreach (var d in result.List("differences").OfType<JsonObject>())
             {
                 var kind = d.Str("kind");
-                _rows.Add(new Row
+                var row = new Row
                 {
                     Index = (int)d.Long("index"),
                     Type = d.Str("type"),
                     Name = (string.IsNullOrEmpty(d.Str("schema")) ? "" : "[" + d.Str("schema") + "].") + "[" + d.Str("name") + "]" + (d.Str("targetName") != null ? " → " + d.Str("targetName") : ""),
                     Kind = kind,
+                    Rank = kind == "Different" ? 0 : kind == "OnlyIn1" ? 1 : kind == "OnlyIn2" ? 2 : 3,
                     // What deployment does to the target: create, change or drop.
                     Marker = kind == "Equal" ? "=" : kind == "Different" ? "~" : kind == "OnlyIn1" ? "+" : "−",
                     MarkerFill = kind == "Equal" ? Brushes.Transparent : kind == "Different" ? CompareTheme.Changed : kind == "OnlyIn1" ? CompareTheme.Added : CompareTheme.Removed,
                     MarkerInk = kind == "Equal" ? CompareTheme.Muted : kind == "Different" ? CompareTheme.Medium : kind == "OnlyIn1" ? CompareTheme.Success : CompareTheme.High,
-                    Status = kind == "Equal" ? "Identical" : kind == "Different" ? (d.Bool("trivial") ? "Different (extended properties only)" : "Different") : kind == "OnlyIn1" ? "Only in " + result.Str("sourceName") : "Only in " + result.Str("targetName"),
+                    Status = kind == "Equal" ? "identical" : kind == "Different" ? "in both, but different" : kind == "OnlyIn1" ? "only in " + _sourceName : "only in " + _targetName,
                     Selected = d.Bool("selected"),
                     Data = d,
-                });
+                };
+                var action = kind == "OnlyIn1" ? "created in" : kind == "OnlyIn2" ? "dropped from" : "modified in";
+                row.Tip = kind == "Equal" ? row.Name + " is identical in both databases."
+                    : row.Name + ": this object will be " + action + " the target database" + (d.Bool("trivial") ? " (extended properties only)" : "") + ".";
+                _rows.Add(row);
             }
-            _view = CollectionViewSource.GetDefaultView(_rows);
-            _view.GroupDescriptions.Add(new PropertyGroupDescription("Status"));
+            _view = (ListCollectionView)CollectionViewSource.GetDefaultView(_rows);
+            _view.SortDescriptions.Add(new SortDescription("Rank", ListSortDirection.Ascending));
+            _view.SortDescriptions.Add(new SortDescription("Type", ListSortDirection.Ascending));
+            _view.SortDescriptions.Add(new SortDescription("Name", ListSortDirection.Ascending));
             _showIdentical = Ui.Check("Show identical objects", false, _ => Refresh());
             _view.Filter = o =>
             {
                 var r = (Row)o;
-                if (r.Kind == "Equal" && _showIdentical.IsChecked != true) return false;
-                return string.IsNullOrWhiteSpace(_filter.Text) || (r.Name + " " + r.Type).IndexOf(_filter.Text, StringComparison.OrdinalIgnoreCase) >= 0;
+                if (_excludedTypes.Contains(r.Type)) return false;
+                return r.Kind != "Equal" || _showIdentical.IsChecked == true;
             };
-            _filter.TextChanged += (s, e) => Refresh();
+            _find.TextChanged += (s, e) => { _groupBy.IsEnabled = _find.Text.Length == 0; Regroup(); };
 
             _grid = new DataGrid
             {
@@ -89,33 +123,24 @@ namespace QuillSql.Compare
                 IsReadOnly = false,
                 SelectionMode = DataGridSelectionMode.Single,
             };
-            _grid.Columns.Add(Ui.CheckColumn("Deploy", "Selected", 64));
+            var deployColumn = Ui.CheckColumn("Deploy", "Selected", 64);
+            deployColumn.Header = HeaderCheck();
+            _grid.Columns.Add(deployColumn);
             _grid.Columns.Add(new DataGridTemplateColumn { Header = "", Width = 40, CellTemplate = MarkerTemplate() });
             _grid.Columns.Add(new DataGridTextColumn { Header = "Object", Binding = new Binding("Name"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
             _grid.Columns.Add(new DataGridTextColumn { Header = "Type", Binding = new Binding("Type"), IsReadOnly = true, Width = 150 });
-            var groupStyle = new GroupStyle();
-            var header = new FrameworkElementFactory(typeof(StackPanel));
-            header.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
-            header.SetValue(FrameworkElement.MarginProperty, new Thickness(10, 14, 0, 6));
-            var groupName = new FrameworkElementFactory(typeof(TextBlock));
-            groupName.SetBinding(TextBlock.TextProperty, new Binding("Name"));
-            groupName.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
-            var groupCount = new FrameworkElementFactory(typeof(TextBlock));
-            groupCount.SetBinding(TextBlock.TextProperty, new Binding("ItemCount"));
-            groupCount.SetValue(TextBlock.ForegroundProperty, CompareTheme.Muted);
-            groupCount.SetValue(FrameworkElement.MarginProperty, new Thickness(8, 0, 0, 0));
-            header.AppendChild(groupName);
-            header.AppendChild(groupCount);
-            groupStyle.HeaderTemplate = new DataTemplate { VisualTree = header };
-            _grid.GroupStyle.Add(groupStyle);
+            var rowStyle = new Style(typeof(DataGridRow), CompareTheme.Style(typeof(DataGridRow)));
+            rowStyle.Setters.Add(new Setter(ToolTipProperty, new Binding("Tip")));
+            _grid.RowStyle = rowStyle;
+            _grid.GroupStyle.Add(GroupHeader());
             _grid.SelectionChanged += async (s, e) => await ShowSelected();
 
             var counts = _rows.GroupBy(r => r.Kind).ToDictionary(g => g.Key, g => g.Count());
             int n(string k) => counts.TryGetValue(k, out var c) ? c : 0;
             var badges = Ui.Row(
                 Ui.Badge(n("Different") + " different", CompareTheme.Changed, CompareTheme.Medium),
-                Ui.Badge(n("OnlyIn1") + " only in " + result.Str("sourceName"), CompareTheme.Added, CompareTheme.Success),
-                Ui.Badge(n("OnlyIn2") + " only in " + result.Str("targetName"), CompareTheme.Removed, CompareTheme.High),
+                Ui.Badge(n("OnlyIn1") + " only in " + _sourceName, CompareTheme.Added, CompareTheme.Success),
+                Ui.Badge(n("OnlyIn2") + " only in " + _targetName, CompareTheme.Removed, CompareTheme.High),
                 Ui.Badge(n("Equal") + " identical", (Brush)CompareTheme.Resources["Q.Subtle"], CompareTheme.Muted));
             _summary = Ui.Text("", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
             var autoMapped = result.List("autoMapped").OfType<JsonObject>().ToList();
@@ -124,30 +149,66 @@ namespace QuillSql.Compare
                 _summary.Text = "Columns paired by similarity: " + string.Join(", ", autoMapped.Select(a => a.Str("table") + ".[" + a.Str("source") + "] → [" + a.Str("target") + "]"));
                 _summary.Margin = new Thickness(0, 6, 0, 0);
             }
-            var selectAll = Ui.Command(Glyph.Check, "Select all", () => { foreach (var r in _rows.Where(r => r.Kind != "Equal")) r.Selected = true; });
-            var selectNone = Ui.Command(Glyph.Delete, "Select none", () => { foreach (var r in _rows) r.Selected = false; });
-            var tools = Ui.Row(_showIdentical, selectAll, selectNone, _filter);
+            foreach (var label in new[] { "Type of difference", "Type of object", "No groups" }) _groupBy.Items.Add(label);
+            _groupBy.SelectedIndex = 0;
+            _groupBy.ToolTip = "Change how the database objects are presented";
+            _groupBy.SelectionChanged += (s, e) => Regroup();
+            _filterButton = Ui.Command(Glyph.Filter, "0 objects filtered", ToggleFilterPane, "Apply a custom filter to the results");
+            var groupLabel = Ui.Text("Group by", brush: CompareTheme.Muted);
+            groupLabel.Margin = new Thickness(12, 0, 8, 0);
+            var tools = Ui.Row(_showIdentical, _filterButton, groupLabel, _groupBy, new Border { Width = 8 }, _find);
             var toolbar = new DockPanel();
             DockPanel.SetDock(tools, Dock.Right);
             toolbar.Children.Add(tools);
             toolbar.Children.Add(badges);
             var top = Ui.Column(toolbar, _summary);
+            var renames = result.List("renames").OfType<JsonObject>().ToList();
+            if (renames.Count > 0)
+            {
+                var text = Ui.Text(Ui.Plural(renames.Count, "table looks", "tables look") + " renamed: " + string.Join(", ", renames.Take(3).Select(r => QName(r.Obj("source")) + " → " + QName(r.Obj("target")))) + (renames.Count > 3 ? ", …" : "")
+                    + ". Map them to compare them as one table.", wrap: TextWrapping.Wrap);
+                var review = Ui.Button("Review renames…", () => ReviewRenames?.Invoke(renames), minWidth: 120);
+                var bar = new DockPanel();
+                var icon = Ui.Icon(Glyph.Info, 15, CompareTheme.Accent);
+                icon.Margin = new Thickness(0, 0, 10, 0);
+                DockPanel.SetDock(icon, Dock.Left);
+                DockPanel.SetDock(review, Dock.Right);
+                bar.Children.Add(icon);
+                bar.Children.Add(review);
+                bar.Children.Add(text);
+                var card = Ui.Card(bar, 10);
+                card.Margin = new Thickness(0, 8, 0, 0);
+                top.Children.Add(card);
+            }
             top.Margin = new Thickness(28, 6, 28, 10);
 
-            _leftTitle = Ui.Text("Source: " + result.Str("sourceName"), bold: true);
-            _rightTitle = Ui.Text("Target: " + result.Str("targetName"), bold: true);
+            _leftTitle = Ui.Text("Source: " + _sourceName, bold: true);
+            _rightTitle = Ui.Text("Target: " + _targetName, bold: true);
             var sides = new Grid();
             sides.ColumnDefinitions.Add(new ColumnDefinition());
             sides.ColumnDefinitions.Add(new ColumnDefinition());
             sides.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             sides.RowDefinitions.Add(new RowDefinition());
-            Grid.SetColumn(_rightTitle, 1);
+            _diffCount = Ui.Text("", brush: CompareTheme.Muted);
+            var nav = Ui.Row(
+                Ui.IconButton(Glyph.Up, "Go to the previous line containing a difference", () => GoToDifference(-1)),
+                Ui.IconButton(Glyph.Down, "Go to the next line containing a difference", () => GoToDifference(1)),
+                _diffCount);
+            nav.Margin = new Thickness(0, 2, 8, 0);
+            nav.HorizontalAlignment = HorizontalAlignment.Right;
+            var leftHead = new DockPanel();
+            leftHead.Children.Add(_leftTitle);
+            var rightHead = new DockPanel();
+            DockPanel.SetDock(nav, Dock.Right);
+            rightHead.Children.Add(nav);
+            rightHead.Children.Add(_rightTitle);
+            Grid.SetColumn(rightHead, 1);
             Grid.SetRow(_left, 1);
             Grid.SetRow(_right, 1);
             Grid.SetColumn(_right, 1);
             _leftTitle.Margin = _rightTitle.Margin = new Thickness(16, 10, 16, 4);
-            sides.Children.Add(_leftTitle);
-            sides.Children.Add(_rightTitle);
+            sides.Children.Add(leftHead);
+            sides.Children.Add(rightHead);
             sides.Children.Add(_left);
             sides.Children.Add(_right);
             SyncScroll(_left, _right);
@@ -174,9 +235,14 @@ namespace QuillSql.Compare
             var listArea = new Grid();
             listArea.Children.Add(_grid);
             listArea.Children.Add(_empty);
-            var gridCard = Ui.Card(listArea, 4);
+            _filterPane = FilterPane();
+            var withFilter = new DockPanel();
+            DockPanel.SetDock(_filterPane, Dock.Left);
+            withFilter.Children.Add(_filterPane);
+            withFilter.Children.Add(listArea);
+            var gridCard = Ui.Card(withFilter, 4);
             _identical = n("Equal");
-            Refresh();
+            Regroup();
             var bottomCard = Ui.Card(bottomTabs, 0);
             Grid.SetRow(splitter, 1);
             Grid.SetRow(bottomCard, 2);
@@ -193,6 +259,41 @@ namespace QuillSql.Compare
         private readonly TextBlock _emptyText;
         private readonly int _identical;
 
+        private static string QName(JsonObject n) => n == null ? "" : "[" + n.Str("schema") + "].[" + n.Str("name") + "]";
+
+        /// <summary>Groups by the Group by choice, or, while the find box has text, by whether objects match it.</summary>
+        private void Regroup()
+        {
+            var find = _find.Text.Trim();
+            var mode = (Grouping)Math.Max(0, _groupBy.SelectedIndex);
+            foreach (var r in _rows)
+            {
+                if (find.Length > 0)
+                {
+                    var match = (r.Name + " " + r.Data.Str("schema")).IndexOf(find, StringComparison.OrdinalIgnoreCase) >= 0;
+                    r.Group = (match ? "0" : "1") + find;
+                }
+                else
+                {
+                    r.Group = mode == Grouping.Difference ? r.Rank + r.Status : mode == Grouping.ObjectType ? r.Type : null;
+                }
+            }
+            using (_view.DeferRefresh())
+            {
+                _view.GroupDescriptions.Clear();
+                _view.SortDescriptions.Clear();
+                if (find.Length > 0 || mode != Grouping.None)
+                {
+                    _view.GroupDescriptions.Add(new PropertyGroupDescription("Group"));
+                    _view.SortDescriptions.Add(new SortDescription("Group", ListSortDirection.Ascending));
+                }
+                _view.SortDescriptions.Add(new SortDescription("Rank", ListSortDirection.Ascending));
+                _view.SortDescriptions.Add(new SortDescription("Type", ListSortDirection.Ascending));
+                _view.SortDescriptions.Add(new SortDescription("Name", ListSortDirection.Ascending));
+            }
+            Refresh();
+        }
+
         private void Refresh()
         {
             _view.Refresh();
@@ -200,16 +301,153 @@ namespace QuillSql.Compare
             var empty = _view.IsEmpty;
             _grid.Visibility = empty ? Visibility.Hidden : Visibility.Visible;
             _empty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
-            ((TextBlock)_empty.Children[1]).Text = differences == 0 ? "The schemas are identical" : "No objects match the filter";
-            _emptyText.Text = differences == 0 ? Ui.Plural(_identical, "object compared", "objects compared") + "; nothing to deploy." : "Clear the filter or show identical objects.";
+            ((TextBlock)_empty.Children[1]).Text = differences == 0 ? "The schemas are identical" : "No objects are shown";
+            _emptyText.Text = differences == 0 ? Ui.Plural(_identical, "object compared", "objects compared") + "; nothing to deploy." : "Show identical objects or include more object types in the filter.";
+            var filtered = _rows.Count(r => _excludedTypes.Contains(r.Type) && (r.Kind != "Equal" || _showIdentical.IsChecked == true));
+            ((TextBlock)((StackPanel)_filterButton.Content).Children[1]).Text = Ui.Plural(filtered, "object filtered", "objects filtered");
+            UpdateHeaderCheck();
         }
 
-        /// <summary>Indexes of the differences ticked for deployment.</summary>
-        public List<object> Selected => _rows.Where(r => r.Selected && r.Kind != "Equal").Select(r => (object)r.Index).ToList();
+        // ---- Group headers: a bold count, then what the group holds ----
+
+        private GroupStyle GroupHeader()
+        {
+            var groupStyle = new GroupStyle();
+            var header = new FrameworkElementFactory(typeof(StackPanel));
+            header.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
+            header.SetValue(FrameworkElement.MarginProperty, new Thickness(10, 14, 0, 6));
+            var groupCount = new FrameworkElementFactory(typeof(TextBlock));
+            groupCount.SetBinding(TextBlock.TextProperty, new Binding("ItemCount"));
+            groupCount.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
+            var groupName = new FrameworkElementFactory(typeof(TextBlock));
+            groupName.SetBinding(TextBlock.TextProperty, new Binding { Converter = new GroupLabel(this) });
+            groupName.SetValue(TextBlock.ForegroundProperty, CompareTheme.Muted);
+            groupName.SetValue(FrameworkElement.MarginProperty, new Thickness(6, 0, 0, 0));
+            header.AppendChild(groupCount);
+            header.AppendChild(groupName);
+            groupStyle.HeaderTemplate = new DataTemplate { VisualTree = header };
+            return groupStyle;
+        }
+
+        private sealed class GroupLabel : IValueConverter
+        {
+            private readonly SchemaResults _owner;
+            public GroupLabel(SchemaResults owner) => _owner = owner;
+
+            public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+            {
+                if (!(value is CollectionViewGroup g)) return "";
+                var key = g.Name as string ?? "";
+                var one = g.ItemCount == 1;
+                if (_owner._find.Text.Trim().Length > 0)
+                {
+                    var term = "'" + key.Substring(1) + "'";
+                    return key.StartsWith("0", StringComparison.Ordinal) ? (one ? "object matches " : "objects match ") + term : (one ? "object does not match " : "objects do not match ") + term;
+                }
+                if ((Grouping)_owner._groupBy.SelectedIndex == Grouping.Difference) return key.Substring(1);
+                var type = key.ToLowerInvariant();
+                return one ? type : type.EndsWith("y", StringComparison.Ordinal) ? type.Substring(0, type.Length - 1) + "ies" : type + "s";
+            }
+
+            public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => Binding.DoNothing;
+        }
+
+        // ---- Deploy check boxes ----
+
+        private CheckBox _headerCheck;
+
+        /// <summary>The Deploy column header: ticked when every shown difference is, mixed when some are.</summary>
+        private CheckBox HeaderCheck()
+        {
+            _headerCheck = new CheckBox { ToolTip = "Include in deployment", IsThreeState = false, HorizontalAlignment = HorizontalAlignment.Center };
+            _headerCheck.Click += (s, e) =>
+            {
+                var shown = Shown().Where(r => r.Kind != "Equal").ToList();
+                var all = shown.Count > 0 && shown.All(r => r.Selected);
+                foreach (var r in shown) r.Selected = !all;
+                UpdateHeaderCheck();
+            };
+            return _headerCheck;
+        }
+
+        private void UpdateHeaderCheck()
+        {
+            if (_headerCheck == null) return;
+            var shown = Shown().Where(r => r.Kind != "Equal").ToList();
+            _headerCheck.IsEnabled = shown.Count > 0;
+            _headerCheck.IsChecked = shown.Count > 0 && shown.All(r => r.Selected) ? true : shown.Any(r => r.Selected) ? (bool?)null : false;
+        }
+
+        private IEnumerable<Row> Shown() => _rows.Where(r => !_excludedTypes.Contains(r.Type));
+
+        public void SelectAll(bool on)
+        {
+            foreach (var r in Shown().Where(r => r.Kind != "Equal")) r.Selected = on;
+            UpdateHeaderCheck();
+        }
+
+        /// <summary>Indexes of the differences ticked for deployment; objects the filter hides are not deployed.</summary>
+        public List<object> Selected => Shown().Where(r => r.Selected && r.Kind != "Equal").Select(r => (object)r.Index).ToList();
+
+        public int DifferenceCount => _rows.Count(r => r.Kind != "Equal");
+
+        public JsonObject Difference(int index) => _rows.FirstOrDefault(r => r.Index == index)?.Data;
 
         /// <summary>Objects unticked, for the project file.</summary>
         public List<object> Deselected => _rows.Where(r => !r.Selected && r.Kind != "Equal")
             .Select(r => (object)new JsonObject { ["type"] = r.Type, ["schema"] = r.Data.Str("schema"), ["name"] = r.Data.Str("name") }).ToList();
+
+        // ---- Filter pane: object types ----
+
+        private Border FilterPane()
+        {
+            var title = Ui.Text("Filter", 15, bold: true);
+            title.Margin = new Thickness(0, 0, 0, 8);
+            var all = new CheckBox { Content = "All object types included", IsChecked = true, Margin = new Thickness(0, 2, 0, 6), FontWeight = FontWeights.SemiBold };
+            all.Click += (s, e) =>
+            {
+                var on = all.IsChecked != false;
+                _excludedTypes.Clear();
+                if (!on) foreach (var t in _rows.Select(r => r.Type).Distinct()) _excludedTypes.Add(t);
+                _ignoreTypeEvents = true;
+                foreach (CheckBox b in _typeList.Children) b.IsChecked = on;
+                _ignoreTypeEvents = false;
+                all.IsChecked = on;
+                Refresh();
+            };
+            foreach (var type in _rows.Select(r => r.Type).Distinct().OrderBy(t => t))
+            {
+                var box = new CheckBox { Content = type, IsChecked = true, Margin = new Thickness(0, 2, 0, 2) };
+                box.Checked += (s, e) => TypeChanged(all, type, true);
+                box.Unchecked += (s, e) => TypeChanged(all, type, false);
+                _typeList.Children.Add(box);
+            }
+            var note = Ui.Text("Objects the filter hides are not deployed.", 12, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            note.Margin = new Thickness(0, 10, 0, 0);
+            var pane = new Border
+            {
+                Width = 220,
+                Padding = new Thickness(12, 10, 12, 10),
+                BorderThickness = new Thickness(0, 0, 1, 0),
+                Child = new ScrollViewer { Content = Ui.Column(title, all, _typeList, note), VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
+                Visibility = Visibility.Collapsed,
+            };
+            pane.SetResourceReference(Border.BorderBrushProperty, "Q.Divider");
+            return pane;
+        }
+
+        private void TypeChanged(CheckBox all, string type, bool on)
+        {
+            if (_ignoreTypeEvents) return;
+            if (on) _excludedTypes.Remove(type);
+            else _excludedTypes.Add(type);
+            all.IsChecked = _excludedTypes.Count == 0 ? true : _excludedTypes.Count == _typeList.Children.Count ? false : (bool?)null;
+            Refresh();
+        }
+
+        private void ToggleFilterPane() => _filterPane.Visibility = _filterPane.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+
+        // ---- SQL side by side ----
 
         /// <summary>A rounded square with +, −, ~ or =, colored by what deployment does.</summary>
         private static DataTemplate MarkerTemplate()
@@ -228,6 +466,8 @@ namespace QuillSql.Compare
             box.AppendChild(mark);
             return new DataTemplate { VisualTree = box };
         }
+
+        private const double LineHeight = 18;
 
         private static RichTextBox SideBox()
         {
@@ -270,24 +510,57 @@ namespace QuillSql.Compare
             var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"));
             Fill(_left, lines, true);
             Fill(_right, lines, false);
+            // The first line of each run of differing lines, for the up and down buttons.
+            _diffLines.Clear();
+            for (var i = 0; i < lines.Count; i++)
+            {
+                if (lines[i].Kind != LineDiff.Kind.Same && (i == 0 || lines[i - 1].Kind == LineDiff.Kind.Same)) _diffLines.Add(i);
+            }
+            _diffAt = -1;
+            _diffCount.Text = row.Kind == "Different" ? Ui.Plural(_diffLines.Count, "difference", "differences") : "";
+            if (row.Kind == "Different" && _diffLines.Count > 0) GoToDifference(1);
+        }
+
+        /// <summary>Scrolls both sides to the next (1) or previous (-1) run of differing lines.</summary>
+        private void GoToDifference(int step)
+        {
+            if (_diffLines.Count == 0) return;
+            var next = _diffAt + step;
+            if (next < 0 || next >= _diffLines.Count) return;
+            _diffAt = next;
+            _left.ScrollToVerticalOffset(Math.Max(0, _diffLines[next] * LineHeight - 3 * LineHeight));
+            _diffCount.Text = (next + 1) + " of " + _diffLines.Count;
         }
 
         private static void Fill(RichTextBox box, List<LineDiff.Line> lines, bool left)
         {
             var doc = new FlowDocument { PageWidth = 4000, FontFamily = CompareTheme.Code, FontSize = 12.5, PagePadding = new Thickness(12, 4, 12, 4) };
-            var p = new Paragraph { Margin = new Thickness(0), LineHeight = 18 };
+            var p = new Paragraph { Margin = new Thickness(0), LineHeight = LineHeight, LineStackingStrategy = LineStackingStrategy.BlockLineHeight };
             var missing = (Brush)CompareTheme.Resources["Q.Subtle"];
             foreach (var line in lines)
             {
                 var text = left ? line.Left : line.Right;
-                var run = new Run((text ?? "") + "\n");
                 switch (line.Kind)
                 {
-                    case LineDiff.Kind.Changed: run.Background = CompareTheme.Changed; break;
-                    case LineDiff.Kind.OnlyLeft: run.Background = left ? CompareTheme.Added : missing; break;
-                    case LineDiff.Kind.OnlyRight: run.Background = left ? missing : CompareTheme.Removed; break;
+                    case LineDiff.Kind.Changed:
+                        // Changed lines are tinted, and what changed inside them is marked more strongly.
+                        InlineDiff.Compare(line.Left, line.Right, out var a, out var b);
+                        foreach (var piece in left ? a : b)
+                        {
+                            p.Inlines.Add(new Run(piece.Text) { Background = piece.Different ? CompareTheme.ChangedStrong : CompareTheme.Changed });
+                        }
+                        p.Inlines.Add(new Run("\n") { Background = CompareTheme.Changed });
+                        continue;
+                    case LineDiff.Kind.OnlyLeft:
+                        p.Inlines.Add(new Run((text ?? "") + "\n") { Background = left ? CompareTheme.Added : missing });
+                        continue;
+                    case LineDiff.Kind.OnlyRight:
+                        p.Inlines.Add(new Run((text ?? "") + "\n") { Background = left ? missing : CompareTheme.Removed });
+                        continue;
+                    default:
+                        p.Inlines.Add(new Run((text ?? "") + "\n"));
+                        continue;
                 }
-                p.Inlines.Add(run);
             }
             doc.Blocks.Add(p);
             box.Document = doc;
@@ -324,204 +597,6 @@ namespace QuillSql.Compare
             {
                 _properties.Items.Add(new TreeViewItem { Header = d.Str("kind") == "Equal" ? "The object is identical." : "The whole object exists on one side only." });
             }
-        }
-    }
-
-    /// <summary>Data comparison results: one row per table, and the differing rows of the selected table.</summary>
-    internal sealed class DataResults : DockPanel
-    {
-        public sealed class TableRow : INotifyPropertyChanged
-        {
-            private bool _selected = true;
-            public int Index { get; set; }
-            public string Name { get; set; }
-            public long Different { get; set; }
-            public long OnlyInSource { get; set; }
-            public long OnlyInTarget { get; set; }
-            public long Identical { get; set; }
-            public string Status { get; set; }
-            public List<string> Columns { get; set; }
-            public HashSet<int> Key { get; set; }
-
-            public bool Selected
-            {
-                get => _selected;
-                set { _selected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Selected))); }
-            }
-
-            public event PropertyChangedEventHandler PropertyChanged;
-        }
-
-        private const int PageSize = 200;
-        private readonly CompareSession _session;
-        private readonly ObservableCollection<TableRow> _tables = new ObservableCollection<TableRow>();
-        private readonly DataGrid _tableGrid;
-        private readonly TabControl _kinds = new TabControl();
-        private readonly string[] _kindNames;
-        private readonly int[] _page = new int[4];
-
-        public long Session { get; }
-
-        public DataResults(CompareSession session, JsonObject result)
-        {
-            _session = session;
-            Session = result.Long("session");
-            _kindNames = new[] { "Identical", "Different", "Only in " + result.Str("sourceName"), "Only in " + result.Str("targetName") };
-            foreach (var t in result.List("tables").OfType<JsonObject>())
-            {
-                var counts = t.List("counts").Select(c => c is double d ? (long)d : 0).ToList();
-                while (counts.Count < 4) counts.Add(0);
-                var status = t.Str("error") ?? (t.Bool("byChecksum") ? "identical (checksum)" : t.Bool("repeatedKeys") ? "key values repeat" : counts[1] + counts[2] + counts[3] == 0 ? "identical" : "");
-                _tables.Add(new TableRow
-                {
-                    Index = (int)t.Long("index"),
-                    Name = t.Str("source") + (t.Str("source") != t.Str("target") ? " → " + t.Str("target") : ""),
-                    Identical = counts[0],
-                    Different = counts[1],
-                    OnlyInSource = counts[2],
-                    OnlyInTarget = counts[3],
-                    Status = status,
-                    Columns = t.Strings("columns"),
-                    Key = new HashSet<int>(t.List("key").Select(k => k is double d ? (int)d : -1)),
-                    Selected = t.Str("error") == null && counts[1] + counts[2] + counts[3] > 0,
-                });
-            }
-            _tableGrid = new DataGrid
-            {
-                ItemsSource = _tables,
-                AutoGenerateColumns = false,
-                CanUserAddRows = false,
-                HeadersVisibility = DataGridHeadersVisibility.Column,
-                SelectionMode = DataGridSelectionMode.Single,
-            };
-            _tableGrid.Columns.Add(Ui.CheckColumn("Deploy", "Selected", 64));
-            _tableGrid.Columns.Add(new DataGridTextColumn { Header = "Table", Binding = new Binding("Name"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-            foreach (var (header, path, width) in new[] { ("Different", "Different", 100.0), (_kindNames[2], "OnlyInSource", 140.0), (_kindNames[3], "OnlyInTarget", 140.0), ("Identical", "Identical", 100.0) })
-            {
-                _tableGrid.Columns.Add(new DataGridTextColumn { Header = header, Binding = new Binding(path) { StringFormat = "N0" }, IsReadOnly = true, Width = width, ElementStyle = Ui.RightAligned() });
-            }
-            _tableGrid.Columns.Add(new DataGridTextColumn { Header = "Status", Binding = new Binding("Status"), IsReadOnly = true, Width = 200 });
-            _tableGrid.SelectionChanged += async (s, e) => { Array.Clear(_page, 0, 4); await ShowRows(); };
-            for (var k = 1; k <= 4; k++)
-            {
-                var kind = k % 4; // Different, only source, only target, identical
-                _kinds.Items.Add(new TabItem { Header = _kindNames[kind], Tag = kind });
-            }
-            _kinds.SelectionChanged += async (s, e) => { if (e.Source == _kinds) await ShowRows(); };
-
-            long total(Func<TableRow, long> f) => _tables.Sum(f);
-            var badges = Ui.Row(
-                Ui.Badge(Ui.Plural(_tables.Count, "table", "tables"), (Brush)CompareTheme.Resources["Q.Subtle"], CompareTheme.Muted),
-                Ui.Badge(total(t => t.Different).ToString("N0") + " different rows", CompareTheme.Changed, CompareTheme.Medium),
-                Ui.Badge(total(t => t.OnlyInSource).ToString("N0") + " only in " + result.Str("sourceName"), CompareTheme.Added, CompareTheme.Success),
-                Ui.Badge(total(t => t.OnlyInTarget).ToString("N0") + " only in " + result.Str("targetName"), CompareTheme.Removed, CompareTheme.High));
-            var missing = (result.Strings("onlyIn1").Count > 0 ? "Tables only in " + result.Str("sourceName") + ": " + string.Join(", ", result.Strings("onlyIn1")) + ". " : "")
-                + (result.Strings("onlyIn2").Count > 0 ? "Tables only in " + result.Str("targetName") + ": " + string.Join(", ", result.Strings("onlyIn2")) + "." : "");
-            var summary = Ui.Column(badges);
-            if (missing.Length > 0) summary.Children.Add(Ui.Text(missing, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
-            summary.Margin = new Thickness(28, 6, 28, 10);
-            var split = new Grid { Margin = new Thickness(16, 0, 16, 16) };
-            split.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            split.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            split.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1.4, GridUnitType.Star) });
-            var splitter = new GridSplitter { Height = 12, HorizontalAlignment = HorizontalAlignment.Stretch, ResizeBehavior = GridResizeBehavior.PreviousAndNext };
-            var tablesCard = Ui.Card(_tableGrid, 4);
-            var rowsCard = Ui.Card(_kinds, 0);
-            Grid.SetRow(splitter, 1);
-            Grid.SetRow(rowsCard, 2);
-            split.Children.Add(tablesCard);
-            split.Children.Add(splitter);
-            split.Children.Add(rowsCard);
-            SetDock(summary, Dock.Top);
-            Children.Add(summary);
-            Children.Add(split);
-        }
-
-        public List<object> SelectedTables => _tables.Where(t => t.Selected).Select(t => (object)t.Index).ToList();
-
-        private async System.Threading.Tasks.Task ShowRows()
-        {
-            if (!(_tableGrid.SelectedItem is TableRow table) || !(_kinds.SelectedItem is TabItem tab)) return;
-            var kind = (int)tab.Tag;
-            var start = _page[kind] * PageSize;
-            var reply = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("data_rows", new JsonObject
-            {
-                ["session"] = Session, ["table"] = table.Index, ["kind"] = kind, ["start"] = start, ["count"] = PageSize,
-            }));
-            if (reply == null || !ReferenceEquals(_tableGrid.SelectedItem, table)) return;
-            var total = reply.Long("total");
-            var grid = new DataGrid { AutoGenerateColumns = false, IsReadOnly = true, CanUserSortColumns = false };
-            var rows = new List<Dictionary<string, string>>();
-            var differing = new List<HashSet<int>>();
-            var paired = kind == 1 || kind == 0;
-            for (var c = 0; c < table.Columns.Count; c++)
-            {
-                var name = table.Columns[c];
-                if (paired && !table.Key.Contains(c))
-                {
-                    grid.Columns.Add(Column(name + " (source)", "s" + c, c));
-                    grid.Columns.Add(Column(name + " (target)", "t" + c, c));
-                }
-                else
-                {
-                    grid.Columns.Add(Column(name, (kind == 3 ? "t" : "s") + c, c));
-                }
-            }
-            foreach (var r in reply.List("rows").OfType<JsonObject>())
-            {
-                var src = r.Strings("source");
-                var tgt = r.Strings("target");
-                var row = new Dictionary<string, string>();
-                for (var c = 0; c < table.Columns.Count; c++)
-                {
-                    row["s" + c] = c < src.Count ? src[c] : "";
-                    row["t" + c] = c < tgt.Count ? tgt[c] : "";
-                }
-                var diffs = r.List("differs").Select((d, i) => (d is bool b && b) ? i : -1).Where(i => i >= 0);
-                row["__differs"] = string.Join(",", diffs);
-                rows.Add(row);
-            }
-            grid.ItemsSource = rows;
-            var range = Ui.Text("Rows " + (total == 0 ? 0 : start + 1).ToString("N0") + "–" + Math.Min(start + PageSize, total).ToString("N0") + " of " + total.ToString("N0")
-                + (kind == 0 && total == 0 && table.Identical > 0 ? " (identical rows are counted but not kept; turn on 'Show identical values in results')" : ""), brush: CompareTheme.Muted);
-            range.Margin = new Thickness(8, 0, 0, 0);
-            var pager = Ui.Row(
-                Ui.IconButton(Glyph.Previous, "Previous page", async () => { if (_page[kind] > 0) { _page[kind]--; await ShowRows(); } }),
-                Ui.IconButton(Glyph.Next, "Next page", async () => { if ((_page[kind] + 1) * PageSize < total) { _page[kind]++; await ShowRows(); } }),
-                range);
-            pager.Margin = new Thickness(8, 4, 8, 6);
-            var panel = new DockPanel();
-            DockPanel.SetDock(pager, Dock.Bottom);
-            panel.Children.Add(pager);
-            panel.Children.Add(grid);
-            tab.Content = panel;
-        }
-
-        private static DataGridTextColumn Column(string header, string key, int index)
-        {
-            var col = new DataGridTextColumn { Header = header, Binding = new Binding("[" + key + "]"), MaxWidth = 400 };
-            // Cells that differ are highlighted.
-            var style = new Style(typeof(DataGridCell), CompareTheme.Style(typeof(DataGridCell)));
-            var trigger = new DataTrigger
-            {
-                Binding = new Binding("[__differs]") { Converter = new ContainsConverter(index) },
-                Value = true,
-            };
-            trigger.Setters.Add(new Setter(Control.BackgroundProperty, CompareTheme.Changed));
-            style.Triggers.Add(trigger);
-            col.CellStyle = style;
-            return col;
-        }
-
-        private sealed class ContainsConverter : IValueConverter
-        {
-            private readonly string _index;
-            public ContainsConverter(int index) => _index = index.ToString(System.Globalization.CultureInfo.InvariantCulture);
-
-            public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
-                => value is string s && s.Split(',').Contains(_index);
-
-            public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => Binding.DoNothing;
         }
     }
 }
