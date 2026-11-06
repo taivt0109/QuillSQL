@@ -859,9 +859,14 @@ pub fn load(source: &Source, _args: &Args, decrypt: bool) -> Result<Database, Ar
     }
 }
 
+/// Writes a SQL Compare snapshot (`.snp`), or QuillSQL's JSON model for a `.json` path.
 pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
-    let json = serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?;
-    std::fs::write(path, json).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", path.display())))
+    let bytes = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+        serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?
+    } else {
+        crate::sources::snp_write::write(db)
+    };
+    std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", path.display())))
 }
 
 pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {
