@@ -5,6 +5,7 @@
 use quillsql::catalog::{self, IndexKind, XmlIndexKind};
 use quillsql::db::{self, Auth, ConnectionSpec};
 use quillsql::schema::{self, DiffKind, Mappings, Opt, Options, deploy};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A database name of this test run.
 fn unique(name: &str) -> String {
@@ -14,15 +15,35 @@ fn unique(name: &str) -> String {
 struct Server {
     host: String,
     auth: Auth,
+    _turn: Turn,
+}
+
+/// Dropping a memory-optimized database cleans up in the background by database id, and that
+/// cleanup kills sessions of a database created meanwhile with the same id. The memory-optimized
+/// test therefore runs alone; the others share the server.
+static TURNS: RwLock<()> = RwLock::new(());
+
+#[allow(dead_code)]
+enum Turn {
+    Shared(RwLockReadGuard<'static, ()>),
+    Alone(RwLockWriteGuard<'static, ()>),
 }
 
 fn server() -> Option<Server> {
+    connect(|| Turn::Shared(TURNS.read().unwrap_or_else(|e| e.into_inner())))
+}
+
+fn server_alone() -> Option<Server> {
+    connect(|| Turn::Alone(TURNS.write().unwrap_or_else(|e| e.into_inner())))
+}
+
+fn connect(turn: impl FnOnce() -> Turn) -> Option<Server> {
     let host = std::env::var("QUILL_TEST_SERVER").ok()?;
     let auth = match std::env::var("QUILL_TEST_USER") {
         Ok(user) => Auth::Sql { user, password: std::env::var("QUILL_TEST_PASSWORD").unwrap_or_default() },
         Err(_) => Auth::Windows,
     };
-    Some(Server { host, auth })
+    Some(Server { host, auth, _turn: turn() })
 }
 
 impl Server {
@@ -296,7 +317,7 @@ fn with_memory_optimized_filegroup(db: &str, rest: &str) -> String {
 
 #[test]
 fn memory_optimized_tables_are_rebuilt_through_a_copy() {
-    let Some(server) = server() else { return };
+    let Some(server) = server_alone() else { return };
     let (a, b) = (&unique("Mo1"), &unique("Mo2"));
     let disk = "CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, V nvarchar(20) NOT NULL CONSTRAINT DF_T_V DEFAULT (N'x'))\nGO\nINSERT INTO dbo.T (Id, V) VALUES (1, N'a'), (2, N'b'), (3, N'c')";
     let mo = |width: u32| {
