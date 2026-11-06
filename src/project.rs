@@ -60,6 +60,10 @@ pub struct SourceSpec {
     /// `type = scripts`: the source-control revision of the folder to read (HEAD for the latest).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub revision: String,
+    /// `type = backup`: the name of the backup set to read (the latest when empty); the files
+    /// are in `path`, separated by `;`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub backup_set: String,
     /// Run time only: never written to the file.
     #[serde(skip_serializing)]
     pub password: Option<String>,
@@ -81,6 +85,11 @@ impl SourceSpec {
         self.kind == "scripts"
     }
 
+    /// Backup files (SQL Compare `BackupDatabaseSource`), listed in `path`.
+    pub fn is_backup(&self) -> bool {
+        self.kind == "backup"
+    }
+
     /// An empty database (`/empty2`).
     pub fn is_empty_database(&self) -> bool {
         self.kind == "empty"
@@ -88,7 +97,7 @@ impl SourceSpec {
 
     /// `server / database` or the snapshot path.
     pub fn describe(&self) -> String {
-        if self.is_snapshot() || self.is_scripts() { self.path.clone() } else { format!("{} / {}", self.server, self.database) }
+        if self.is_snapshot() || self.is_scripts() || self.is_backup() { self.path.clone() } else { format!("{} / {}", self.server, self.database) }
     }
 
     /// The connection, with the password from the spec or from `QUILL_PASSWORD<n>`.
