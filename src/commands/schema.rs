@@ -79,6 +79,7 @@ pub fn run(argv: &[String]) -> u8 {
 }
 
 fn execute(args: &Args) -> Result<u8, ArgError> {
+    let project = common::project_of(args, crate::project::ProjectKind::Schema)?;
     let source1 = common::source(args, 1)?
         .ok_or_else(|| ArgError::new(exit::USAGE, "give database 1: /database1 (with /server1) or /snapshot1"))?;
     if let Some(path) = args.get("makesnapshot") {
@@ -101,7 +102,6 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let source2 = common::source(args, 2)?.ok_or_else(|| {
         ArgError::new(exit::USAGE, "give database 2: /database2 (with /server2) or /snapshot2, or use /makesnapshot")
     })?;
-    let project = common::project(args)?;
     let options = match (args.get("options"), &project) {
         (Some(list), _) => Options::parse(list).map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?,
         (None, Some(p)) => Options::parse(&p.options.join(",")).map_err(|e| ArgError::new(exit::DATA_ERROR, e))?,

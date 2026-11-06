@@ -135,6 +135,21 @@ pub fn project(args: &Args) -> Result<Option<crate::project::Project>, ArgError>
         .transpose()
 }
 
+/// `/project`, refused when it is the other kind (a `.qdc` given to `quill schema`).
+pub fn project_of(args: &Args, kind: crate::project::ProjectKind) -> Result<Option<crate::project::Project>, ArgError> {
+    let p = project(args)?;
+    if let Some(p) = &p
+        && p.kind != kind
+    {
+        let (is, want) = match kind {
+            crate::project::ProjectKind::Schema => ("a data compare project", "quill data"),
+            crate::project::ProjectKind::Data => ("a schema compare project", "quill schema"),
+        };
+        return Err(ArgError::new(exit::DATA_ERROR, format!("{} is {is}; open it with {want}", args.get("project").unwrap_or_default())));
+    }
+    Ok(p)
+}
+
 /// Reads `/serverN`, `/databaseN`... into a source, or `None` when no database N was given.
 /// Without them, side N of the `/project` is used.
 pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
@@ -288,7 +303,7 @@ pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
 
 pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {
     let bytes = std::fs::read(path).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{}: {e}", path.display())))?;
-    let db: Database = serde_json::from_slice(&bytes)
+    let db: Database = serde_json::from_slice(crate::project::without_bom(&bytes))
         .map_err(|e| ArgError::new(exit::DATA_ERROR, format!("{} is not a QuillSQL snapshot: {e}", path.display())))?;
     if db.model_version > catalog::MODEL_VERSION {
         return Err(ArgError::new(

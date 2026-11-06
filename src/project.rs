@@ -155,7 +155,7 @@ impl Project {
         if ext == "scp" || ext == "sdc" {
             return import_redgate(&bytes, if ext == "sdc" { ProjectKind::Data } else { ProjectKind::Schema });
         }
-        let mut p: Project = serde_json::from_slice(&bytes).map_err(|e| format!("{} is not a QuillSQL project: {e}", path.display()))?;
+        let mut p: Project = serde_json::from_slice(without_bom(&bytes)).map_err(|e| format!("{} is not a QuillSQL project: {e}", path.display()))?;
         if p.version > PROJECT_VERSION {
             return Err(format!("{} was saved by a newer QuillSQL; update QuillSQL to open it", path.display()));
         }
@@ -373,9 +373,26 @@ fn entry<'a>(m: &'a mut DataMappings, table: &ObjectName) -> &'a mut TableOverri
     m.tables.last_mut().unwrap()
 }
 
+/// The bytes after a UTF-8 byte order mark, which Notepad and PowerShell 5 write.
+pub fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loads_a_project_saved_with_a_bom() {
+        let dir = std::env::temp_dir().join(format!("quill-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.qsc");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend(serde_json::to_vec(&Project::new(ProjectKind::Data)).unwrap());
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(Project::load(&path).unwrap().kind, ProjectKind::Data);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn round_trip_without_passwords() {

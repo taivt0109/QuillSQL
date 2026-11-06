@@ -93,7 +93,7 @@ fn session(request: &Value) -> Result<u64, String> {
 fn load_side(side: &SourceSpec, n: u8, progress: &dyn Fn(&str)) -> Result<Database, String> {
     if side.is_snapshot() {
         let bytes = std::fs::read(&side.path).map_err(|e| format!("{}: {e}", side.path))?;
-        return serde_json::from_slice(&bytes).map_err(|e| format!("{} is not a snapshot: {e}", side.path));
+        return serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| format!("{} is not a snapshot: {e}", side.path));
     }
     progress(&format!("Reading {}", side.describe()));
     catalog::read_database(&side.connection(n)?)
