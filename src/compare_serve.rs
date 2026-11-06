@@ -396,6 +396,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                     script.batches.extend(deploy::split_batches(&post));
                 }
             }
+            backup_into(request, &s.project.target, &mut script)?;
             let reply = script_json(&script);
             s.script = Some(script);
             s.selected = selected;
@@ -602,7 +603,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             settings.selections = selections(request, &s.result)?;
             settings.max_transaction_bytes = request.get("maxTransactionSizeMB").and_then(Value::as_u64).filter(|&m| m > 0).map(|m| m * 1_048_576);
             settings.source_connection = s.spec(1).ok();
-            let script = crate::data::sync::generate(&s.result, &s.db2, &opts, &settings)?;
+            let mut script = crate::data::sync::generate(&s.result, &s.db2, &opts, &settings)?;
+            backup_into(request, &s.project.target, &mut script)?;
             let reply = script_json(&script);
             s.script = Some(script);
             Ok(reply)
@@ -677,31 +679,19 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 return Err("the target is an empty database; only a script can be created".into());
             }
             let spec = target.connection(2)?;
-            // Back up target before deployment: {backup: {folder, file, nameAutomatically, overwrite, differential}}.
-            let backup = match request.get("backup").filter(|b| !b.is_null()) {
-                Some(b) => {
-                    let o: schema::backup::BackupOptions = serde_json::from_value(b.clone()).map_err(|e| format!("'backup': {e}"))?;
-                    Some(schema::backup::run(&spec, &o, &schema::backup::stamp(), progress)?)
-                }
-                None => None,
-            };
             let ran = deploy::execute(&spec, &script, |i, n| progress(&format!("Running batch {} of {n}", i + 1)))?;
-            Ok(json!({"batches": ran, "backup": backup}))
+            Ok(json!({"batches": ran}))
         }
         // What the backup page starts with: the instance's backup folder and the automatic name.
         "backup_defaults" => {
             let id = session(request)?;
             let target = state.schema.get(&id).map(|s| s.project.target.clone()).or_else(|| state.data.get(&id).map(|s| s.project.target.clone())).ok_or("the comparison is no longer open")?;
             let spec = target.connection(2)?;
-            let differential = request.get("differential").and_then(Value::as_bool).unwrap_or(false);
-            let rt = crate::db::runtime()?;
-            let folder = rt.block_on(async {
-                let mut c = crate::db::connect_async(&spec).await?;
-                schema::backup::default_folder(&mut c).await
-            })?;
-            Ok(json!({"folder": folder, "file": schema::backup::automatic_name(&spec.server, &spec.database, differential, &schema::backup::stamp())}))
-        }
-        "close" => {
+            let caps = schema::backup::capabilities(&spec)?;
+            let o = schema::backup::BackupOptions::default();
+            let plan = schema::backup::Plan { options: &o, database: &spec.database, utc: schema::backup::utc_stamp(), caps: &caps };
+            Ok(json!({"capabilities": caps, "database": spec.database, "file": plan.file()}))
+        }        "close" => {
             let id = session(request)?;
             state.schema.remove(&id);
             state.data.remove(&id);
@@ -709,6 +699,26 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         other => Err(format!("unknown op '{other}'")),
     }
+}
+
+/// "Back up target before deployment": the request's `backup` settings (with the SQL Backup
+/// password) put the backup first in the script, as SQL Compare does.
+fn backup_into(request: &Value, target: &SourceSpec, script: &mut DeploymentScript) -> Result<(), String> {
+    let Some(b) = request.get("backup").filter(|b| !b.is_null()) else { return Ok(()) };
+    let o: schema::backup::BackupOptions = serde_json::from_value(b.clone()).map_err(|e| format!("'backup': {e}"))?;
+    if !o.enabled {
+        return Ok(());
+    }
+    if target.is_snapshot() || target.is_empty_database() || target.is_scripts() {
+        return Err("only a live database can be backed up before deployment".into());
+    }
+    let spec = target.connection(2)?;
+    let caps = schema::backup::capabilities(&spec)?;
+    if o.sqb() && caps.sqb_version == 0 {
+        return Err(format!("Redgate SQL Backup is not installed on {}", spec.server));
+    }
+    schema::backup::Plan { options: &o, database: &spec.database, utc: schema::backup::utc_stamp(), caps: &caps }.add_to(script);
+    Ok(())
 }
 
 /// The `data_rows` kind that lists every stored row.
