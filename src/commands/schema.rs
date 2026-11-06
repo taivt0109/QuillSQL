@@ -327,6 +327,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         if let Some(f) = &folder1 {
             sources::add_pre_post(&mut s, f, &options)?;
         }
+        common::add_backup(args, project.as_ref().map(|p| &p.backup), live_target, &mut s)?;
         common::write_script(args, &s)?;
         script = Some(s);
     }

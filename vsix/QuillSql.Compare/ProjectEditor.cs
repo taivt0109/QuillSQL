@@ -638,9 +638,9 @@ namespace QuillSql.Compare
             names.Margin = new Thickness(12, 0, 0, 0);
             _type = new ComboBox { Width = 150, VerticalAlignment = VerticalAlignment.Center };
             // SQL Compare's other kinds of data source are listed but not available yet.
-            foreach (var (name, enabled) in new[] { ("Database", true), ("Snapshot", !session.IsData), ("Empty database", !session.IsData && key == "target"), ("Backup", false), ("Scripts folder", !session.IsData), ("Source control", !session.IsData) })
+            foreach (var (name, enabled) in new[] { ("Database", true), ("Snapshot", !session.IsData), ("Empty database", !session.IsData && key == "target"), ("Backup", false), ("Scripts folder", true), ("Source control", true) })
             {
-                _type.Items.Add(new ComboBoxItem { Content = name, IsEnabled = enabled, ToolTip = enabled ? null : name == "Snapshot" || name == "Empty database" || ((name == "Scripts folder" || name == "Source control") && session.IsData) ? "Not available for this side or kind of comparison" : "Not available yet" });
+                _type.Items.Add(new ComboBoxItem { Content = name, IsEnabled = enabled, ToolTip = enabled ? null : name == "Snapshot" || name == "Empty database" ? "Not available for this side or kind of comparison" : "Not available yet" });
             }
             _type.SelectionChanged += (s, e) => ShowType();
             var header = new DockPanel { Margin = new Thickness(0, 0, 0, 18) };

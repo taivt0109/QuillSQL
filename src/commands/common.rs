@@ -235,7 +235,7 @@ pub const DEPLOY: [Switch; 21] = [
         repeatable: false,
         help: "Deprecated: use /include:Identical",
     },
-    Switch { name: "makebackup", aliases: &["mb"], takes_value: false, repeatable: false, help: "Back up database 2 before deploying (not supported yet)" },
+    Switch { name: "makebackup", aliases: &["mb"], takes_value: false, repeatable: false, help: "Back up database 2 before deploying (native SQL Server backup)" },
     Switch { name: "backupprovider", aliases: &["bpr"], takes_value: true, repeatable: false, help: "native or sqb" },
     Switch { name: "backuptype", aliases: &["bt"], takes_value: true, repeatable: false, help: "full or differential" },
     Switch { name: "backupfolder", aliases: &["bd"], takes_value: true, repeatable: false, help: "Folder for the backup" },
@@ -515,9 +515,69 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 }
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
+/// "Back up target before deployment" from `/makebackup` or the project's backup settings
+/// (`/backup…` switches override them, as SQL Compare's command line does): the backup becomes
+/// the first batch of the script. `target` is database 2 when it is a live database.
+pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOptions>, target: Option<&crate::db::ConnectionSpec>, script: &mut crate::schema::deploy::DeploymentScript) -> Result<(), ArgError> {
+    let mut o = project.filter(|b| b.enabled).cloned().unwrap_or_default();
+    if !args.has("makebackup") && !o.enabled {
+        return Ok(());
+    }
+    o.enabled = true;
+    if let Some(p) = args.get("backupprovider") {
+        o.provider = p.to_ascii_lowercase();
+    }
+    if let Some(t) = args.get("backuptype") {
+        o.differential = t.eq_ignore_ascii_case("differential");
+    }
+    if let Some(f) = args.get("backupfolder") {
+        o.folder = f.to_string();
+    }
+    match args.get("backupfile") {
+        Some(f) => {
+            o.file = f.to_string();
+            o.name_automatically = false;
+        }
+        None => o.name_automatically = true,
+    }
+    if args.has("backupoverwriteexisting") {
+        o.overwrite = true;
+    }
+    if let Some(c) = args.get("backupcompression").and_then(|c| c.parse().ok()) {
+        o.compression_level = c;
+    }
+    if args.has("backupencryption") {
+        o.encryption = "aes256".into();
+    }
+    o.password = args.get("backuppassword").map(str::to_string);
+    if let Some(n) = args.get("backupnumberofthreads").and_then(|n| n.parse().ok()) {
+        o.thread_count = n;
+    }
+    let Some(target) = target else {
+        if args.has("makebackup") {
+            return Err(ArgError::new(exit::USAGE, "/makebackup needs database 2 to be a live database."));
+        }
+        return Ok(());
+    };
+    let caps = crate::schema::backup::capabilities(target).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
+    if o.sqb() && caps.sqb_version == 0 {
+        return Err(ArgError::new(exit::UNAVAILABLE, format!("Redgate SQL Backup is not installed on {}; use /backupprovider:native.", target.server)));
+    }
+    if !o.sqb() {
+        for name in ["backupcompression", "backupencryption", "backuppassword", "backupnumberofthreads"] {
+            if args.has(name) {
+                console::warn(&format!("/{name} applies to Redgate SQL Backup only and is ignored for a native backup."));
+            }
+        }
+    }
+    let plan = crate::schema::backup::Plan { options: &o, database: &target.database, utc: crate::schema::backup::utc_stamp(), caps: &caps };
+    console::verbose(&format!("Backing up {} to {} before deploying", target.database, plan.file()));
+    plan.add_to(script);
+    Ok(())
+}
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
     let _ = command;
-    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"] {
+    for name in ["backup1", "backup2", "sca1", "sca2"] {
         if args.has(name) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }

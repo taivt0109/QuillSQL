@@ -11,24 +11,12 @@ use super::compare::{Difference, DiffKind, ObjectType};
 
 /// The element name SQL Compare uses for each object type in a filter.
 pub fn type_key(t: ObjectType) -> &'static str {
-    match t {
-        ObjectType::Schema => "Schema",
-        ObjectType::Role => "Role",
-        ObjectType::User => "User",
-        ObjectType::UserDefinedType => "UserDefinedType",
-        ObjectType::Table => "Table",
-        ObjectType::View => "View",
-        ObjectType::Function => "Function",
-        ObjectType::StoredProcedure => "StoredProcedure",
-        ObjectType::Sequence => "Sequence",
-        ObjectType::Synonym => "Synonym",
-        ObjectType::ExtendedProperty => "ExtendedProperty",
-    }
+    super::report::type_name(t)
 }
 
 /// Object types that belong to a schema; `@SCHEMA` means nothing for the others.
 fn has_schema(t: ObjectType) -> bool {
-    !matches!(t, ObjectType::Schema | ObjectType::Role | ObjectType::User | ObjectType::ExtendedProperty)
+    t.schema_scoped()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

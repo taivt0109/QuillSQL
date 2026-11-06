@@ -12,6 +12,8 @@ use crate::catalog::*;
 use crate::schema::ObjectType;
 use crate::schema::text::{Tok, tokenize};
 
+mod objects;
+
 /// Settings a scripts folder gives every object (RedGateDatabaseInfo.xml).
 #[derive(Clone, Debug)]
 pub struct Defaults {
@@ -571,7 +573,7 @@ fn module_start(c: &Cur) -> Option<usize> {
     }
     let k = module_kind_index(c, 0);
     let kind = c.t.get(k)?.text.to_ascii_uppercase();
-    matches!(kind.as_str(), "VIEW" | "PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER").then_some(0)
+    matches!(kind.as_str(), "VIEW" | "PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "DEFAULT" | "RULE").then_some(0)
 }
 
 /// Index of the object-kind word after CREATE [OR ALTER].
@@ -686,6 +688,9 @@ fn apply_set(c: &Cur, a: usize, b: usize, settings: &mut ModuleSettings) {
 /// When a statement is applied: 0 schemas, types and principals, 1 tables and modules,
 /// 2 what hangs on tables, 3 security and properties.
 fn phase_of(c: &Cur) -> u8 {
+    if let Some(p) = objects::phase(c) {
+        return p;
+    }
     let w = |k: usize| c.t.get(k).map(|t| t.text.to_ascii_uppercase()).unwrap_or_default();
     match (w(0).as_str(), w(1).as_str()) {
         ("CREATE", "SCHEMA" | "TYPE" | "SEQUENCE" | "ROLE" | "USER") => 0,
@@ -781,6 +786,9 @@ impl Builder {
         let mut c = Cur::new(sql);
         let w0 = c.peek().map(|t| t.text.to_ascii_uppercase()).unwrap_or_default();
         let w1 = c.t.get(1).map(|t| t.text.to_ascii_uppercase()).unwrap_or_default();
+        if let Some(r) = self.object_statement(&mut c) {
+            return r;
+        }
         match (w0.as_str(), w1.as_str()) {
             ("CREATE", "SCHEMA") => self.create_schema(&mut c),
             ("CREATE", "TABLE") => self.create_table(&mut c),
@@ -839,11 +847,11 @@ impl Builder {
                 login = None;
             } else if c.eat_seq(&["FOR", "CERTIFICATE"]) || c.eat_seq(&["FROM", "CERTIFICATE"]) {
                 p.kind = "CERTIFICATE_MAPPED_USER".into();
-                c.ident()?;
+                p.certificate = Some(c.ident()?);
                 login = None;
             } else if c.eat_seq(&["FOR", "ASYMMETRIC", "KEY"]) || c.eat_seq(&["FROM", "ASYMMETRIC", "KEY"]) {
                 p.kind = "ASYMMETRIC_KEY_MAPPED_USER".into();
-                c.ident()?;
+                p.asymmetric_key = Some(c.ident()?);
                 login = None;
             } else if c.eat("DEFAULT_SCHEMA") {
                 c.expect_punct("=")?;
@@ -1859,7 +1867,7 @@ impl Builder {
         } else if c.eat_seq(&["EXTERNAL", "NAME"]) {
             t.kind = UserTypeKind::Clr;
             t.nullable = true;
-            t.clr_class = Some(c.multipart()?.join("."));
+            t.clr_class = Some(c.multipart()?.iter().map(|p| crate::db::quote(p)).collect::<Vec<_>>().join("."));
         } else if c.eat_seq(&["AS", "TABLE"]) {
             t.kind = UserTypeKind::Table;
             t.nullable = false;
@@ -2061,8 +2069,13 @@ impl Builder {
                             clr = true;
                             c.i += 1;
                             c.expect("NAME")?;
-                            r.clr_method = Some(c.multipart()?.join("."));
+                            r.clr_method = Some(c.multipart()?.iter().map(|p| crate::db::quote(p)).collect::<Vec<_>>().join("."));
                             break;
+                        }
+                        // CLR procedures: AS EXTERNAL NAME.
+                        if u == "AS" && c.word_at(c.i + 1, "EXTERNAL") {
+                            c.i += 1;
+                            continue;
                         }
                         if u == "AS" || u == "BEGIN" || u == "RETURN" {
                             break;
@@ -2076,6 +2089,7 @@ impl Builder {
                         RoutineKind::ScalarFunction => RoutineKind::ClrScalarFunction,
                         _ => RoutineKind::ClrTableFunction,
                     };
+                    self.clr_signature(&definition, &mut r);
                 } else if !r.encrypted {
                     r.definition = definition;
                 }
@@ -2097,6 +2111,8 @@ impl Builder {
                         definition: if encrypted { String::new() } else { definition },
                         encrypted,
                         disabled: false,
+                        settings: settings.clone(),
+                        ..Default::default()
                     });
                     self.origin_of(FileKind::DdlTrigger, "", &name.name);
                     return Ok(());
@@ -2148,6 +2164,7 @@ impl Builder {
                     }
                 }
             }
+            "DEFAULT" | "RULE" => return self.bindable_module(&definition, &name, kind == "RULE"),
             _ => return c.fail(MessageKind::IgnoredStatement),
         }
         Ok(())
@@ -2161,14 +2178,16 @@ impl Builder {
         }
         let mut perms = Vec::new();
         let mut cur = Vec::new();
+        let mut columns: Vec<String> = Vec::new();
         while !c.done() && !c.at("ON") && !c.at("TO") && !c.at("FROM") {
             let t = c.peek().unwrap();
             if t.text == "," {
                 perms.push(cur.join(" "));
                 cur.clear();
             } else if t.text == "(" {
-                // Column permissions are not modelled.
-                return c.fail(MessageKind::IgnoredStatement);
+                // Column permissions: SELECT ([a], [b]).
+                columns.extend(self.name_list(c)?);
+                continue;
             } else {
                 cur.push(t.text.to_ascii_uppercase());
             }
@@ -2179,11 +2198,16 @@ impl Builder {
         }
         let mut p = Permission::default();
         if c.eat("ON") {
-            let class = if c.t.get(c.i + 1).is_some_and(|t| t.text == ":") {
-                let w = c.ident()?.to_ascii_uppercase();
-                c.expect_punct(":")?;
-                c.expect_punct(":")?;
-                w
+            // The class keyword, one word or several (XML SCHEMA COLLECTION), before `::`.
+            let mut k = c.i;
+            let mut words = Vec::new();
+            while c.t.get(k).is_some_and(|t| t.kind == Tok::Word) {
+                words.push(c.t[k].text.to_ascii_uppercase());
+                k += 1;
+            }
+            let class = if !words.is_empty() && c.t.get(k).is_some_and(|t| t.text == ":") && c.t.get(k + 1).is_some_and(|t| t.text == ":") {
+                c.i = k + 2;
+                words.join(" ")
             } else {
                 "OBJECT".to_string()
             };
@@ -2191,11 +2215,22 @@ impl Builder {
                 "OBJECT" => {
                     let n = c.object(&self.schema_default())?;
                     if c.is_punct("(") {
-                        return c.fail(MessageKind::IgnoredStatement);
+                        columns.extend(self.name_list(c)?);
                     }
                     p.class = "OBJECT".into();
                     p.schema = Some(n.schema);
                     p.object = Some(n.name);
+                }
+                "TYPE" | "XML SCHEMA COLLECTION" => {
+                    let n = c.object(&self.schema_default())?;
+                    p.class = class.clone();
+                    p.schema = Some(n.schema);
+                    p.object = Some(n.name);
+                }
+                "ASSEMBLY" | "MESSAGE TYPE" | "CONTRACT" | "SERVICE" | "ROUTE" | "REMOTE SERVICE BINDING" | "FULLTEXT CATALOG" | "FULLTEXT STOPLIST" | "SYMMETRIC KEY"
+                | "CERTIFICATE" | "ASYMMETRIC KEY" => {
+                    p.class = class.clone();
+                    p.object = Some(c.ident()?);
                 }
                 "SCHEMA" => {
                     p.class = "SCHEMA".into();
@@ -2234,22 +2269,27 @@ impl Builder {
             _ if with_grant => "GRANT_WITH_GRANT_OPTION",
             _ => "GRANT",
         };
+        let columns: Vec<Option<String>> = if columns.is_empty() { vec![None] } else { columns.into_iter().map(Some).collect() };
         for g in grantees {
             for perm in &perms {
-                let mut x = p.clone();
-                x.grantee = g.clone();
-                x.permission = perm.clone();
-                x.state = state.into();
-                let same = |y: &Permission| {
-                    y.class == x.class
-                        && y.schema == x.schema
-                        && y.object == x.object
-                        && y.grantee.eq_ignore_ascii_case(&x.grantee)
-                        && y.permission == x.permission
-                };
-                self.db.permissions.retain(|y| !same(y));
-                if verb != "REVOKE" {
-                    self.db.permissions.push(x);
+                for column in &columns {
+                    let mut x = p.clone();
+                    x.grantee = g.clone();
+                    x.permission = perm.clone();
+                    x.state = state.into();
+                    x.column = column.clone();
+                    let same = |y: &Permission| {
+                        y.class == x.class
+                            && y.schema == x.schema
+                            && y.object == x.object
+                            && y.column == x.column
+                            && y.grantee.eq_ignore_ascii_case(&x.grantee)
+                            && y.permission == x.permission
+                    };
+                    self.db.permissions.retain(|y| !same(y));
+                    if verb != "REVOKE" {
+                        self.db.permissions.push(x);
+                    }
                 }
             }
         }

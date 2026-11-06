@@ -40,7 +40,7 @@ namespace QuillSql.Compare
         /// <summary>Raised with the filter (null: nothing excluded) after every change.</summary>
         public event Action<JsonObject> Changed;
 
-        /// <param name="types">Object type labels shown in the results (Table, Stored procedure…).</param>
+        /// <param name="types">Object type labels shown in the results (Table, Stored procedure�).</param>
         public FilterPane(CompareSession session, IEnumerable<string> types)
         {
             _session = session;
@@ -58,7 +58,7 @@ namespace QuillSql.Compare
             DockPanel.SetDock(tools, Dock.Right);
             head.Children.Add(tools);
             head.Children.Add(title);
-            var custom = new Button { Content = "Custom filter rules…", Style = CompareTheme.Style("Q.SubtleButton"), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(-8, 6, 0, 0) };
+            var custom = new Button { Content = "Custom filter rules�", Style = CompareTheme.Style("Q.SubtleButton"), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(-8, 6, 0, 0) };
             custom.Click += (s, e) => Edit("None");
             _excluded.Margin = new Thickness(0, 10, 0, 0);
             var note = Ui.Text("Objects the filter leaves out are not deployed.", 12, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
@@ -67,7 +67,7 @@ namespace QuillSql.Compare
             Fill();
         }
 
-        /// <summary>The filter element name of a type label: "Stored procedure" → StoredProcedure.</summary>
+        /// <summary>The filter element name of a type label: "Stored procedure" ? StoredProcedure.</summary>
         public static string Key(string label) =>
             string.Concat((label ?? "").Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries).Select(w => char.ToUpperInvariant(w[0]) + w.Substring(1)));
 
@@ -193,14 +193,24 @@ namespace QuillSql.Compare
         }
     }
 
-    /// <summary>"Edit filter rules": include or exclude objects whose name or schema meets conditions.</summary>
+    /// <summary>
+    /// "Edit filter rules": include or exclude objects whose name or schema meets conditions, in
+    /// groups of "all of" (AND) or "any of" (OR) that can hold further groups, as SQL Compare's
+    /// clause tree does.
+    /// </summary>
     internal static class RuleEditor
     {
-        public sealed class Condition
+        /// <summary>A condition, or a group of conditions and groups.</summary>
+        public sealed class Node
         {
-            public string Clause { get; set; } = "Object name";
-            public string Operator { get; set; } = "Equals";
-            public string Value { get; set; } = "";
+            public bool IsGroup;
+            public bool Any;
+            public List<Node> Children = new List<Node>();
+            public string Clause = "Object name";
+            public string Operator = "Equals";
+            public string Value = "";
+
+            public static Node Group(bool any = false) => new Node { IsGroup = true, Any = any };
         }
 
         public static readonly string[] Clauses = { "Object name", "Schema name" };
@@ -209,8 +219,8 @@ namespace QuillSql.Compare
         private static string Quote(string s) => "'" + (s ?? "").Replace("'", "''") + "'";
         private static string Like(string s) => (s ?? "").Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_").Replace("[", "\\[");
 
-        /// <summary>One condition in the filter language.</summary>
-        public static string Text(Condition c)
+        /// <summary>A condition in the filter language.</summary>
+        public static string Text(Node c)
         {
             var v = c.Clause == "Schema name" ? "@SCHEMA" : "@NAME";
             var not = c.Operator.StartsWith("Does not", StringComparison.Ordinal) || c.Operator == "NOT LIKE";
@@ -224,151 +234,206 @@ namespace QuillSql.Compare
                     return v + (not ? " NOT LIKE " : " LIKE ") + Quote(c.Value);
                 default:
                     var pattern = Like(c.Value);
-                    pattern = c.Operator.EndsWith("begin with", StringComparison.Ordinal) || c.Operator == "Begins with" ? pattern + "%"
-                        : c.Operator.EndsWith("end with", StringComparison.Ordinal) || c.Operator == "Ends with" ? "%" + pattern
+                    pattern = c.Operator.EndsWith("egin with", StringComparison.Ordinal) || c.Operator == "Begins with" ? pattern + "%"
+                        : c.Operator.EndsWith("nd with", StringComparison.Ordinal) || c.Operator == "Ends with" ? "%" + pattern
                         : "%" + pattern + "%";
                     return v + (not ? " NOT LIKE " : " LIKE ") + Quote(pattern) + " ESCAPE '\\'";
             }
         }
 
-        private static readonly Regex One = new Regex(@"^\s*(@NAME|@SCHEMA)\s*(=|!=|NOT\s+LIKE|LIKE)\s*'((?:[^']|'')*)'(\s+ESCAPE\s+'\\')?\s*$", RegexOptions.IgnoreCase);
-
-        /// <summary>Splits an expression of conditions joined all by AND or all by OR; null when it is anything else.</summary>
-        public static List<Condition> Parse(string expression, out bool any)
+        /// <summary>The expression of a group: its children joined by AND or OR, nested groups in parentheses.</summary>
+        public static string Expression(Node group, bool top = true)
         {
-            any = false;
-            var text = (expression ?? "").Trim();
-            while (text.StartsWith("(", StringComparison.Ordinal) && text.EndsWith(")", StringComparison.Ordinal) && Balanced(text.Substring(1, text.Length - 2))) text = text.Substring(1, text.Length - 2).Trim();
-            if (text.Length == 0 || text == "TRUE") return new List<Condition>();
-            var parts = new List<string>();
-            var joins = new HashSet<string>();
-            var cur = new StringBuilder();
-            var quoted = false;
-            var words = Regex.Split(text, @"(\s+|')");
-            for (var i = 0; i < words.Length; i++)
+            var parts = group.Children.Select(c => c.IsGroup ? (c.Children.Count == 0 ? null : c.Children.Count == 1 ? Expression(c, false) : "(" + Expression(c, false) + ")") : Text(c)).Where(p => p != null).ToList();
+            if (parts.Count == 0) return top ? "TRUE" : null;
+            return string.Join(group.Any ? " OR " : " AND ", parts);
+        }
+
+        // ---- Reading an expression back into the tree ----
+
+        private static readonly Regex Token = new Regex(@"'(?:[^']|'')*'|\(|\)|!=|=|[@A-Za-z_][\w@]*|\S", RegexOptions.Compiled);
+
+        private sealed class Reader
+        {
+            private readonly List<string> _t;
+            private int _i;
+            public Reader(string text) { _t = Token.Matches(text).Cast<Match>().Select(m => m.Value).ToList(); }
+            private string Peek => _i < _t.Count ? _t[_i] : null;
+            private bool Is(string word) => Peek != null && Peek.Equals(word, StringComparison.OrdinalIgnoreCase);
+            public bool Done => _i >= _t.Count;
+
+            /// <summary>or := and (OR and)*; and := term (AND term)*; term := ( or ) | condition.</summary>
+            public Node Or()
             {
-                var w = words[i];
-                if (w == "'") quoted = !quoted;
-                if (!quoted && (w.Equals("AND", StringComparison.OrdinalIgnoreCase) || w.Equals("OR", StringComparison.OrdinalIgnoreCase)))
+                var first = And();
+                if (!Is("OR")) return first;
+                var g = Node.Group(any: true);
+                Add(g, first);
+                while (Is("OR"))
                 {
-                    joins.Add(w.ToUpperInvariant());
-                    parts.Add(cur.ToString());
-                    cur.Clear();
-                    continue;
+                    _i++;
+                    Add(g, And());
                 }
-                cur.Append(w);
+                return g;
             }
-            parts.Add(cur.ToString());
-            if (joins.Count > 1) return null;
-            any = joins.Contains("OR");
-            var list = new List<Condition>();
-            foreach (var p in parts)
+
+            private Node And()
             {
-                var m = One.Match(p);
-                if (!m.Success) return null;
-                var clause = m.Groups[1].Value.ToUpperInvariant() == "@SCHEMA" ? "Schema name" : "Object name";
-                var op = Regex.Replace(m.Groups[2].Value.ToUpperInvariant(), @"\s+", " ");
-                var value = m.Groups[3].Value.Replace("''", "'");
+                var first = Term();
+                if (!Is("AND")) return first;
+                var g = Node.Group();
+                Add(g, first);
+                while (Is("AND"))
+                {
+                    _i++;
+                    Add(g, Term());
+                }
+                return g;
+            }
+
+            /// <summary>A group of the same kind joins its parent; others nest.</summary>
+            private static void Add(Node group, Node child)
+            {
+                if (child.IsGroup && child.Any == group.Any) group.Children.AddRange(child.Children);
+                else group.Children.Add(child);
+            }
+
+            private Node Term()
+            {
+                if (Is("("))
+                {
+                    _i++;
+                    var inner = Or();
+                    if (!Is(")")) throw new FormatException("missing )");
+                    _i++;
+                    return inner;
+                }
+                var variable = Peek?.ToUpperInvariant();
+                if (variable != "@NAME" && variable != "@SCHEMA") throw new FormatException("expected @NAME or @SCHEMA");
+                _i++;
+                string op;
+                if (Is("NOT"))
+                {
+                    _i++;
+                    if (!Is("LIKE")) throw new FormatException("expected LIKE");
+                    op = "NOT LIKE";
+                }
+                else op = Peek?.ToUpperInvariant();
+                _i++;
+                if (op != "=" && op != "!=" && op != "LIKE" && op != "NOT LIKE") throw new FormatException("expected an operator");
+                var literal = Peek;
+                if (literal == null || !literal.StartsWith("'", StringComparison.Ordinal)) throw new FormatException("expected a string");
+                _i++;
+                var value = literal.Substring(1, literal.Length - 2).Replace("''", "'");
+                var escaped = false;
+                if (Is("ESCAPE"))
+                {
+                    _i++;
+                    if (Peek != "'\\'") throw new FormatException("only ESCAPE '\\' can be edited as conditions");
+                    _i++;
+                    escaped = true;
+                }
+                var c = new Node { Clause = variable == "@SCHEMA" ? "Schema name" : "Object name" };
                 var not = op == "!=" || op == "NOT LIKE";
                 if (op == "=" || op == "!=")
                 {
-                    list.Add(new Condition { Clause = clause, Operator = not ? "Does not equal" : "Equals", Value = value });
-                    continue;
+                    c.Operator = not ? "Does not equal" : "Equals";
+                    c.Value = value;
+                    return c;
                 }
-                if (m.Groups[4].Success)
+                if (escaped)
                 {
                     // Begins with, ends with, contains: one wildcard at an end, the rest escaped.
                     var starts = value.StartsWith("%", StringComparison.Ordinal);
                     var ends = value.EndsWith("%", StringComparison.Ordinal) && !value.EndsWith("\\%", StringComparison.Ordinal);
-                    var inner = value.Substring(starts ? 1 : 0, value.Length - (starts ? 1 : 0) - (ends ? 1 : 0));
+                    var inner = value.Substring(starts ? 1 : 0, Math.Max(0, value.Length - (starts ? 1 : 0) - (ends ? 1 : 0)));
                     if ((starts || ends) && !Regex.IsMatch(inner, @"(?<!\\)[%_\[]"))
                     {
-                        var plain = Regex.Replace(inner, @"\\(.)", "$1");
-                        var kind = starts && ends ? "ontain" : starts ? "end with" : "begin with";
-                        var name = kind == "ontain" ? (not ? "Does not contain" : "Contains") : kind == "end with" ? (not ? "Does not end with" : "Ends with") : (not ? "Does not begin with" : "Begins with");
-                        list.Add(new Condition { Clause = clause, Operator = name, Value = plain });
-                        continue;
+                        c.Value = Regex.Replace(inner, @"\\(.)", "$1");
+                        c.Operator = starts && ends ? (not ? "Does not contain" : "Contains") : starts ? (not ? "Does not end with" : "Ends with") : (not ? "Does not begin with" : "Begins with");
+                        return c;
                     }
-                    return null;
+                    throw new FormatException("a LIKE pattern with ESCAPE can only be edited as text");
                 }
-                list.Add(new Condition { Clause = clause, Operator = not ? "NOT LIKE" : "LIKE", Value = value });
+                c.Operator = not ? "NOT LIKE" : "LIKE";
+                c.Value = value;
+                return c;
             }
-            return list;
         }
 
-        private static bool Balanced(string s)
+        /// <summary>The tree of an expression; null when it uses what the tree cannot show (NOT, other ESCAPE characters).</summary>
+        public static Node Parse(string expression)
         {
-            var depth = 0;
-            var quoted = false;
-            foreach (var ch in s)
+            var text = (expression ?? "").Trim();
+            if (text.Length == 0 || text.Equals("TRUE", StringComparison.OrdinalIgnoreCase)) return Node.Group();
+            try
             {
-                if (ch == '\'') quoted = !quoted;
-                if (quoted) continue;
-                if (ch == '(') depth++;
-                if (ch == ')' && --depth < 0) return false;
+                var r = new Reader(text);
+                var node = r.Or();
+                if (!r.Done) return null;
+                if (node.IsGroup) return node;
+                var g = Node.Group();
+                g.Children.Add(node);
+                return g;
             }
-            return depth == 0;
+            catch (FormatException)
+            {
+                return null;
+            }
         }
+
+        // ---- The window ----
 
         public static FilterPane.Rule Run(Window owner, string forWhat, FilterPane.Rule rule)
         {
             FilterPane.Rule result = null;
-            var w = Ui.Dialog(owner, "Edit filter rules", null, 760, 560);
+            var w = Ui.Dialog(owner, "Edit filter rules", null, 860, 620);
             var include = new RadioButton { Content = "Include if:", IsChecked = rule.Include, Margin = new Thickness(0, 0, 16, 0) };
             var exclude = new RadioButton { Content = "Exclude if:", IsChecked = !rule.Include };
-            var conditions = new ObservableCollection<Condition>(Parse(rule.Expression == "TRUE" ? "" : rule.Expression, out var any) ?? new List<Condition>());
-            var parsed = Parse(rule.Expression == "TRUE" ? "" : rule.Expression, out _) != null;
-            var match = new ComboBox { ItemsSource = new[] { "All conditions (AND)", "Any condition (OR)" }, SelectedIndex = any ? 1 : 0, Width = 200 };
-            var grid = new DataGrid { ItemsSource = conditions, AutoGenerateColumns = false, CanUserAddRows = false, HeadersVisibility = DataGridHeadersVisibility.Column };
-            DataGridComboBoxColumn combo(string header, string path, string[] items, double width) => new DataGridComboBoxColumn
-            {
-                Header = header, ItemsSource = items, Width = width,
-                SelectedItemBinding = new Binding(path) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged },
-            };
-            grid.Columns.Add(combo("Clause", "Clause", Clauses, 150));
-            grid.Columns.Add(combo("Operator", "Operator", Operators, 180));
-            grid.Columns.Add(new DataGridTextColumn { Header = "Value", Binding = new Binding("Value") { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+            var root = Parse(rule.Expression == "TRUE" ? "" : rule.Expression);
+            var parsed = root != null;
+            root = root ?? Node.Group();
+            var tree = new StackPanel();
             var expression = Ui.Code(readOnly: true);
-            expression.Height = 70;
+            expression.Height = 80;
             expression.TextWrapping = TextWrapping.Wrap;
+            expression.Text = rule.Expression ?? "TRUE";
             var manual = Ui.Check("Edit the expression directly", !parsed);
-            string build() => conditions.Count == 0 ? "TRUE" : string.Join(match.SelectedIndex == 1 ? " OR " : " AND ", conditions.Select(Text));
             void refresh()
             {
-                if (manual.IsChecked != true) expression.Text = build();
+                if (manual.IsChecked != true) expression.Text = Expression(root);
             }
-            expression.Text = rule.Expression ?? "TRUE";
+            void rebuild()
+            {
+                tree.Children.Clear();
+                tree.Children.Add(GroupView(root, null, rebuild, refresh));
+                refresh();
+            }
             void mode()
             {
                 var direct = manual.IsChecked == true;
                 expression.IsReadOnly = !direct;
-                grid.IsEnabled = match.IsEnabled = !direct;
+                tree.IsEnabled = !direct;
                 refresh();
             }
             manual.Checked += (s, e) => mode();
             manual.Unchecked += (s, e) =>
             {
-                var again = Parse(expression.Text, out var anyAgain);
+                var again = Parse(expression.Text);
                 if (again == null)
                 {
-                    Ui.Error(w, "The expression has more than conditions joined by AND or by OR, so it can only be edited as text.");
+                    Ui.Error(w, "The expression uses what the conditions cannot show (NOT, or an ESCAPE character other than \\), so it can only be edited as text.");
                     manual.IsChecked = true;
                     return;
                 }
-                conditions.Clear();
-                foreach (var c in again) conditions.Add(c);
-                match.SelectedIndex = anyAgain ? 1 : 0;
+                root = again;
+                rebuild();
                 mode();
             };
-            grid.CellEditEnding += (s, e) => w.Dispatcher.BeginInvoke(new Action(refresh));
-            grid.CurrentCellChanged += (s, e) => refresh();
-            match.SelectionChanged += (s, e) => refresh();
+            rebuild();
             mode();
-            var add = Ui.Button("Add condition", () => { conditions.Add(new Condition()); refresh(); }, glyph: Glyph.Add);
-            var remove = Ui.Button("Remove", () => { if (grid.SelectedItem is Condition c) { conditions.Remove(c); refresh(); } }, glyph: Glyph.Delete);
-            var matchLabel = Ui.Text("Match", brush: CompareTheme.Muted);
-            matchLabel.Margin = new Thickness(0, 0, 8, 0);
-            var top = Ui.Column(Ui.Row(Ui.Text("For: ", brush: CompareTheme.Muted), Ui.Text(forWhat, bold: true)), Ui.Row(include, exclude), Ui.Row(matchLabel, match, add, remove));
+            var forRow = Ui.Row(Ui.Text("For: ", brush: CompareTheme.Muted), Ui.Text(forWhat, bold: true));
+            var top = Ui.Column(forRow, Ui.Row(include, exclude));
             top.Margin = new Thickness(0, 0, 0, 8);
             var bottom = Ui.Column(manual, expression);
             bottom.Margin = new Thickness(0, 10, 0, 0);
@@ -377,10 +442,9 @@ namespace QuillSql.Compare
             DockPanel.SetDock(bottom, Dock.Bottom);
             body.Children.Add(top);
             body.Children.Add(bottom);
-            body.Children.Add(Ui.Card(grid, 4));
+            body.Children.Add(Ui.Card(new ScrollViewer { Content = tree, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, 10));
             var ok = Ui.Button("OK", () =>
             {
-                grid.CommitEdit(DataGridEditingUnit.Row, true);
                 refresh();
                 var text = expression.Text.Trim();
                 result = new FilterPane.Rule { Type = rule.Type, Include = include.IsChecked == true, Expression = text.Length == 0 ? "TRUE" : text };
@@ -394,6 +458,49 @@ namespace QuillSql.Compare
             w.Content = Ui.WithFooter(body, buttons);
             w.ShowDialog();
             return result;
+        }
+
+        /// <summary>A group: "all of" or "any of", its conditions and groups, and buttons to add more.</summary>
+        private static UIElement GroupView(Node group, Node parent, Action rebuild, Action refresh)
+        {
+            var kind = new ComboBox { ItemsSource = new[] { "All of the following are true (AND)", "Any of the following is true (OR)" }, SelectedIndex = group.Any ? 1 : 0, Width = 280 };
+            kind.SelectionChanged += (s, e) => { group.Any = kind.SelectedIndex == 1; refresh(); };
+            var head = Ui.Row(kind,
+                Ui.Command(Glyph.Add, "Condition", () => { group.Children.Add(new Node()); rebuild(); }, "Add a condition to this group"),
+                Ui.Command(Glyph.List, "Group", () => { group.Children.Add(Node.Group(!group.Any)); rebuild(); }, "Add a group of conditions inside this group"));
+            if (parent != null) head.Children.Add(Ui.IconButton(Glyph.Delete, "Remove this group", () => { parent.Children.Remove(group); rebuild(); }));
+            var list = new StackPanel { Margin = new Thickness(parent == null ? 0 : 0, 2, 0, 2) };
+            list.Children.Add(head);
+            foreach (var child in group.Children.ToList())
+            {
+                UIElement view;
+                if (child.IsGroup)
+                {
+                    view = GroupView(child, group, rebuild, refresh);
+                }
+                else
+                {
+                    var clause = new ComboBox { ItemsSource = Clauses, SelectedItem = child.Clause, Width = 140 };
+                    clause.SelectionChanged += (s, e) => { child.Clause = (string)clause.SelectedItem; refresh(); };
+                    var op = new ComboBox { ItemsSource = Operators, SelectedItem = child.Operator, Width = 170, Margin = new Thickness(6, 0, 6, 0) };
+                    op.SelectionChanged += (s, e) => { child.Operator = (string)op.SelectedItem; refresh(); };
+                    var value = new TextBox { Text = child.Value, Width = 240 };
+                    value.TextChanged += (s, e) => { child.Value = value.Text; refresh(); };
+                    System.Windows.Automation.AutomationProperties.SetName(value, "Value");
+                    var remove = Ui.IconButton(Glyph.Delete, "Remove this condition", () => { group.Children.Remove(child); rebuild(); });
+                    view = Ui.Row(clause, op, value, remove);
+                }
+                var indent = new Border { Child = view, Margin = new Thickness(24, 0, 0, 0), BorderThickness = new Thickness(2, 0, 0, 0), Padding = new Thickness(10, 0, 0, 0) };
+                indent.SetResourceReference(Border.BorderBrushProperty, "Q.Divider");
+                list.Children.Add(indent);
+            }
+            if (group.Children.Count == 0)
+            {
+                var empty = Ui.Text(parent == null ? "No conditions: every object matches." : "An empty group is left out.", 12, brush: CompareTheme.Muted);
+                empty.Margin = new Thickness(24, 2, 0, 2);
+                list.Children.Add(empty);
+            }
+            return list;
         }
     }
 }

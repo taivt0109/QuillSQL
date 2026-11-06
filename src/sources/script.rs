@@ -305,7 +305,7 @@ fn grant_sql(p: &Permission, on: &str) -> String {
         "GRANT_WITH_GRANT_OPTION" => ("GRANT", " WITH GRANT OPTION"),
         _ => ("GRANT", ""),
     };
-    format!("{verb} {}{on} TO {}{with}", p.permission, quote(&p.grantee))
+    format!("{verb} {}{on} TO {}{with}", p.action(), quote(&p.grantee))
 }
 
 /// `EXEC sp_addextendedproperty N'name', N'value', 'SCHEMA', N'dbo', 'TABLE', N'T', NULL, NULL`.
@@ -558,8 +558,21 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
             on_off(ct.track_columns_updated)
         ));
     }
+    // Statistics, edge constraints, the full-text index and sensitivity classification.
+    for s in crate::schema::ddl_objects::table_parts(t) {
+        out.batch(&s);
+    }
     permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), o);
     xprops(&mut out, db, "TABLE", &t.schema, Some(&t.name), o);
+    out.s
+}
+
+/// A file of statements, each followed by `GO`.
+pub fn statements(list: &[String]) -> String {
+    let mut out = Out::default();
+    for s in list {
+        out.batch(s);
+    }
     out.s
 }
 
@@ -609,7 +622,9 @@ pub fn view(db: &Database, v: &View, o: &Options, default_fg: &str) -> String {
 pub fn routine(db: &Database, r: &Routine, o: &Options) -> String {
     let name = qname(&r.schema, &r.name);
     let mut out = Out::default();
-    if !r.definition.is_empty() {
+    if r.clr_method.is_some() {
+        out.batch(&crate::schema::ddl_objects::clr_routine(r, "CREATE"));
+    } else if !r.definition.is_empty() {
         out.set_options(&r.settings);
         out.module(&module_sql(&r.definition, "CREATE", &name));
     }
@@ -720,7 +735,10 @@ fn database_permissions(out: &mut Out, db: &Database, grantee: &str, o: &Options
 pub fn role(db: &Database, p: &Principal, o: &Options) -> String {
     let mut out = Out::default();
     match p.kind.as_str() {
-        "APPLICATION_ROLE" => out.batch(&format!("CREATE APPLICATION ROLE {} WITH PASSWORD = N''", quote(&p.name))),
+        "APPLICATION_ROLE" => {
+            let schema = p.default_schema.as_deref().map(|s| format!(", DEFAULT_SCHEMA = {}", quote(s))).unwrap_or_default();
+            out.batch(&format!("CREATE APPLICATION ROLE {} WITH PASSWORD = N''{schema}", quote(&p.name)))
+        }
         _ => out.batch(&format!("CREATE ROLE {}\nAUTHORIZATION {}", quote(&p.name), quote(p.owner.as_deref().unwrap_or("dbo")))),
     }
     members(&mut out, db, &p.name);
@@ -740,6 +758,8 @@ pub fn user(db: &Database, p: &Principal, o: &Options) -> String {
     let mut s = format!("CREATE USER {}", quote(&p.name));
     match (p.kind.as_str(), &p.login) {
         ("EXTERNAL_USER" | "EXTERNAL_GROUP", _) => s.push_str(" FROM EXTERNAL PROVIDER"),
+        ("CERTIFICATE_MAPPED_USER", _) => s.push_str(&format!(" FOR CERTIFICATE {}", quote(p.certificate.as_deref().unwrap_or("UNKNOWN")))),
+        ("ASYMMETRIC_KEY_MAPPED_USER", _) => s.push_str(&format!(" FOR ASYMMETRIC KEY {}", quote(p.asymmetric_key.as_deref().unwrap_or("UNKNOWN")))),
         (_, Some(l)) => s.push_str(&format!(" FOR LOGIN {}", quote(l))),
         (_, None) => s.push_str(" WITHOUT LOGIN"),
     }

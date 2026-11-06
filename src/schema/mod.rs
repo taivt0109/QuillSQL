@@ -3,7 +3,9 @@
 pub mod backup;
 pub mod cast;
 pub mod compare;
+mod compare_objects;
 pub mod ddl;
+pub mod ddl_objects;
 pub mod filter;
 pub mod deploy;
 pub mod exists;

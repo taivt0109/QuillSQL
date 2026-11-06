@@ -39,6 +39,7 @@ pub async fn read(conn: &mut Connection) -> Result<Database, String> {
     r.objects(conn).await?;
     r.types(conn, &v).await?;
     r.tables(conn, &v).await?;
+    r.external_tables(conn, &v).await?;
     r.columns(conn, &v).await?;
     r.indexes(conn, &v).await?;
     r.partitions(conn).await?;
@@ -51,13 +52,15 @@ pub async fn read(conn: &mut Connection) -> Result<Database, String> {
     r.extended_properties(conn).await?;
     r.principals(conn).await?;
     r.permissions(conn).await?;
+    r.more_objects(conn, &v).await?;
     r.dependencies(conn).await?;
+    r.object_dependencies();
     Ok(r.finish())
 }
 
 /// Which catalog columns exist. Azure SQL Database has every feature of the newest box version.
-struct Version {
-    major: u32,
+pub(super) struct Version {
+    pub(super) major: u32,
 }
 
 impl Version {
@@ -67,53 +70,57 @@ impl Version {
     }
 
     /// `expr` when the server is at least `major`, else `fallback`.
-    fn pick<'a>(&self, major: u32, expr: &'a str, fallback: &'a str) -> &'a str {
+    pub(super) fn pick<'a>(&self, major: u32, expr: &'a str, fallback: &'a str) -> &'a str {
         if self.major >= major { expr } else { fallback }
     }
 }
 
-const SQL2014: u32 = 12;
-const SQL2016: u32 = 13;
-const SQL2017: u32 = 14;
-const SQL2019: u32 = 15;
+pub(super) const SQL2012: u32 = 11;
+pub(super) const SQL2014: u32 = 12;
+pub(super) const SQL2016: u32 = 13;
+pub(super) const SQL2017: u32 = 14;
+pub(super) const SQL2019: u32 = 15;
 
 /// Excludes objects shipped by Microsoft, including the database diagram support objects.
-const USER_OBJECT: &str = "o.is_ms_shipped = 0 AND NOT EXISTS (SELECT 1 FROM sys.extended_properties AS xp \
+pub(super) const USER_OBJECT: &str = "o.is_ms_shipped = 0 AND NOT EXISTS (SELECT 1 FROM sys.extended_properties AS xp \
      WHERE xp.class = 1 AND xp.major_id = o.object_id AND xp.minor_id = 0 AND xp.name = N'microsoft_database_tools_support')";
 
 #[derive(Default)]
-struct Reader {
-    db: Database,
+pub(super) struct Reader {
+    pub(super) db: Database,
     /// object_id → (kind, name), for every object the model may refer to.
-    objects: HashMap<i32, (String, ObjectName)>,
+    pub(super) objects: HashMap<i32, (String, ObjectName)>,
     /// object_id of a table, view or table type → where its columns and indexes go.
-    owners: HashMap<i32, Owner>,
+    pub(super) owners: HashMap<i32, Owner>,
     /// (object_id, index_id) → (owner, index position).
-    index_slots: HashMap<(i32, i32), (Owner, usize)>,
+    pub(super) index_slots: HashMap<(i32, i32), (Owner, usize)>,
     /// schema_id → name.
-    schema_names: HashMap<i32, String>,
+    pub(super) schema_names: HashMap<i32, String>,
     /// object_id → parent_object_id, for constraints and triggers.
-    parents: HashMap<i32, i32>,
+    pub(super) parents: HashMap<i32, i32>,
     /// object_id → definition text from sys.sql_modules.
-    modules: HashMap<i32, Module>,
+    pub(super) modules: HashMap<i32, Module>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Owner {
+pub(super) enum Owner {
     Table(usize),
     View(usize),
     TableType(usize),
+    ExternalTable(usize),
 }
 
 #[derive(Default)]
-struct Module {
-    definition: Option<String>,
+pub(super) struct Module {
+    pub(super) definition: Option<String>,
+    pub(super) clr_method: Option<String>,
+    pub(super) execute_as: Option<String>,
 }
 
 // Column readers. Every query casts to a small set of types, but SQL Server picks the
 // integer width for constants and catalog columns, so integers accept any width.
 
-fn text(row: &Row, i: usize) -> Option<String> {
+pub(super) fn text(row: &Row, i: usize) -> Option<String> {
     match row.get_column_data(i).ok()? {
         ColumnData::String(Some(s)) => Some(s.to_string()),
         ColumnData::Xml(Some(x)) => Some(x.to_string()),
@@ -121,11 +128,11 @@ fn text(row: &Row, i: usize) -> Option<String> {
     }
 }
 
-fn s(row: &Row, i: usize) -> String {
+pub(super) fn s(row: &Row, i: usize) -> String {
     text(row, i).unwrap_or_default()
 }
 
-fn int(row: &Row, i: usize) -> Option<i64> {
+pub(super) fn int(row: &Row, i: usize) -> Option<i64> {
     match row.get_column_data(i).ok()? {
         ColumnData::U8(v) => v.map(i64::from),
         ColumnData::I16(v) => v.map(i64::from),
@@ -145,11 +152,11 @@ fn float(row: &Row, i: usize) -> Option<f64> {
     }
 }
 
-fn i(row: &Row, idx: usize) -> i32 {
+pub(super) fn i(row: &Row, idx: usize) -> i32 {
     int(row, idx).unwrap_or(0) as i32
 }
 
-fn flag(row: &Row, i: usize) -> bool {
+pub(super) fn flag(row: &Row, i: usize) -> bool {
     int(row, i).unwrap_or(0) != 0
 }
 
@@ -217,7 +224,7 @@ impl Reader {
             "SELECT SCHEMA_NAME(t.schema_id), t.name, t.is_table_type, t.is_assembly_type,
                     TYPE_NAME(t.system_type_id), CAST(t.max_length AS int), CAST(t.precision AS int),
                     CAST(t.scale AS int), t.is_nullable, tt.type_table_object_id, {mo},
-                    a.name COLLATE DATABASE_DEFAULT + N'.' + at.assembly_class COLLATE DATABASE_DEFAULT
+                    QUOTENAME(a.name) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(at.assembly_class) COLLATE DATABASE_DEFAULT
              FROM sys.types AS t
              LEFT JOIN sys.table_types AS tt ON tt.user_type_id = t.user_type_id
              LEFT JOIN sys.assembly_types AS at ON at.user_type_id = t.user_type_id
@@ -330,11 +337,12 @@ impl Reader {
         Ok(())
     }
 
-    fn columns_of(&mut self, owner: Owner) -> &mut Vec<Column> {
+    pub(super) fn columns_of(&mut self, owner: Owner) -> &mut Vec<Column> {
         match owner {
             Owner::Table(t) => &mut self.db.tables[t].columns,
             Owner::View(v) => &mut self.db.views[v].columns,
             Owner::TableType(t) => &mut self.db.types[t].columns,
+            Owner::ExternalTable(t) => &mut self.db.external_tables[t].columns,
         }
     }
 
@@ -343,6 +351,7 @@ impl Reader {
             Owner::Table(t) => &mut self.db.tables[t].indexes,
             Owner::View(v) => &mut self.db.views[v].indexes,
             Owner::TableType(t) => &mut self.db.types[t].indexes,
+            Owner::ExternalTable(_) => unreachable!("external tables have no indexes"),
         }
     }
 
@@ -425,6 +434,7 @@ impl Reader {
                 masking_function: text(&r, 28),
                 bound_default: text(&r, 29),
                 bound_rule: text(&r, 30),
+                sensitivity: None,
             };
             self.columns_of(owner).push(column);
         }
@@ -775,7 +785,9 @@ impl Reader {
                     CASE WHEN m.execute_as_principal_id = -2 OR am.execute_as_principal_id = -2 THEN N'OWNER'
                          ELSE USER_NAME(COALESCE(m.execute_as_principal_id, am.execute_as_principal_id)) END,
                     {native},
-                    CASE WHEN am.object_id IS NOT NULL THEN QUOTENAME(a.name) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(am.assembly_class) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(am.assembly_method) COLLATE DATABASE_DEFAULT END
+                    CASE WHEN am.object_id IS NOT NULL THEN QUOTENAME(a.name) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(am.assembly_class) COLLATE DATABASE_DEFAULT
+                         + ISNULL(N'.' + QUOTENAME(am.assembly_method) COLLATE DATABASE_DEFAULT, N'') END,
+                    ISNULL(am.null_on_null_input, 0)
              FROM sys.objects AS o
              LEFT JOIN sys.sql_modules AS m ON m.object_id = o.object_id
              LEFT JOIN sys.assembly_modules AS am ON am.object_id = o.object_id
@@ -824,10 +836,12 @@ impl Reader {
                         execute_as: text(&r, 8),
                         native_compilation: flag(&r, 9),
                         clr_method: text(&r, 10),
+                        null_on_null_input: flag(&r, 11),
+                        ..Default::default()
                     });
                 }
             }
-            self.modules.insert(id, Module { definition });
+            self.modules.insert(id, Module { definition, clr_method: text(&r, 10), execute_as: text(&r, 8) });
         }
         Ok(())
     }
@@ -851,7 +865,10 @@ impl Reader {
         )
         .await?;
         for r in rows {
-            let definition = self.modules.get(&i(&r, 0)).and_then(|m| m.definition.clone());
+            let module = self.modules.get(&i(&r, 0));
+            let definition = module.and_then(|m| m.definition.clone());
+            let clr_method = module.and_then(|m| m.clr_method.clone());
+            let execute_as = module.and_then(|m| m.execute_as.clone());
             let mut events = Vec::new();
             for (col, event) in [(6, "INSERT"), (7, "UPDATE"), (8, "DELETE")] {
                 if flag(&r, col) {
@@ -865,13 +882,15 @@ impl Reader {
                 .collect();
             let trigger = Trigger {
                 name: s(&r, 2),
-                encrypted: definition.is_none(),
+                encrypted: definition.is_none() && clr_method.is_none(),
                 definition: definition.unwrap_or_default(),
                 disabled: flag(&r, 3),
                 instead_of: flag(&r, 4),
                 not_for_replication: flag(&r, 5),
                 events,
                 order,
+                clr_method,
+                execute_as,
             };
             match self.owners.get(&i(&r, 1)).copied() {
                 Some(Owner::Table(t)) => self.db.tables[t].triggers.push(trigger),
@@ -881,17 +900,32 @@ impl Reader {
         }
         let rows = db::query(
             conn,
-            "SELECT tr.name, OBJECT_DEFINITION(tr.object_id), tr.is_disabled
-             FROM sys.triggers AS tr WHERE tr.parent_class = 0 AND tr.is_ms_shipped = 0 ORDER BY tr.name",
+            "SELECT tr.name, m.definition, tr.is_disabled, ISNULL(m.uses_ansi_nulls, 1), ISNULL(m.uses_quoted_identifier, 1),
+                    CASE WHEN am.object_id IS NOT NULL THEN QUOTENAME(a.name) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(am.assembly_class) COLLATE DATABASE_DEFAULT
+                         + N'.' + QUOTENAME(am.assembly_method) COLLATE DATABASE_DEFAULT END,
+                    CASE WHEN COALESCE(m.execute_as_principal_id, am.execute_as_principal_id) = -2 THEN N'OWNER'
+                         ELSE USER_NAME(COALESCE(m.execute_as_principal_id, am.execute_as_principal_id)) END,
+                    STUFF((SELECT N',' + te.type_desc COLLATE DATABASE_DEFAULT FROM sys.trigger_events AS te
+                           WHERE te.object_id = tr.object_id ORDER BY te.type_desc FOR XML PATH('')), 1, 1, N'')
+             FROM sys.triggers AS tr
+             LEFT JOIN sys.sql_modules AS m ON m.object_id = tr.object_id
+             LEFT JOIN sys.assembly_modules AS am ON am.object_id = tr.object_id
+             LEFT JOIN sys.assemblies AS a ON a.assembly_id = am.assembly_id
+             WHERE tr.parent_class = 0 AND tr.is_ms_shipped = 0 ORDER BY tr.name",
         )
         .await?;
         for r in rows {
             let definition = text(&r, 1);
+            let clr_method = text(&r, 5);
             self.db.ddl_triggers.push(DdlTrigger {
                 name: s(&r, 0),
-                encrypted: definition.is_none(),
+                encrypted: definition.is_none() && clr_method.is_none(),
                 definition: definition.unwrap_or_default(),
                 disabled: flag(&r, 2),
+                settings: ModuleSettings { ansi_nulls: flag(&r, 3), quoted_identifier: flag(&r, 4) },
+                clr_method,
+                execute_as: text(&r, 6),
+                events: s(&r, 7).split(',').filter(|e| !e.is_empty()).map(str::to_string).collect(),
             });
         }
         Ok(())
@@ -952,8 +986,8 @@ impl Reader {
             "SELECT ep.class, ep.major_id, ep.minor_id, ep.name, CONVERT(nvarchar(max), ep.value),
                     CASE ep.class WHEN 3 THEN SCHEMA_NAME(ep.major_id)
                                   WHEN 6 THEN (SELECT SCHEMA_NAME(t.schema_id) + NCHAR(1) + t.name FROM sys.types AS t WHERE t.user_type_id = ep.major_id)
-                                  WHEN 7 THEN (SELECT x.name FROM sys.indexes AS x WHERE x.object_id = ep.major_id AND x.index_id = ep.minor_id)
-                                  WHEN 2 THEN (SELECT p.name FROM sys.parameters AS p WHERE p.object_id = ep.major_id AND p.parameter_id = ep.minor_id)
+                                  WHEN 7 THEN (SELECT x.name COLLATE DATABASE_DEFAULT FROM sys.indexes AS x WHERE x.object_id = ep.major_id AND x.index_id = ep.minor_id)
+                                  WHEN 2 THEN (SELECT p.name COLLATE DATABASE_DEFAULT FROM sys.parameters AS p WHERE p.object_id = ep.major_id AND p.parameter_id = ep.minor_id)
                                   WHEN 1 THEN CASE WHEN ep.minor_id > 0 THEN COL_NAME(ep.major_id, ep.minor_id) END END
              FROM sys.extended_properties AS ep
              WHERE ep.class IN (0, 1, 2, 3, 6, 7)
@@ -1024,8 +1058,11 @@ impl Reader {
         let rows = db::query(
             conn,
             "SELECT p.name, p.type_desc, SUSER_SNAME(p.sid), p.default_schema_name, USER_NAME(p.owning_principal_id),
-                    CASE WHEN p.type IN ('S', 'U', 'G') AND p.authentication_type = 0 THEN 1 ELSE 0 END
+                    CASE WHEN p.type IN ('S', 'U', 'G') AND p.authentication_type = 0 THEN 1 ELSE 0 END,
+                    cert.name, ak.name
              FROM sys.database_principals AS p
+             LEFT JOIN sys.certificates AS cert ON p.type = 'C' AND cert.sid = p.sid
+             LEFT JOIN sys.asymmetric_keys AS ak ON p.type = 'K' AND ak.sid = p.sid
              WHERE p.type IN ('S', 'U', 'G', 'E', 'X', 'C', 'K', 'R', 'A') AND p.is_fixed_role = 0
                AND p.name NOT IN (N'public', N'dbo', N'guest', N'sys', N'INFORMATION_SCHEMA') AND p.principal_id < 16384
              ORDER BY p.name",
@@ -1035,13 +1072,17 @@ impl Reader {
             let kind = s(&r, 1);
             let without_login = flag(&r, 5);
             let role = kind.ends_with("_ROLE");
+            let mapped = matches!(kind.as_str(), "CERTIFICATE_MAPPED_USER" | "ASYMMETRIC_KEY_MAPPED_USER");
             self.db.principals.push(Principal {
                 name: s(&r, 0),
-                login: if role || without_login { None } else { text(&r, 2) },
-                default_schema: if role { None } else { text(&r, 3) },
+                login: if role || without_login || mapped { None } else { text(&r, 2) },
+                // Application roles have a default schema too.
+                default_schema: if role && kind != "APPLICATION_ROLE" { None } else { text(&r, 3) },
                 owner: if role { text(&r, 4) } else { None },
                 kind,
                 member_of: Vec::new(),
+                certificate: text(&r, 6),
+                asymmetric_key: text(&r, 7),
                 no_connect: false,
             });
         }
@@ -1064,15 +1105,33 @@ impl Reader {
 
     async fn permissions(&mut self, conn: &mut Connection) -> Result<(), String> {
         // CONNECT for users comes with CREATE USER: only its absence (no_connect), DENY and WITH
-        // GRANT OPTION are kept. Column-level permissions are not modelled yet.
+        // GRANT OPTION are kept. Other securables are named in the query: (schema, name) for types
+        // and XML schema collections, the name for the rest.
         let rows = db::query(
             conn,
-            "SELECT p.class, p.major_id, p.permission_name, p.state_desc, g.name
+            "SELECT p.class, p.major_id, p.permission_name, p.state_desc, g.name,
+                    CASE WHEN p.class = 1 AND p.minor_id > 0 THEN COL_NAME(p.major_id, p.minor_id) END,
+                    CASE p.class WHEN 6 THEN (SELECT SCHEMA_NAME(t.schema_id) FROM sys.types AS t WHERE t.user_type_id = p.major_id)
+                                 WHEN 10 THEN (SELECT SCHEMA_NAME(x.schema_id) FROM sys.xml_schema_collections AS x WHERE x.xml_collection_id = p.major_id) END,
+                    CASE p.class WHEN 5 THEN (SELECT a.name COLLATE DATABASE_DEFAULT FROM sys.assemblies AS a WHERE a.assembly_id = p.major_id)
+                                 WHEN 6 THEN (SELECT t.name COLLATE DATABASE_DEFAULT FROM sys.types AS t WHERE t.user_type_id = p.major_id)
+                                 WHEN 10 THEN (SELECT x.name COLLATE DATABASE_DEFAULT FROM sys.xml_schema_collections AS x WHERE x.xml_collection_id = p.major_id)
+                                 WHEN 15 THEN (SELECT m.name COLLATE DATABASE_DEFAULT FROM sys.service_message_types AS m WHERE m.message_type_id = p.major_id)
+                                 WHEN 16 THEN (SELECT c.name COLLATE DATABASE_DEFAULT FROM sys.service_contracts AS c WHERE c.service_contract_id = p.major_id)
+                                 WHEN 17 THEN (SELECT v.name COLLATE DATABASE_DEFAULT FROM sys.services AS v WHERE v.service_id = p.major_id)
+                                 WHEN 18 THEN (SELECT b.name COLLATE DATABASE_DEFAULT FROM sys.remote_service_bindings AS b WHERE b.remote_service_binding_id = p.major_id)
+                                 WHEN 19 THEN (SELECT r.name COLLATE DATABASE_DEFAULT FROM sys.routes AS r WHERE r.route_id = p.major_id)
+                                 WHEN 23 THEN (SELECT f.name COLLATE DATABASE_DEFAULT FROM sys.fulltext_catalogs AS f WHERE f.fulltext_catalog_id = p.major_id)
+                                 WHEN 24 THEN (SELECT k.name COLLATE DATABASE_DEFAULT FROM sys.symmetric_keys AS k WHERE k.symmetric_key_id = p.major_id)
+                                 WHEN 25 THEN (SELECT c.name COLLATE DATABASE_DEFAULT FROM sys.certificates AS c WHERE c.certificate_id = p.major_id)
+                                 WHEN 26 THEN (SELECT k.name COLLATE DATABASE_DEFAULT FROM sys.asymmetric_keys AS k WHERE k.asymmetric_key_id = p.major_id)
+                                 WHEN 29 THEN (SELECT f.name COLLATE DATABASE_DEFAULT FROM sys.fulltext_stoplists AS f WHERE f.stoplist_id = p.major_id) END
              FROM sys.database_permissions AS p
              JOIN sys.database_principals AS g ON g.principal_id = p.grantee_principal_id
-             WHERE p.class IN (0, 1, 3) AND p.minor_id = 0 AND g.name NOT IN (N'dbo', N'sys', N'INFORMATION_SCHEMA')
+             WHERE (p.class IN (0, 1, 3, 5, 6, 10, 15, 16, 17, 18, 19, 23, 24, 25, 26, 29))
+               AND (p.minor_id = 0 OR p.class = 1) AND g.name NOT IN (N'dbo', N'sys', N'INFORMATION_SCHEMA')
                AND NOT (p.class = 0 AND p.permission_name = 'CONNECT' AND p.state = 'G')
-             ORDER BY p.class, p.major_id, g.name, p.permission_name",
+             ORDER BY p.class, p.major_id, g.name, p.permission_name, p.minor_id",
         )
         .await?;
         let connected = db::query(
@@ -1087,7 +1146,7 @@ impl Reader {
             p.no_connect = !connected.iter().any(|c| c == &p.name);
         }
         for r in rows {
-            let mut p = Permission { grantee: s(&r, 4), permission: s(&r, 2), state: s(&r, 3), ..Default::default() };
+            let mut p = Permission { grantee: s(&r, 4), permission: s(&r, 2), state: s(&r, 3), column: text(&r, 5), ..Default::default() };
             match i(&r, 0) {
                 0 => p.class = "DATABASE".into(),
                 1 => {
@@ -1104,7 +1163,12 @@ impl Reader {
                     p.class = "SCHEMA".into();
                     p.schema = Some(schema);
                 }
-                _ => continue,
+                class => {
+                    let Some(name) = text(&r, 7) else { continue };
+                    p.class = securable_class(class).into();
+                    p.schema = text(&r, 6);
+                    p.object = Some(name);
+                }
             }
             self.db.permissions.push(p);
         }
@@ -1166,6 +1230,9 @@ impl Reader {
     fn finish(mut self) -> Database {
         let db = &mut self.db;
         for t in &mut db.tables {
+            if t.graph.is_some() {
+                graph_indexes(t);
+            }
             t.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             t.foreign_keys.sort_by(|a, b| a.name.cmp(&b.name));
             t.check_constraints.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1193,6 +1260,26 @@ impl Reader {
     }
 }
 
+/// The class keyword of a securable in GRANT … ON <class>::name, from sys.database_permissions.class.
+fn securable_class(class: i32) -> &'static str {
+    match class {
+        5 => "ASSEMBLY",
+        6 => "TYPE",
+        10 => "XML SCHEMA COLLECTION",
+        15 => "MESSAGE TYPE",
+        16 => "CONTRACT",
+        17 => "SERVICE",
+        18 => "REMOTE SERVICE BINDING",
+        19 => "ROUTE",
+        23 => "FULLTEXT CATALOG",
+        24 => "SYMMETRIC KEY",
+        25 => "CERTIFICATE",
+        26 => "ASYMMETRIC KEY",
+        29 => "FULLTEXT STOPLIST",
+        _ => "OBJECT",
+    }
+}
+
 fn level1_class(kind: &str) -> &'static str {
     match kind {
         "U" => "TABLE",
@@ -1205,6 +1292,36 @@ fn level1_class(kind: &str) -> &'static str {
     }
 }
 
+/// Graph tables: the index SQL Server makes on the graph id is left out (it comes with the
+/// table), and other indexes name the graph columns by their pseudo columns.
+fn graph_indexes(t: &mut Table) {
+    t.indexes.retain(|ix| !ix.name.starts_with("GRAPH_UNIQUE_INDEX_"));
+    let edge = t.graph.as_deref() == Some("EDGE");
+    let pseudo = |c: &str| {
+        if c.starts_with("graph_id_") {
+            Some(if edge { "$edge_id" } else { "$node_id" })
+        } else if c.starts_with("from_obj_id_") || c.starts_with("from_id_") {
+            Some("$from_id")
+        } else if c.starts_with("to_obj_id_") || c.starts_with("to_id_") {
+            Some("$to_id")
+        } else {
+            None
+        }
+    };
+    let mut indexes = std::mem::take(&mut t.indexes);
+    for ix in &mut indexes {
+        let mut columns: Vec<IndexColumn> = Vec::new();
+        for c in ix.columns.drain(..) {
+            let name = pseudo(&c.name).map(str::to_string).unwrap_or(c.name);
+            if columns.last().is_none_or(|l| l.name != name) {
+                columns.push(IndexColumn { name, descending: c.descending });
+            }
+        }
+        ix.columns = columns;
+    }
+    t.indexes = indexes;
+}
+
 fn is_lob(c: &Column) -> bool {
     let t = &c.data_type;
     matches!(t.name.as_str(), "text" | "ntext" | "image" | "xml")
@@ -1213,7 +1330,7 @@ fn is_lob(c: &Column) -> bool {
 }
 
 /// A system type from catalog values; nchar/nvarchar lengths are stored in bytes.
-fn system_type(name: &str, max_length: i32, precision: i32, scale: i32) -> DataType {
+pub(super) fn system_type(name: &str, max_length: i32, precision: i32, scale: i32) -> DataType {
     let mut t = DataType { name: name.to_string(), ..Default::default() };
     match name {
         "char" | "varchar" | "binary" | "varbinary" => t.length = Some(max_length),
