@@ -356,14 +356,7 @@ fn data_deployment_converges() {
     let opts = DataOptions::default_set();
     let result = compare(&s1, &s2, &db1, &db2, &opts, &DataMappings::default(), |_| true, 4, |_, _| {}).unwrap();
     assert!(!result.identical());
-    let settings = sync::SyncSettings {
-        source: "s".into(),
-        target: "t".into(),
-        target_database: "QuillTest_Sync2".into(),
-        transaction_isolation_level: "SERIALIZABLE".into(),
-        kinds: [false, true, true, true],
-        tables: None,
-    };
+    let settings = sync::SyncSettings::new("s", "t", "QuillTest_Sync2");
     let script = sync::generate(&result, &db2, &opts, &settings).unwrap();
     if let Err(e) = deploy::execute(&s2, &script, |_, _| {}) {
         panic!("{e}\n\n{}", script.sql);
