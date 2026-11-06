@@ -445,6 +445,7 @@ namespace QuillSql.Compare
             {
                 _schemaResults = new SchemaResults(_session, result);
                 _schemaResults.ReviewRenames += async renames => await MapRenames(renames);
+                _schemaResults.FilterChanged += () => { _dirty = true; UpdateTitle(); };
             }
         }
 
