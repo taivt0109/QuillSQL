@@ -110,13 +110,19 @@ namespace QuillSql.Compare
             newMenu.Items.Add(Ui.MenuItem("Schema comparison", () => New(false), Glyph.List));
             newMenu.Items.Add(Ui.MenuItem("Data comparison", () => New(true), Glyph.Document));
             _openMenu.Opened += (s, e) => FillOpenMenu();
+            _switch = Ui.Command(Glyph.Switch, "Switch direction", async () => await SwitchDirection(), "Switch deployment direction (Ctrl+D): the target becomes the source");
+            _toolsMenu.Opened += (s, e) => FillToolsMenu();
+            _tools = Ui.MenuButton(Glyph.Report, "Tools", _toolsMenu);
             var commands = Ui.Row(
                 Ui.MenuButton(Glyph.Add, "New", newMenu),
                 Ui.MenuButton(Glyph.Open, "Open", _openMenu),
                 Ui.Command(Glyph.Save, "Save", async () => await Save(false), "Save the project (Ctrl+S)"),
                 Ui.Command(Glyph.SaveAs, "Save as", async () => await Save(true)),
+                Ui.Command(Glyph.Recent, "My projects", async () => await MyProjects(), "My projects (Ctrl+M)"),
                 Separator(),
-                _edit);
+                _edit,
+                _switch,
+                _tools);
             var actions = Ui.Row(_cancel, _deploy, _compare);
             var bar = new DockPanel { Margin = new Thickness(10, 8, 16, 0) };
             DockPanel.SetDock(actions, Dock.Right);
@@ -144,6 +150,37 @@ namespace QuillSql.Compare
             InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await Save(false)), System.Windows.Input.Key.S, System.Windows.Input.ModifierKeys.Control));
             InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await OpenDialog()), System.Windows.Input.Key.O, System.Windows.Input.ModifierKeys.Control));
             InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await Compare()), System.Windows.Input.Key.F5, System.Windows.Input.ModifierKeys.None));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await SwitchDirection()), System.Windows.Input.Key.D, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await MyProjects()), System.Windows.Input.Key.M, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await Deploy()), System.Windows.Input.Key.F8, System.Windows.Input.ModifierKeys.None));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(() => { if (_session != null) ShowEditor(); }), System.Windows.Input.Key.E, System.Windows.Input.ModifierKeys.Control));
+            ShowResultCommands(false);
+        }
+
+        private readonly Button _switch, _tools;
+        private readonly ContextMenu _toolsMenu = new ContextMenu();
+
+        private void ShowResultCommands(bool shown)
+        {
+            _switch.Visibility = _tools.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        /// <summary>Reports, exports and saved results.</summary>
+        private void FillToolsMenu()
+        {
+            _toolsMenu.Items.Clear();
+            if (_schemaResults != null)
+            {
+                _toolsMenu.Items.Add(Ui.MenuItem("Create report…", async () => await Dialogs.SchemaReport(_session, _schemaResults), Glyph.Report));
+            }
+            if (_dataResults != null)
+            {
+                var identicalStored = _session.Project.Strings("options").Contains("IncludeIdenticalRecords");
+                _toolsMenu.Items.Add(Ui.MenuItem("Export CSV files…", async () => await Dialogs.ExportCsv(_session, _dataResults, identicalStored), Glyph.Export));
+                _toolsMenu.Items.Add(Ui.MenuItem("HTML report…", async () => await Dialogs.DataReport(_session, _dataResults), Glyph.Report));
+                _toolsMenu.Items.Add(new Separator());
+                _toolsMenu.Items.Add(Ui.MenuItem("Save results…", async () => await SaveResults(), Glyph.Save));
+            }
         }
 
         private static UIElement Separator()
@@ -167,6 +204,8 @@ namespace QuillSql.Compare
         {
             _openMenu.Items.Clear();
             _openMenu.Items.Add(Ui.MenuItem("Open project…", async () => await OpenDialog(), Glyph.Open, "Ctrl+O"));
+            _openMenu.Items.Add(Ui.MenuItem("Open saved data comparison…", async () => await OpenResults(), Glyph.Document));
+            _openMenu.Items.Add(Ui.MenuItem("My projects…", async () => await MyProjects(), Glyph.Recent, "Ctrl+M"));
             var recent = CompareSettings.Load().Recent.Where(File.Exists).Take(10).ToList();
             if (recent.Count == 0) return;
             _openMenu.Items.Add(new Separator());
@@ -215,6 +254,7 @@ namespace QuillSql.Compare
         {
             var settings = CompareSettings.Load();
             var last = settings.Recent.FirstOrDefault(File.Exists);
+            if (settings.ShowMyProjects && await MyProjects()) return;
             if (settings.ReopenLast && last != null) await Open(last);
             else New(false);
         }
@@ -252,15 +292,24 @@ namespace QuillSql.Compare
                 var ext = _session.IsData ? "qdc" : "qsc";
                 var d = new SaveFileDialog
                 {
-                    Filter = _session.IsData ? "Data compare project (*.qdc)|*.qdc" : "Schema compare project (*.qsc)|*.qsc",
+                    Filter = _session.IsData
+                        ? "Data compare project (*.qdc)|*.qdc|SQL Data Compare project (*.sdc)|*.sdc"
+                        : "Schema compare project (*.qsc)|*.qsc|SQL Compare project (*.scp)|*.scp",
                     DefaultExt = ext,
                     FileName = SuggestedName() + "." + ext,
                 };
                 if (d.ShowDialog(_host.Owner) != true) return;
                 path = d.FileName;
             }
-            var ok = await Ui.Try(_host.Owner, () => _engine.Request("project_save", new JsonObject { ["path"] = path, ["project"] = _session.Project }));
+            // SQL Compare and SQL Data Compare projects are written in their format, without passwords.
+            var vendor = path.EndsWith(".scp", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".sdc", StringComparison.OrdinalIgnoreCase);
+            var ok = await Ui.Try(_host.Owner, () => _engine.Request(vendor ? "project_export" : "project_save", new JsonObject { ["path"] = path, ["project"] = _session.Project }));
             if (ok == null) return;
+            if (vendor)
+            {
+                _status.Text = "Saved " + path + " for SQL Compare. Keep saving as a QuillSQL project to keep every setting.";
+                return;
+            }
             _session.FilePath = path;
             _dirty = false;
             CompareSettings.Load().AddRecent(path);
@@ -300,6 +349,7 @@ namespace QuillSql.Compare
             _content.Content = _editor;
             _deploy.IsEnabled = false;
             _edit.Visibility = Visibility.Collapsed;
+            ShowResultCommands(false);
             UpdateTitle();
         }
 
@@ -308,6 +358,7 @@ namespace QuillSql.Compare
             _content.Content = (UIElement)_schemaResults ?? _dataResults;
             _deploy.IsEnabled = true;
             _edit.Visibility = Visibility.Visible;
+            ShowResultCommands(true);
         }
 
         private void SetBusy(bool busy, string text)
@@ -334,7 +385,7 @@ namespace QuillSql.Compare
             _editor?.Collect();
             var source = _session.Project.Obj("source");
             var target = _session.Project.Obj("target");
-            bool incomplete(JsonObject s) => s == null || (s.Str("type") == "snapshot" ? string.IsNullOrEmpty(s.Str("path")) : string.IsNullOrEmpty(s.Str("server")) || string.IsNullOrEmpty(s.Str("database")));
+            bool incomplete(JsonObject s) => s == null || (s.Str("type") == "empty" ? false : s.Str("type") == "snapshot" ? string.IsNullOrEmpty(s.Str("path")) : string.IsNullOrEmpty(s.Str("server")) || string.IsNullOrEmpty(s.Str("database")));
             if (incomplete(source) || incomplete(target))
             {
                 Ui.Error(_host.Owner, "Choose a server and database (or a snapshot) for both the source and the target.");
@@ -351,9 +402,139 @@ namespace QuillSql.Compare
             }
             _schemaResults = null;
             _dataResults = null;
-            if (_session.IsData) _dataResults = new DataResults(_session, result);
-            else _schemaResults = new SchemaResults(_session, result);
+            ShowComparison(result);
             SetBusy(false, "Compared at " + DateTime.Now.ToShortTimeString() + ".");
+            ShowResults();
+            UpdateTitle();
+        }
+
+        /// <summary>Shows a comparison reply as results.</summary>
+        private void ShowComparison(JsonObject result)
+        {
+            if (_session.IsData)
+            {
+                _dataResults = new DataResults(_session, result);
+            }
+            else
+            {
+                _schemaResults = new SchemaResults(_session, result);
+                _schemaResults.ReviewRenames += async renames => await MapRenames(renames);
+            }
+        }
+
+        /// <summary>Confirmed renames become table mappings, and the databases are compared again.</summary>
+        private async Task MapRenames(List<JsonObject> renames)
+        {
+            var chosen = Dialogs.ConfirmRenames(_host.Owner, renames);
+            if (chosen == null || chosen.Count == 0) return;
+            var mappings = _session.Project.Obj("schemaMappings") ?? new JsonObject();
+            var tables = mappings.List("tables");
+            foreach (var r in chosen) tables.Add(new JsonObject { ["source"] = r.Obj("source"), ["target"] = r.Obj("target"), ["columns"] = new List<object>() });
+            mappings["tables"] = tables;
+            _session.Project["schemaMappings"] = mappings;
+            _dirty = true;
+            _editor = null;
+            await Compare();
+        }
+
+        /// <summary>Switch deployment direction: the target becomes the source. Schema results are compared again from what was read; data is compared again.</summary>
+        private async Task SwitchDirection()
+        {
+            if (_session == null || (_schemaResults == null && _dataResults == null)) return;
+            if (_session.Project.Obj("target")?.Str("type") == "empty")
+            {
+                Ui.Error(_host.Owner, "An empty database cannot be the source.");
+                return;
+            }
+            CollectSelection();
+            if (_schemaResults != null)
+            {
+                SetBusy(true, "Switching deployment direction…");
+                var result = await Ui.Try(_host.Owner, () => _engine.RequestObject("schema_switch", new JsonObject { ["session"] = _schemaResults.Session }));
+                if (result == null)
+                {
+                    SetBusy(false, "");
+                    return;
+                }
+                SwapSides();
+                _schemaResults = null;
+                ShowComparison(result);
+                SetBusy(false, "Deployment direction switched: " + result.Str("targetName") + " is now the target.");
+                ShowResults();
+                UpdateTitle();
+                return;
+            }
+            SwapSides();
+            await Compare();
+        }
+
+        /// <summary>Swaps source and target in the project, with their passwords and mappings.</summary>
+        private void SwapSides()
+        {
+            var p = _session.Project;
+            var source = p.Obj("source");
+            p["source"] = p.Obj("target");
+            p["target"] = source;
+            _session.Passwords.TryGetValue("source", out var sp);
+            _session.Passwords.TryGetValue("target", out var tp);
+            _session.Passwords["source"] = tp;
+            _session.Passwords["target"] = sp;
+            var mappings = p.Obj("schemaMappings");
+            if (mappings != null)
+            {
+                foreach (var pair in mappings.List("schemas").OfType<List<object>>()) pair.Reverse();
+                foreach (var t in mappings.List("tables").OfType<JsonObject>())
+                {
+                    var s = t.Obj("source");
+                    t["source"] = t.Obj("target");
+                    t["target"] = s;
+                    foreach (var c in t.List("columns").OfType<List<object>>()) c.Reverse();
+                }
+            }
+            _dirty = true;
+            _editor = null;
+        }
+
+        /// <summary>Opens My projects; true when a project was opened or started from it.</summary>
+        private async Task<bool> MyProjects()
+        {
+            var choice = Dialogs.MyProjects(_engine, _host.Owner);
+            if (choice == null) return false;
+            if (choice.NewData.HasValue)
+            {
+                New(choice.NewData.Value);
+                return true;
+            }
+            await Open(choice.Path);
+            if (choice.CompareNow) await Compare();
+            return true;
+        }
+
+        /// <summary>Saves the open data comparison, rows and all, to open it again later.</summary>
+        private async Task SaveResults()
+        {
+            if (_dataResults == null) return;
+            var d = new SaveFileDialog { Filter = "Saved data comparison (*.qdcr)|*.qdcr", DefaultExt = "qdcr", FileName = SuggestedName() + ".qdcr" };
+            if (d.ShowDialog(_host.Owner) != true) return;
+            var ok = await Ui.Try(_host.Owner, () => _engine.Request("data_session_save", new JsonObject { ["session"] = _dataResults.Session, ["path"] = d.FileName }));
+            if (ok != null) _status.Text = "Saved the results to " + d.FileName;
+        }
+
+        private async Task OpenResults()
+        {
+            var d = new OpenFileDialog { Filter = "Saved data comparison (*.qdcr)|*.qdcr|All files|*.*" };
+            if (d.ShowDialog(_host.Owner) != true) return;
+            if (!CanClose()) return;
+            var defs = await OptionDefinitions();
+            SetBusy(true, "Opening " + Path.GetFileName(d.FileName) + "…");
+            var result = await Ui.Try(_host.Owner, () => _engine.RequestObject("data_session_load", new JsonObject { ["path"] = d.FileName }));
+            SetBusy(false, result == null ? "" : "Opened results saved in " + d.FileName + ".");
+            if (result == null) return;
+            _session = new CompareSession(_engine, _host, result.Obj("project") ?? CompareSession.NewProject(true, defs)) { OptionDefinitions = defs };
+            _dirty = false;
+            _schemaResults = null;
+            _editor = null;
+            ShowComparison(result);
             ShowResults();
             UpdateTitle();
         }
@@ -361,153 +542,102 @@ namespace QuillSql.Compare
         private async Task Deploy()
         {
             if (_session == null || (_schemaResults == null && _dataResults == null)) return;
-            JsonObject script;
-            SetBusy(true, "Creating the deployment script…");
+            var target = _session.Project.Obj("target");
+            var source = _session.Project.Obj("source");
+            string describe(JsonObject s) => s?.Str("type") == "snapshot" ? Path.GetFileName(s.Str("path")) : s?.Str("type") == "empty" ? "Empty database" : s?.Str("server") + " / " + s?.Str("database");
+            var live = target != null && target.Str("type") != "snapshot" && target.Str("type") != "empty";
+            DeployWizard wizard;
+            long session;
             if (_schemaResults != null)
             {
-                var selected = _schemaResults.Selected;
+                var results = _schemaResults;
+                var selected = results.Selected;
                 if (selected.Count == 0)
                 {
-                    SetBusy(false, "Tick the objects to deploy first.");
+                    Ui.Error(_host.Owner, "You have not selected any objects to deploy.");
                     return;
                 }
-                script = await Ui.Try(_host.Owner, () => _engine.RequestObject("schema_script", new JsonObject
+                session = results.Session;
+                SetBusy(true, "Finding dependencies…");
+                var deps = await Ui.Try(_host.Owner, async () => await _engine.Request("schema_dependencies", new JsonObject { ["session"] = session, ["selected"] = selected }) as List<object>);
+                SetBusy(false, "");
+                string action(string kind) => kind == "OnlyIn1" ? "Create" : kind == "OnlyIn2" ? "Drop" : "Alter";
+                string name(JsonObject d) => (string.IsNullOrEmpty(d.Str("schema")) ? "" : "[" + d.Str("schema") + "].") + "[" + d.Str("name") + "]";
+                var changes = selected.Select(i => results.Difference((int)i)).Where(d => d != null)
+                    .Select(d => new DeployWizard.Change { Object = name(d), Type = d.Str("type"), Action = action(d.Str("kind")), Index = (int)d.Long("index") }).ToList();
+                var dependencies = (deps ?? new List<object>()).OfType<JsonObject>().Select(x =>
                 {
-                    ["session"] = _schemaResults.Session,
-                    ["selected"] = selected,
-                    ["project"] = _session.Project,
-                }));
+                    var d = results.Difference((int)x.Long("index"));
+                    return new DeployWizard.Dependency { Index = (int)x.Long("index"), Name = name(d), Type = d.Str("type"), Action = action(d.Str("kind")), ReferencedBy = string.Join(", ", x.Strings("referencedBy")) };
+                }).ToList();
+                var options = _session.Project.Strings("options");
+                wizard = new DeployWizard(_host, describe(source), live ? describe(target) : null, Ui.Plural(changes.Count, "object", "objects") + " selected for deployment", changes, dependencies, options.Contains("IncludeDependencies"),
+                    async (all, extra) =>
+                    {
+                        var project = _session.Project.Clone();
+                        var opts = project.Strings("options").Where(o => o != "IncludeDependencies").Cast<object>().ToList();
+                        if (all) opts.Add("IncludeDependencies");
+                        project["options"] = opts;
+                        var ids = selected.Concat(all ? new List<object>() : extra.Select(e => (object)e)).ToList();
+                        return await Ui.Try(_host.Owner, () => _engine.RequestObject("schema_script", new JsonObject { ["session"] = session, ["selected"] = ids, ["project"] = project }));
+                    });
             }
             else
             {
-                script = await Ui.Try(_host.Owner, () => _engine.RequestObject("data_script", new JsonObject
+                var results = _dataResults;
+                if (results.SelectedRows == 0)
                 {
-                    ["session"] = _dataResults.Session,
-                    ["tables"] = _dataResults.SelectedTables,
-                    ["kinds"] = new List<object> { false, true, true, true },
-                }));
+                    Ui.Error(_host.Owner, "You have not selected any objects to deploy.");
+                    return;
+                }
+                session = results.Session;
+                var changes = new List<DeployWizard.Change>();
+                foreach (var t in results.Tables.Where(t => t.SelectedTotal > 0))
+                {
+                    foreach (var (kind, verb) in new[] { (DataResults.OnlyInSource, "Insert"), (DataResults.Different, "Update"), (DataResults.OnlyInTarget, "Delete") })
+                    {
+                        var n = t.SelectedCount(kind);
+                        if (n > 0) changes.Add(new DeployWizard.Change { Object = t.Name + " (" + Ui.Plural(n, "row", "rows") + ")", Type = "Table", Action = verb });
+                    }
+                }
+                wizard = new DeployWizard(_host, describe(source), live ? describe(target) : null, results.SelectedRows.ToString("N0") + " rows selected for deployment", changes, null, false,
+                    async (all, extra) => await Ui.Try(_host.Owner, () => _engine.RequestObject("data_script", new JsonObject
+                    {
+                        ["session"] = session,
+                        ["tables"] = results.SelectedTables,
+                        ["kinds"] = new List<object> { false, true, true, true },
+                        ["selections"] = results.Selections(),
+                    })));
             }
-            SetBusy(false, "");
-            if (script == null) return;
-            var session = _schemaResults?.Session ?? _dataResults.Session;
-            var target = _session.Project.Obj("target");
-            var targetName = target?.Str("type") == "snapshot" ? null : target?.Str("server") + " / " + target?.Str("database");
-            var wizard = new DeployWindow(_host, script, targetName);
-            if (wizard.Run() != DeployWindow.Choice.Deploy) return;
+            var outcome = wizard.Run();
+            if (outcome.Choice == DeployWizard.Choice.None) return;
+            var sql = outcome.Script.Str("sql") ?? "";
+            if (outcome.Choice == DeployWizard.Choice.OpenScript)
+            {
+                _host.OpenScript(sql, "Deployment script");
+                return;
+            }
+            if (outcome.SaveCopyTo != null)
+            {
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(outcome.SaveCopyTo));
+                    File.WriteAllText(outcome.SaveCopyTo, sql, new System.Text.UTF8Encoding(true));
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    Ui.Error(_host.Owner, "The copy of the script was not saved: " + ex.Message);
+                }
+            }
             SetBusy(true, "Deploying…");
             var done = await Ui.Try(_host.Owner, () => _engine.RequestObject("deploy", new JsonObject { ["session"] = session }, Progress));
-            SetBusy(false, done == null ? "The deployment failed and was rolled back." : "Deployed (" + done.Long("batches") + " batches). Compare again to check.");
-            if (done != null && Ui.Confirm(_host.Owner, "The deployment finished. Compare again now?")) await Compare();
+            SetBusy(false, done == null ? "The deployment failed and was rolled back." : "Deployed (" + done.Long("batches") + " batches).");
+            if (done == null) return;
+            if (outcome.Recompare) await Compare();
+            Ui.Message(_host.Owner, "QuillSQL Compare", "Deployment was successful.", Ui.Tone.Info, "OK");
         }
 
         /// <summary>Asks before discarding unsaved project changes.</summary>
         public bool CanClose() => !_dirty || Ui.Confirm(_host.Owner, "The project has unsaved changes. Close it anyway?");
-    }
-
-    /// <summary>Review the script and warnings, then deploy, open the script, or save it.</summary>
-    internal sealed class DeployWindow
-    {
-        public enum Choice { None, Deploy }
-
-        private readonly ICompareHost _host;
-        private readonly JsonObject _script;
-        private readonly string _target;
-
-        public DeployWindow(ICompareHost host, JsonObject script, string target)
-        {
-            _host = host;
-            _script = script;
-            _target = target;
-        }
-
-        public Choice Run()
-        {
-            var choice = Choice.None;
-            var sql = _script.Str("sql") ?? "";
-            var warnings = _script.List("warnings").OfType<JsonObject>().ToList();
-            var high = warnings.Count(w => w.Str("severity") == "High");
-            var tabs = new TabControl();
-            var code = Ui.Code();
-            code.Text = sql.Length == 0 ? "-- Nothing to deploy." : sql;
-            tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Code, "Deployment script"), Content = code });
-            var list = new StackPanel { Margin = new Thickness(16, 12, 16, 12) };
-            foreach (var w in warnings)
-            {
-                var sev = w.Str("severity");
-                var brush = sev == "High" ? CompareTheme.High : sev == "Medium" ? CompareTheme.Medium : CompareTheme.Muted;
-                var icon = Ui.Icon(sev == "Low" ? Glyph.Info : Glyph.Warning, 15, brush);
-                icon.VerticalAlignment = VerticalAlignment.Top;
-                icon.Margin = new Thickness(0, 2, 12, 0);
-                var text = new TextBlock { TextWrapping = TextWrapping.Wrap };
-                text.Inlines.Add(new Run((string.IsNullOrEmpty(w.Str("object")) ? sev : w.Str("object"))) { FontWeight = FontWeights.SemiBold });
-                text.Inlines.Add(new LineBreak());
-                text.Inlines.Add(new Run(w.Str("message")) { Foreground = CompareTheme.Muted });
-                var item = new DockPanel { Margin = new Thickness(0, 0, 0, 14) };
-                DockPanel.SetDock(icon, Dock.Left);
-                item.Children.Add(icon);
-                item.Children.Add(text);
-                list.Children.Add(item);
-            }
-            if (warnings.Count == 0) list.Children.Add(Ui.Text("No warnings.", brush: CompareTheme.Muted));
-            var warningTab = new TabItem
-            {
-                Header = Ui.IconText(Glyph.Warning, "Warnings (" + warnings.Count + ")"),
-                Content = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
-            };
-            tabs.Items.Add(warningTab);
-            if (high > 0) tabs.SelectedItem = warningTab;
-
-            var window = Ui.Dialog(_host.Owner, "Deploy", null, 1000, 700);
-            var heading = Ui.Title(_target == null ? "Deployment script" : "Deploy to " + _target);
-            var lead = Ui.Text(
-                _target == null
-                    ? "The target is a snapshot: the script can be saved or opened, not run."
-                    : "Review the script and its warnings. It runs in one transaction and is rolled back if any statement fails.",
-                brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
-            lead.Margin = new Thickness(0, 4, 0, 14);
-            var top = Ui.Column(heading, lead);
-            if (high > 0)
-            {
-                var alert = Ui.Row(Ui.Icon(Glyph.Warning, 14, CompareTheme.High), new Border { Width = 8 },
-                    Ui.Text(Ui.Plural(high, "high-severity warning", "high-severity warnings") + ": data may be lost.", brush: CompareTheme.High));
-                alert.Margin = new Thickness(0, 0, 0, 12);
-                top.Children.Add(alert);
-            }
-            var card = Ui.Card(tabs, 0);
-            var body = new DockPanel { Margin = new Thickness(24, 20, 24, 20) };
-            DockPanel.SetDock(top, Dock.Top);
-            body.Children.Add(top);
-            body.Children.Add(card);
-
-            var deploy = Ui.Button("Deploy now", () =>
-            {
-                var message = "Run this script on " + _target + " now?" + (high > 0 ? "\n\nThere are " + high + " high-severity warnings: data may be lost." : "");
-                if (Ui.Confirm(window, message))
-                {
-                    choice = Choice.Deploy;
-                    window.Close();
-                }
-            }, primary: true, minWidth: 120, glyph: Glyph.Upload);
-            deploy.IsEnabled = _target != null && sql.Length > 0;
-            var open = Ui.Button("Open in editor", () => { _host.OpenScript(sql, "Deployment script"); window.Close(); }, minWidth: 110, glyph: Glyph.Edit);
-            var save = Ui.Button("Save script…", () =>
-            {
-                var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = "deploy.sql" };
-                if (d.ShowDialog(window) == true) File.WriteAllText(d.FileName, sql, new System.Text.UTF8Encoding(true));
-            }, minWidth: 100, glyph: Glyph.Save);
-            var copy = Ui.Button("Copy", () => Clipboard.SetText(sql), glyph: Glyph.Copy);
-            var close = Ui.Button("Close", () => window.Close());
-            close.IsCancel = true;
-            var left = Ui.Row(copy, save, open);
-            left.Margin = new Thickness(-8, 0, 0, 0);
-            var right = Ui.Row(deploy, close);
-            var buttons = new DockPanel();
-            DockPanel.SetDock(right, Dock.Right);
-            buttons.Children.Add(right);
-            buttons.Children.Add(left);
-            window.Content = Ui.WithFooter(body, buttons);
-            window.ShowDialog();
-            return choice;
-        }
     }
 }
