@@ -167,6 +167,50 @@ fn data_compare_with_a_scripts_folder() {
     server.drop("QD_sources_Data");
 }
 
+/// Data of many types, read from a scripts folder without a server.
+const TYPES: &str = "CREATE TABLE dbo.Types (Id int NOT NULL PRIMARY KEY, Code char(4) NULL, Name nvarchar(50) COLLATE Latin1_General_CI_AI NULL, \
+    Amount decimal(10, 3) NULL, Price money NULL, Ratio float NULL, Small real NULL, Flag bit NULL, Born date NULL, Seen datetime NULL, \
+    At datetime2(3) NULL, Zone datetimeoffset(0) NULL, Clock time(2) NULL, Guid uniqueidentifier NULL, Blob varbinary(20) NULL, Fixed binary(4) NULL, Doc xml NULL);
+GO
+INSERT dbo.Types VALUES (1, 'ab', N'Ánh', 1.25, 3.5, 1.5e10, 0.1, 1, '2001-02-03', '2020-01-02 03:04:05.833', '2020-01-02 03:04:05.123', '2020-01-02 03:04:05 +07:00', '10:11:12.34', '6F9619FF-8B86-D011-B42D-00C04FC964FF', 0x0102, 0x0A, N'<a b=\"1\"/>');
+INSERT dbo.Types VALUES (2, NULL, N'it''s', -0.001, -1, -2.25, 3, 0, NULL, '1999-12-31 23:59:59.997', NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+INSERT dbo.Types (Id) VALUES (3);
+GO
+CREATE TABLE dbo.Child (Id int NOT NULL PRIMARY KEY, TypesId int NULL REFERENCES dbo.Types (Id), Note varchar(10) NULL);
+GO
+INSERT dbo.Child VALUES (1, 1, 'x'), (2, NULL, 'y ');
+";
+
+#[test]
+fn data_compare_with_a_scripts_folder_without_a_server() {
+    let Some(server) = server() else { return };
+    server.create("QD_sources_Types", TYPES);
+    let dir = temp("types");
+    let d = |s: &str| s.to_string();
+    let path = dir.to_string_lossy().to_string();
+    folder::write_all(&server.read("QD_sources_Types"), &dir, &Options::default_set()).unwrap();
+    let (code, out) = quill(&server, "data", &[1], &[d("/database1:QD_sources_Types"), format!("/makescripts:{path}")]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Types"), d("/verbose")]);
+    assert_eq!(code, 63, "{out}");
+    assert!(!out.contains("temporary database"), "read without a server: {out}");
+    let rt = db::runtime().unwrap();
+    rt.block_on(async {
+        let mut c = db::connect_async(&server.spec("QD_sources_Types")).await.unwrap();
+        db::execute(&mut c, "UPDATE dbo.Types SET Name = N'Anh', Amount = 2 WHERE Id = 1; DELETE dbo.Child WHERE Id = 2; INSERT dbo.Child VALUES (3, 2, 'z');").await.unwrap();
+    });
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Types")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("[dbo].[Types]") && out.contains("[dbo].[Child]"), "{out}");
+    // Deploy the database's data to the folder, then they are the same.
+    let (code, out) = quill(&server, "data", &[1], &[d("/database1:QD_sources_Types"), format!("/scripts2:{path}"), d("/synchronize")]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Types")]);
+    assert_eq!(code, 63, "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+    server.drop("QD_sources_Types");
+}
+
 #[test]
 fn hand_written_script_reads_like_the_database() {
     let Some(server) = server() else { return };
