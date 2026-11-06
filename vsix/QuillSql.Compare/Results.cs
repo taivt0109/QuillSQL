@@ -59,14 +59,12 @@ namespace QuillSql.Compare
         private readonly CheckBox _showIdentical;
         private readonly TextBox _find = Ui.SearchBox("Group objects as you type", 240);
         private readonly ComboBox _groupBy = new ComboBox { Width = 170, VerticalAlignment = VerticalAlignment.Center };
-        private readonly HashSet<string> _excludedTypes = new HashSet<string>();
+        private readonly HashSet<int> _filtered = new HashSet<int>();
         private readonly Button _filterButton;
-        private readonly Border _filterPane;
-        private readonly StackPanel _typeList = new StackPanel();
+        private readonly FilterPane _filterPane;
         private readonly string _sourceName, _targetName;
         private readonly List<int> _diffLines = new List<int>();
         private int _diffAt = -1;
-        private bool _ignoreTypeEvents;
 
         public long Session { get; }
 
@@ -110,7 +108,7 @@ namespace QuillSql.Compare
             _view.Filter = o =>
             {
                 var r = (Row)o;
-                if (_excludedTypes.Contains(r.Type)) return false;
+                if (_filtered.Contains(r.Index)) return false;
                 return r.Kind != "Equal" || _showIdentical.IsChecked == true;
             };
             _find.TextChanged += (s, e) => { _groupBy.IsEnabled = _find.Text.Length == 0; Regroup(); };
@@ -253,7 +251,18 @@ namespace QuillSql.Compare
             var listArea = new Grid();
             listArea.Children.Add(_grid);
             listArea.Children.Add(_empty);
-            _filterPane = FilterPane();
+            foreach (var i in result.List("filtered")) _filtered.Add((int)(double)i);
+            _filterPane = new FilterPane(session, _rows.Select(r => r.Type).Distinct().OrderBy(t => t)) { Visibility = _filtered.Count > 0 ? Visibility.Visible : Visibility.Collapsed };
+            _filterPane.Changed += async f => await ApplyFilter(f);
+            var projectFilter = session.Project.Str("filter");
+            if (projectFilter != null)
+            {
+                Loaded += async (s, e) =>
+                {
+                    var model = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("filter_load", new JsonObject { ["xml"] = projectFilter }));
+                    if (model != null) _filterPane.SetFilter(model.Obj("filter"));
+                };
+            }
             var withFilter = new DockPanel();
             DockPanel.SetDock(_filterPane, Dock.Left);
             withFilter.Children.Add(_filterPane);
@@ -344,7 +353,8 @@ namespace QuillSql.Compare
             _empty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
             ((TextBlock)_empty.Children[1]).Text = differences == 0 ? "The schemas are identical" : "No objects are shown";
             _emptyText.Text = differences == 0 ? Ui.Plural(_identical, "object compared", "objects compared") + "; nothing to deploy." : "Show identical objects or include more object types in the filter.";
-            var filtered = _rows.Count(r => _excludedTypes.Contains(r.Type) && (r.Kind != "Equal" || _showIdentical.IsChecked == true));
+            var filtered = _rows.Count(r => _filtered.Contains(r.Index) && (r.Kind != "Equal" || _showIdentical.IsChecked == true));
+            _filterPane.ShowExcluded(_rows.Count(r => _filtered.Contains(r.Index)));
             ((TextBlock)((StackPanel)_filterButton.Content).Children[1]).Text = Ui.Plural(filtered, "object filtered", "objects filtered");
             UpdateHeaderCheck();
         }
@@ -419,7 +429,7 @@ namespace QuillSql.Compare
             _headerCheck.IsChecked = shown.Count > 0 && shown.All(r => r.Selected) ? true : shown.Any(r => r.Selected) ? (bool?)null : false;
         }
 
-        private IEnumerable<Row> Shown() => _rows.Where(r => !_excludedTypes.Contains(r.Type));
+        private IEnumerable<Row> Shown() => _rows.Where(r => !_filtered.Contains(r.Index));
 
         public void SelectAll(bool on)
         {
@@ -438,56 +448,25 @@ namespace QuillSql.Compare
         public List<object> Deselected => _rows.Where(r => !r.Selected && r.Kind != "Equal")
             .Select(r => (object)new JsonObject { ["type"] = r.Type, ["schema"] = r.Data.Str("schema"), ["name"] = r.Data.Str("name") }).ToList();
 
-        // ---- Filter pane: object types ----
+        // ---- Filter ----
 
-        private Border FilterPane()
+        /// <summary>Applies the pane's filter in the engine; what it leaves out is hidden and not deployed.</summary>
+        private async System.Threading.Tasks.Task ApplyFilter(JsonObject filter)
         {
-            var title = Ui.Text("Filter", 15, bold: true);
-            title.Margin = new Thickness(0, 0, 0, 8);
-            var all = new CheckBox { Content = "All object types included", IsChecked = true, Margin = new Thickness(0, 2, 0, 6), FontWeight = FontWeights.SemiBold };
-            all.Click += (s, e) =>
-            {
-                var on = all.IsChecked != false;
-                _excludedTypes.Clear();
-                if (!on) foreach (var t in _rows.Select(r => r.Type).Distinct()) _excludedTypes.Add(t);
-                _ignoreTypeEvents = true;
-                foreach (CheckBox b in _typeList.Children) b.IsChecked = on;
-                _ignoreTypeEvents = false;
-                all.IsChecked = on;
-                Refresh();
-            };
-            foreach (var type in _rows.Select(r => r.Type).Distinct().OrderBy(t => t))
-            {
-                var box = new CheckBox { Content = type, IsChecked = true, Margin = new Thickness(0, 2, 0, 2) };
-                box.Checked += (s, e) => TypeChanged(all, type, true);
-                box.Unchecked += (s, e) => TypeChanged(all, type, false);
-                _typeList.Children.Add(box);
-            }
-            var note = Ui.Text("Objects the filter hides are not deployed.", 12, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
-            note.Margin = new Thickness(0, 10, 0, 0);
-            var pane = new Border
-            {
-                Width = 220,
-                Padding = new Thickness(12, 10, 12, 10),
-                BorderThickness = new Thickness(0, 0, 1, 0),
-                Child = new ScrollViewer { Content = Ui.Column(title, all, _typeList, note), VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
-                Visibility = Visibility.Collapsed,
-            };
-            pane.SetResourceReference(Border.BorderBrushProperty, "Q.Divider");
-            return pane;
-        }
-
-        private void TypeChanged(CheckBox all, string type, bool on)
-        {
-            if (_ignoreTypeEvents) return;
-            if (on) _excludedTypes.Remove(type);
-            else _excludedTypes.Add(type);
-            all.IsChecked = _excludedTypes.Count == 0 ? true : _excludedTypes.Count == _typeList.Children.Count ? false : (bool?)null;
+            var reply = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("schema_filter", new JsonObject { ["session"] = Session, ["filter"] = filter }));
+            if (reply == null) return;
+            _filtered.Clear();
+            foreach (var i in reply.List("filtered")) _filtered.Add((int)(double)i);
+            if (reply.Str("xml") != null) _session.Project["filter"] = reply.Str("xml");
+            else _session.Project.Remove("filter");
+            FilterChanged?.Invoke();
             Refresh();
         }
 
-        private void ToggleFilterPane() => _filterPane.Visibility = _filterPane.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+        /// <summary>Raised when the filter changes (the project changed).</summary>
+        public event Action FilterChanged;
 
+        private void ToggleFilterPane() => _filterPane.Visibility = _filterPane.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
         // ---- SQL side by side ----
 
         /// <summary>A rounded square with +, −, ~ or =, colored by what deployment does.</summary>

@@ -235,7 +235,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 db2
             };
             progress("Comparing");
-            let comparison = compare_schemas(&db1, &db2, &opts, &project);
+            let comparison = compare_schemas(&db1, &db2, &opts, &project)?;
             state.next += 1;
             let id = state.next;
             let s = SchemaSession { db1, db2, comparison, project, script: None, selected: Vec::new() };
@@ -265,7 +265,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 }
             }
             let opts = schema_options(&s.project)?;
-            s.comparison = compare_schemas(&s.db1, &s.db2, &opts, &s.project);
+            s.comparison = compare_schemas(&s.db1, &s.db2, &opts, &s.project)?;
             s.script = None;
             let mut reply = schema_reply(id, s);
             reply["project"] = serde_json::to_value(&s.project).map_err(|e| e.to_string())?;
@@ -296,6 +296,33 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let bytes = schema_report(s, format, selected.as_deref(), include_identical);
             std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!(true))
+        }
+        // Filters: `filter_load` {path | xml} → the rules; `filter_save` {path, filter} writes an
+        // .scpf; `schema_filter` {session, filter} checks the rules and makes them the project's
+        // filter → {xml, filtered: [index]} (null filter: none).
+        "filter_load" => {
+            let model = match field::<String>(request, "path") {
+                Ok(path) => schema::filter_edit::FilterModel::load(std::path::Path::new(&path))?,
+                Err(_) => schema::filter_edit::FilterModel::from_xml(&field::<String>(request, "xml")?)?,
+            };
+            Ok(json!({"filter": model, "types": schema::filter_edit::types()}))
+        }
+        "filter_save" => {
+            let path: String = field(request, "path")?;
+            let model: schema::filter_edit::FilterModel = field(request, "filter")?;
+            model.filter()?;
+            std::fs::write(&path, model.scpf()).map_err(|e| format!("{path}: {e}"))?;
+            Ok(json!(true))
+        }
+        "schema_filter" => {
+            let s = state.schema.get_mut(&session(request)?).ok_or("the comparison is no longer open")?;
+            let model: Option<schema::filter_edit::FilterModel> = field(request, "filter").ok();
+            let (xml, filter) = match model.filter(|m| !m.is_trivial()) {
+                Some(m) => (Some(m.project_xml()), Some(m.filter()?)),
+                None => (None, None),
+            };
+            s.project.filter = xml.clone();
+            Ok(json!({"xml": xml, "filtered": filtered(filter.as_ref(), &s.comparison)}))
         }
         // Saves a project as SQL Compare (.scp) or SQL Data Compare (.sdc) writes it.
         "project_export" => {
@@ -755,14 +782,29 @@ fn selections(request: &Value, result: &DataComparison) -> Result<HashMap<Object
 }
 
 /// The comparison with the project's unticked objects left unselected.
-fn compare_schemas(db1: &Database, db2: &Database, opts: &Options, project: &Project) -> Comparison {
+/// The comparison with the project's unticked objects, and what its filter leaves out, unselected
+/// (as `quill schema /project` does).
+fn compare_schemas(db1: &Database, db2: &Database, opts: &Options, project: &Project) -> Result<Comparison, String> {
     let mut comparison = schema::compare(db1, db2, opts, &project.schema_mappings);
     for d in &mut comparison.differences {
         if project.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label())) {
             d.selected = false;
         }
     }
-    comparison
+    if let Some(f) = project_filter(project)? {
+        crate::commands::sources::apply_filter(&f, &mut comparison);
+    }
+    Ok(comparison)
+}
+
+fn project_filter(project: &Project) -> Result<Option<schema::filter::Filter>, String> {
+    project.filter.as_deref().map(|xml| schema::filter::Filter::from_xml(xml).map_err(|e| format!("the project's filter is invalid: {e}"))).transpose()
+}
+
+/// Indexes of the differences a filter leaves out.
+fn filtered(f: Option<&schema::filter::Filter>, comparison: &Comparison) -> Vec<usize> {
+    let Some(f) = f else { return Vec::new() };
+    comparison.differences.iter().enumerate().filter(|(_, d)| !f.includes(d)).map(|(i, _)| i).collect()
 }
 
 /// The reply describing a schema comparison session, with suggested table renames.
@@ -775,6 +817,7 @@ fn schema_reply(id: u64, s: &SchemaSession) -> Value {
         "targetName": s.db2.name,
         "differences": differences,
         "autoMapped": auto,
+        "filtered": filtered(project_filter(&s.project).ok().flatten().as_ref(), &s.comparison),
         "renames": schema::renames::detect(&s.db1, &s.db2, &s.project.schema_mappings),
     })
 }
@@ -1048,6 +1091,25 @@ mod tests {
         handle(&mut state, &json!({"op": "project_export", "path": scp, "project": project}), &none).unwrap();
         let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
         assert_eq!(back["source"]["path"], path("one.json"));
+
+        // A filter leaving out tables named like Cust%: the switched session, then a new comparison.
+        let rules = json!({"rules": [{"type": "Table", "include": false, "expression": "@NAME LIKE 'Cust%'"}]});
+        let f = handle(&mut state, &json!({"op": "schema_filter", "session": s, "filter": rules}), &none).unwrap();
+        assert_eq!(f["filtered"].as_array().unwrap().len(), 2, "{f}");
+        assert!(handle(&mut state, &json!({"op": "schema_filter", "session": s, "filter": {"rules": [{"type": "Table", "include": true, "expression": "@NAME ="}]}}), &none).is_err());
+        let scpf = path("f.scpf");
+        handle(&mut state, &json!({"op": "filter_save", "path": scpf, "filter": rules}), &none).unwrap();
+        let loaded = handle(&mut state, &json!({"op": "filter_load", "path": scpf}), &none).unwrap();
+        assert!(loaded["filter"]["rules"].as_array().unwrap().iter().any(|r| r["type"] == "Table" && r["include"] == false));
+        let mut filtered_project = project.clone();
+        filtered_project["filter"] = f["xml"].clone();
+        let r = handle(&mut state, &json!({"op": "schema_compare", "project": filtered_project}), &none).unwrap();
+        let customer = r["differences"].as_array().unwrap().iter().find(|d| d["name"] == "Customer").unwrap();
+        assert_eq!(customer["selected"], false);
+        assert!(r["filtered"].as_array().unwrap().contains(&customer["index"]));
+        handle(&mut state, &json!({"op": "project_export", "path": scp, "project": filtered_project}), &none).unwrap();
+        let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
+        assert!(back["filter"].as_str().unwrap().contains("Cust%"));
         std::fs::remove_dir_all(dir).ok();
     }
 
