@@ -200,7 +200,7 @@ fn overrides(args: &Args, db1: &Database) -> Result<DataMappings, ArgError> {
 fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
     match source {
         Source::Live(spec) => Ok(spec),
-        Source::Snapshot(_) => Err(ArgError::new(exit::USAGE, format!("data compare needs database {n} to be a live database"))),
+        _ => Err(ArgError::new(exit::USAGE, format!("data compare needs database {n} to be a live database"))),
     }
 }
 

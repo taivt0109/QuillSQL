@@ -126,6 +126,8 @@ pub const GENERAL: [Switch; 5] = [
 pub enum Source {
     Live(ConnectionSpec),
     Snapshot(std::path::PathBuf),
+    /// A scripts folder, at a source-control revision when one is given.
+    Scripts { path: std::path::PathBuf, revision: Option<String> },
 }
 
 /// The project named by `/project`, if any.
@@ -154,11 +156,17 @@ pub fn project_of(args: &Args, kind: crate::project::ProjectKind) -> Result<Opti
 /// Without them, side N of the `/project` is used.
 pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
     let key = |name: &str| format!("{name}{n}");
+    if let Some(s) = super::sources::source(args, n)? {
+        return Ok(Some(s));
+    }
     let given = ["snapshot", "connection", "database", "server"].iter().any(|k| args.has(&key(k)));
     if !given && let Some(p) = project(args)? {
         let mut side = if n == 1 { p.source } else { p.target };
         if side.is_snapshot() {
             return Ok(Some(Source::Snapshot(side.path.into())));
+        }
+        if side.is_scripts() {
+            return Ok(Some(Source::Scripts { path: side.path.into(), revision: None }));
         }
         if side.server.is_empty() && side.database.is_empty() {
             return Ok(None);
@@ -293,6 +301,9 @@ pub fn load(source: &Source, args: &Args) -> Result<Database, ArgError> {
                 .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
         }
         Source::Snapshot(path) => load_snapshot(path),
+        Source::Scripts { path, revision } => {
+            super::sources::load(path, revision.as_deref(), args, &crate::schema::Options::default_set()).map(|(db, _)| db)
+        }
     }
 }
 
@@ -303,6 +314,9 @@ pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
 
 pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {
     let bytes = std::fs::read(path).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{}: {e}", path.display())))?;
+    if crate::sources::snp::is_snp(&bytes) {
+        return crate::sources::snp::read(&bytes).map_err(|e| ArgError::new(exit::DATA_ERROR, format!("{}: {e}", path.display())));
+    }
     let db: Database = serde_json::from_slice(crate::project::without_bom(&bytes))
         .map_err(|e| ArgError::new(exit::DATA_ERROR, format!("{} is not a QuillSQL snapshot: {e}", path.display())))?;
     if db.model_version > catalog::MODEL_VERSION {

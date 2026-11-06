@@ -18,6 +18,7 @@ pub mod project;
 pub mod refactor;
 pub mod schema;
 pub mod snippets;
+pub mod sources;
 pub mod script;
 pub mod style;
 pub mod tools;
