@@ -4,6 +4,7 @@
 pub mod datafolder;
 pub mod expr;
 pub mod folder;
+mod objects;
 pub mod parse;
 pub mod scm;
 pub mod snp;

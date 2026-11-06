@@ -23,11 +23,35 @@ pub enum ObjectType {
     StoredProcedure,
     Sequence,
     Synonym,
+    Assembly,
+    XmlSchemaCollection,
+    Default,
+    Rule,
+    DdlTrigger,
+    PartitionFunction,
+    PartitionScheme,
+    FullTextCatalog,
+    FullTextStoplist,
+    SearchPropertyList,
+    MessageType,
+    Contract,
+    Queue,
+    Service,
+    Route,
+    ServiceBinding,
+    EventNotification,
+    Certificate,
+    AsymmetricKey,
+    SymmetricKey,
+    SecurityPolicy,
+    ExternalDataSource,
+    ExternalFileFormat,
+    ExternalTable,
     ExtendedProperty,
 }
 
 impl ObjectType {
-    pub const ALL: [ObjectType; 11] = [
+    pub const ALL: [ObjectType; 35] = [
         ObjectType::Schema,
         ObjectType::Role,
         ObjectType::User,
@@ -38,6 +62,30 @@ impl ObjectType {
         ObjectType::StoredProcedure,
         ObjectType::Sequence,
         ObjectType::Synonym,
+        ObjectType::Assembly,
+        ObjectType::XmlSchemaCollection,
+        ObjectType::Default,
+        ObjectType::Rule,
+        ObjectType::DdlTrigger,
+        ObjectType::PartitionFunction,
+        ObjectType::PartitionScheme,
+        ObjectType::FullTextCatalog,
+        ObjectType::FullTextStoplist,
+        ObjectType::SearchPropertyList,
+        ObjectType::MessageType,
+        ObjectType::Contract,
+        ObjectType::Queue,
+        ObjectType::Service,
+        ObjectType::Route,
+        ObjectType::ServiceBinding,
+        ObjectType::EventNotification,
+        ObjectType::Certificate,
+        ObjectType::AsymmetricKey,
+        ObjectType::SymmetricKey,
+        ObjectType::SecurityPolicy,
+        ObjectType::ExternalDataSource,
+        ObjectType::ExternalFileFormat,
+        ObjectType::ExternalTable,
         ObjectType::ExtendedProperty,
     ];
 
@@ -54,8 +102,52 @@ impl ObjectType {
             ObjectType::StoredProcedure => "Stored procedure",
             ObjectType::Sequence => "Sequence",
             ObjectType::Synonym => "Synonym",
+            ObjectType::Assembly => "Assembly",
+            ObjectType::XmlSchemaCollection => "XML schema collection",
+            ObjectType::Default => "Default",
+            ObjectType::Rule => "Rule",
+            ObjectType::DdlTrigger => "DDL trigger",
+            ObjectType::PartitionFunction => "Partition function",
+            ObjectType::PartitionScheme => "Partition scheme",
+            ObjectType::FullTextCatalog => "Full text catalog",
+            ObjectType::FullTextStoplist => "Full text stoplist",
+            ObjectType::SearchPropertyList => "Search property list",
+            ObjectType::MessageType => "Message type",
+            ObjectType::Contract => "Contract",
+            ObjectType::Queue => "Queue",
+            ObjectType::Service => "Service",
+            ObjectType::Route => "Route",
+            ObjectType::ServiceBinding => "Service binding",
+            ObjectType::EventNotification => "Event notification",
+            ObjectType::Certificate => "Certificate",
+            ObjectType::AsymmetricKey => "Asymmetric key",
+            ObjectType::SymmetricKey => "Symmetric key",
+            ObjectType::SecurityPolicy => "Security policy",
+            ObjectType::ExternalDataSource => "External data source",
+            ObjectType::ExternalFileFormat => "External file format",
+            ObjectType::ExternalTable => "External table",
             ObjectType::ExtendedProperty => "Extended property",
         }
+    }
+
+    /// Objects that belong to a schema; the others have a database-wide name.
+    pub fn schema_scoped(self) -> bool {
+        matches!(
+            self,
+            ObjectType::UserDefinedType
+                | ObjectType::Table
+                | ObjectType::View
+                | ObjectType::Function
+                | ObjectType::StoredProcedure
+                | ObjectType::Sequence
+                | ObjectType::Synonym
+                | ObjectType::XmlSchemaCollection
+                | ObjectType::Default
+                | ObjectType::Rule
+                | ObjectType::Queue
+                | ObjectType::SecurityPolicy
+                | ObjectType::ExternalTable
+        )
     }
 
     /// Accepts the label with or without spaces and dashes: `StoredProcedure`, `stored procedure`.
@@ -129,6 +221,31 @@ pub struct Difference {
     pub trivial: bool,
 }
 
+impl Difference {
+    /// The name the object has in the dependency graph: its own name for schema-scoped objects,
+    /// a key naming the kind for database-wide ones that take part in dependencies.
+    pub fn key(&self) -> ObjectName {
+        object_key(self.object_type, &self.name)
+    }
+
+    pub fn target_key(&self) -> ObjectName {
+        object_key(self.object_type, self.target_name.as_ref().unwrap_or(&self.name))
+    }
+}
+
+pub fn object_key(ty: ObjectType, name: &ObjectName) -> ObjectName {
+    let kind = match ty {
+        ObjectType::Assembly => KEY_ASSEMBLY,
+        ObjectType::MessageType => KEY_MESSAGE_TYPE,
+        ObjectType::Contract => KEY_CONTRACT,
+        ObjectType::Service => KEY_SERVICE,
+        ObjectType::EventNotification => KEY_EVENT_NOTIFICATION,
+        ObjectType::ExternalDataSource => KEY_EXTERNAL_DATA_SOURCE,
+        _ => return name.clone(),
+    };
+    ObjectName::new(kind, &name.name)
+}
+
 /// User-defined mappings between the two databases.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -175,6 +292,7 @@ pub fn compare(db1: &Database, db2: &Database, opts: &Options, mappings: &Mappin
     c.objects(ObjectType::StoredProcedure, &p1, &p2, |r| (&r.schema, &r.name), |c, a, b| Comparer::routine(c, a, b));
     c.objects(ObjectType::Sequence, &db1.sequences, &db2.sequences, |s| (&s.schema, &s.name), Comparer::sequence);
     c.objects(ObjectType::Synonym, &db1.synonyms, &db2.synonyms, |s| (&s.schema, &s.name), Comparer::synonym);
+    c.more_objects();
     if !opts.has(Opt::IgnoreExtendedProperties) {
         c.database_properties();
     }
@@ -198,50 +316,50 @@ fn is_tsqlt(name: &ObjectName) -> bool {
 
 /// Collects property differences under a stack of context frames.
 #[derive(Default)]
-struct Diffs {
-    out: Vec<PropDiff>,
+pub(super) struct Diffs {
+    pub(super) out: Vec<PropDiff>,
     ctx: Vec<Frame>,
 }
 
 impl Diffs {
-    fn enter(&mut self, name: &str, source: Option<&str>, target: Option<&str>) {
+    pub(super) fn enter(&mut self, name: &str, source: Option<&str>, target: Option<&str>) {
         self.ctx.push(Frame { name: name.into(), source: source.map(Into::into), target: target.map(Into::into) });
     }
 
-    fn leave(&mut self) {
+    pub(super) fn leave(&mut self) {
         self.ctx.pop();
     }
 
-    fn add(&mut self, name: &str, source: Option<String>, target: Option<String>) {
+    pub(super) fn add(&mut self, name: &str, source: Option<String>, target: Option<String>) {
         self.out.push(PropDiff { location: self.ctx.clone(), name: name.into(), source, target });
     }
 
     /// Records `name` when the values differ.
-    fn prop<T: PartialEq + std::fmt::Display>(&mut self, name: &str, a: T, b: T) {
+    pub(super) fn prop<T: PartialEq + std::fmt::Display>(&mut self, name: &str, a: T, b: T) {
         if a != b {
             self.add(name, Some(a.to_string()), Some(b.to_string()));
         }
     }
 
-    fn opt_prop(&mut self, name: &str, a: Option<&str>, b: Option<&str>) {
+    pub(super) fn opt_prop(&mut self, name: &str, a: Option<&str>, b: Option<&str>) {
         if a != b {
             self.add(name, a.map(Into::into), b.map(Into::into));
         }
     }
 
-    fn only1(&mut self, what: &str, name: &str) {
+    pub(super) fn only1(&mut self, what: &str, name: &str) {
         self.add(what, Some(name.into()), None);
     }
 
-    fn only2(&mut self, what: &str, name: &str) {
+    pub(super) fn only2(&mut self, what: &str, name: &str) {
         self.add(what, None, Some(name.into()));
     }
 }
 
-struct Comparer<'a> {
-    db1: &'a Database,
-    db2: &'a Database,
-    opts: &'a Options,
+pub(super) struct Comparer<'a> {
+    pub(super) db1: &'a Database,
+    pub(super) db2: &'a Database,
+    pub(super) opts: &'a Options,
     mappings: &'a Mappings,
     case_sensitive: bool,
     result: Comparison,
@@ -267,16 +385,16 @@ impl<'a> Comparer<'a> {
         self.result
     }
 
-    fn key(&self, s: &str) -> String {
+    pub(super) fn key(&self, s: &str) -> String {
         if self.case_sensitive { s.to_string() } else { s.to_lowercase() }
     }
 
-    fn same_name(&self, a: &str, b: &str) -> bool {
+    pub(super) fn same_name(&self, a: &str, b: &str) -> bool {
         self.key(a) == self.key(b)
     }
 
     /// The schema in database 2 that a database-1 schema maps to.
-    fn target_schema(&self, schema: &str) -> String {
+    pub(super) fn target_schema(&self, schema: &str) -> String {
         self.mappings
             .schemas
             .iter()
@@ -285,7 +403,7 @@ impl<'a> Comparer<'a> {
             .unwrap_or_else(|| schema.to_string())
     }
 
-    fn push(&mut self, object_type: ObjectType, n1: Option<ObjectName>, n2: Option<ObjectName>, props: Vec<PropDiff>) {
+    pub(super) fn push(&mut self, object_type: ObjectType, n1: Option<ObjectName>, n2: Option<ObjectName>, props: Vec<PropDiff>) {
         let kind = match (&n1, &n2) {
             (Some(_), None) => DiffKind::OnlyIn1,
             (None, Some(_)) => DiffKind::OnlyIn2,
@@ -310,7 +428,7 @@ impl<'a> Comparer<'a> {
     }
 
     /// Pairs objects of one type by (mapped) schema and name and compares each pair.
-    fn objects<T>(
+    pub(super) fn objects<T>(
         &mut self,
         ty: ObjectType,
         left: &[T],
@@ -444,6 +562,7 @@ impl<'a> Comparer<'a> {
         if !o.has(Opt::IgnoreTriggers) {
             self.triggers(d, &a.triggers, &b.triggers);
         }
+        self.table_extras(d, a, b);
         self.xprops(d, "TABLE", Some(&a.schema), &a.name, &b.name);
         self.permissions(d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         let partitioned = a.storage.partition_column.is_some() || b.storage.partition_column.is_some();
@@ -546,6 +665,7 @@ impl<'a> Comparer<'a> {
                         d.prop("Name", &x.name, &y.name);
                     }
                     column_props(d, x, y, self.opts, a.memory_optimized, false);
+                    self.sensitivity(d, x, y);
                     let minor = |c: &Column| Some(c.name.clone());
                     self.xprops_minor(d, "TABLE", &a.schema, &a.name, &b.name, "COLUMN", minor(x), minor(y));
                     d.leave();
@@ -571,7 +691,7 @@ impl<'a> Comparer<'a> {
     }
 
     /// Pairs constraints and indexes by name, or structurally when names are ignored (§4.3 of the spec).
-    fn pair_named<T>(
+    pub(super) fn pair_named<T>(
         &self,
         d: &mut Diffs,
         what: &str,
@@ -866,7 +986,7 @@ impl<'a> Comparer<'a> {
         }
     }
 
-    fn module_text(&self, d: &mut Diffs, a: &str, b: &str, enc_a: bool, enc_b: bool) {
+    pub(super) fn module_text(&self, d: &mut Diffs, a: &str, b: &str, enc_a: bool, enc_b: bool) {
         let o = self.opts;
         if enc_a || enc_b {
             // Without decryption only the flag can be compared.
@@ -885,7 +1005,7 @@ impl<'a> Comparer<'a> {
         }
     }
 
-    fn settings(&self, d: &mut Diffs, a: &ModuleSettings, b: &ModuleSettings) {
+    pub(super) fn settings(&self, d: &mut Diffs, a: &ModuleSettings, b: &ModuleSettings) {
         if !self.opts.has(Opt::IgnoreQuotedIdentifiersAndAnsiNullSettings) {
             d.prop("ANSI_NULLS", a.ansi_nulls, b.ansi_nulls);
             d.prop("QUOTED_IDENTIFIER", a.quoted_identifier, b.quoted_identifier);
@@ -900,6 +1020,8 @@ impl<'a> Comparer<'a> {
             self.triggers(&mut d, &a.triggers, &b.triggers);
         }
         self.indexes(&mut d, &a.indexes, &b.indexes, false);
+        self.statistics(&mut d, &a.statistics, &b.statistics);
+        self.fulltext_index(&mut d, a.fulltext_index.as_ref(), b.fulltext_index.as_ref());
         self.xprops(&mut d, "VIEW", Some(&a.schema), &a.name, &b.name);
         self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         d.out
@@ -912,6 +1034,7 @@ impl<'a> Comparer<'a> {
         if clr(a) && clr(b) {
             d.opt_prop("CLR method", a.clr_method.as_deref(), b.clr_method.as_deref());
             d.opt_prop("EXECUTE AS", a.execute_as.as_deref(), b.execute_as.as_deref());
+            self.clr_signature(&mut d, a, b);
         } else {
             d.prop("Natively compiled", a.native_compilation, b.native_compilation);
             self.module_text(&mut d, &a.definition, &b.definition, a.encrypted, b.encrypted);
@@ -1017,6 +1140,11 @@ impl<'a> Comparer<'a> {
                 d.add("Login", a.login.clone(), b.login.clone());
             }
             d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
+            d.opt_prop("Certificate", a.certificate.as_deref(), b.certificate.as_deref());
+            d.opt_prop("Asymmetric key", a.asymmetric_key.as_deref(), b.asymmetric_key.as_deref());
+        }
+        if a.kind == "APPLICATION_ROLE" && b.kind == "APPLICATION_ROLE" {
+            d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
         }
         if !a.is_role() && !o.has(Opt::IgnorePermissions) {
             d.prop("CONNECT", if a.no_connect { "Revoked" } else { "Granted" }, if b.no_connect { "Revoked" } else { "Granted" });
@@ -1052,7 +1180,7 @@ impl<'a> Comparer<'a> {
     }
 
     /// GRANT/DENY on one securable. With IgnoreUsers only roles' permissions count.
-    fn permissions(&self, d: &mut Diffs, class: &str, schema1: &str, name1: Option<&str>, schema2: &str, name2: Option<&str>) {
+    pub(super) fn permissions(&self, d: &mut Diffs, class: &str, schema1: &str, name1: Option<&str>, schema2: &str, name2: Option<&str>) {
         if self.opts.has(Opt::IgnorePermissions) {
             return;
         }
@@ -1063,7 +1191,7 @@ impl<'a> Comparer<'a> {
                 .iter()
                 .filter(|p| {
                     p.class == class
-                        && p.schema.as_deref().is_some_and(|s| self.same_name(s, schema))
+                        && self.same_name(p.schema.as_deref().unwrap_or_default(), schema)
                         && match (name, p.object.as_deref()) {
                             (Some(n), Some(o)) => self.same_name(n, o),
                             (None, None) => true,
@@ -1074,8 +1202,8 @@ impl<'a> Comparer<'a> {
                 // Compared without the securable, which may be named differently on each side.
                 .map(|p| {
                     (
-                        self.key(&format!("{} {} {}", p.state, p.permission, p.grantee)),
-                        format!("{} {} TO {}", p.state.replace('_', " "), p.permission, p.grantee),
+                        self.key(&format!("{} {} {}", p.state, p.action(), p.grantee)),
+                        format!("{} {} TO {}", p.state.replace('_', " "), p.action(), p.grantee),
                     )
                 })
                 .collect();
@@ -1113,7 +1241,7 @@ impl<'a> Comparer<'a> {
     }
 
     /// Compares the object-level extended properties of an object (no minor item).
-    fn xprops(&self, d: &mut Diffs, class: &str, schema: Option<&str>, name1: &str, name2: &str) {
+    pub(super) fn xprops(&self, d: &mut Diffs, class: &str, schema: Option<&str>, name1: &str, name2: &str) {
         let pick = |db: &'a Database, name: &str, schema: Option<String>| {
             db.extended_properties
                 .iter()
@@ -1221,7 +1349,7 @@ fn is_xprop(p: &PropDiff) -> bool {
 }
 
 fn is_graph_column(c: &Column) -> bool {
-    c.name.starts_with("graph_id_") || c.name.starts_with("$node_id_") || c.name.starts_with("$edge_id_")
+    c.name.starts_with("graph_id_") || c.name.starts_with('$')
         || c.name.starts_with("from_obj_id_") || c.name.starts_with("from_id_") || c.name.starts_with("to_obj_id_") || c.name.starts_with("to_id_")
 }
 

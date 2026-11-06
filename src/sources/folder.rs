@@ -64,19 +64,7 @@ const PREFIXES: [(&str, &str); 41] = [
 
 fn prefix_key(kind: FileKind) -> &'static str {
     let FileKind::Object(ty) = kind else { return "DdlTrigger" };
-    match ty {
-        ObjectType::Schema => "Schema",
-        ObjectType::Role => "Role",
-        ObjectType::User => "User",
-        ObjectType::UserDefinedType => "UserDefinedType",
-        ObjectType::Table => "Table",
-        ObjectType::View => "View",
-        ObjectType::Function => "Function",
-        ObjectType::StoredProcedure => "StoredProcedure",
-        ObjectType::Sequence => "Sequence",
-        ObjectType::Synonym => "Synonym",
-        ObjectType::ExtendedProperty => "ExtendedProperty",
-    }
+    crate::schema::report::type_name(ty)
 }
 
 /// `QuillDatabaseInfo.xml`.
@@ -577,6 +565,7 @@ pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(Obj
     for t in db.ddl_triggers.iter().filter(|t| !t.definition.is_empty()) {
         out.push(((FileKind::DdlTrigger, String::new(), t.name.clone()), script::ddl_trigger(t)));
     }
+    out.extend(super::objects::object_files(db, o));
     out
 }
 
@@ -761,6 +750,7 @@ pub fn apply(source: &Database, target: &Database, differences: &[Difference]) -
                     db.extended_properties.push(p.clone());
                 }
             }
+            other => super::objects::apply(&mut db, source, other, n1, n2, from_source),
         }
     }
     db.permissions.sort();

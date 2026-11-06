@@ -647,10 +647,27 @@ pub fn create_table_with(t: &Table, name_override: Option<&str>, inline_keys: bo
             with.push("DURABILITY = SCHEMA_ONLY".into());
         }
     }
+    if let Some(x) = &t.temporal
+        && r.features.has(Feature::Temporal)
+    {
+        with.push(system_versioning(x, r));
+    }
     if !with.is_empty() {
         s.push_str(&format!("\r\nWITH\r\n(\r\n{}\r\n)", with.join(",\r\n")));
     }
     s
+}
+
+/// `SYSTEM_VERSIONING = ON (HISTORY_TABLE = [s].[h], HISTORY_RETENTION_PERIOD = …)`; the
+/// retention only where the target has it.
+pub fn system_versioning(x: &Temporal, r: &Render) -> String {
+    let retention = x
+        .retention
+        .as_ref()
+        .filter(|_| r.features.has(Feature::TemporalRetention))
+        .map(|p| format!(", HISTORY_RETENTION_PERIOD = {p}"))
+        .unwrap_or_default();
+    format!("SYSTEM_VERSIONING = ON (HISTORY_TABLE = {}{retention})", x.history_table.quoted())
 }
 
 fn is_graph_internal(c: &Column) -> bool {

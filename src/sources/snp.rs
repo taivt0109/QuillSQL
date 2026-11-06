@@ -2516,6 +2516,7 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         masking_function: (!f.masking.is_empty()).then(|| f.masking.clone()),
         bound_default: f.bound_default.as_deref().map(requote),
         bound_rule: f.bound_rule.as_deref().map(requote),
+        sensitivity: None,
     }
 }
 

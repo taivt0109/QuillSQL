@@ -124,6 +124,17 @@ impl SqlProj {
                 ObjectType::Synonym => "Synonyms",
                 ObjectType::Sequence => "Sequences",
                 ObjectType::ExtendedProperty => "Extended Properties",
+                ObjectType::Assembly => "Assemblies",
+                ObjectType::XmlSchemaCollection => "XML Schema Collections",
+                ObjectType::Default => "Defaults",
+                ObjectType::Rule => "Rules",
+                ObjectType::DdlTrigger => "Database Triggers",
+                ObjectType::PartitionFunction | ObjectType::PartitionScheme | ObjectType::FullTextCatalog | ObjectType::FullTextStoplist | ObjectType::SearchPropertyList => "Storage",
+                ObjectType::MessageType | ObjectType::Contract | ObjectType::Queue | ObjectType::Service | ObjectType::Route | ObjectType::ServiceBinding | ObjectType::EventNotification => {
+                    "Service Broker"
+                }
+                ObjectType::Certificate | ObjectType::AsymmetricKey | ObjectType::SymmetricKey | ObjectType::SecurityPolicy => "Security",
+                ObjectType::ExternalDataSource | ObjectType::ExternalFileFormat | ObjectType::ExternalTable => "External Resources",
             },
         };
         let by_type = Path::new(folder).join(&file);

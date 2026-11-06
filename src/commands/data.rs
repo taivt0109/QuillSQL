@@ -424,7 +424,12 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         settings.kinds = rules.kinds;
         settings.max_transaction_bytes = (max_mb > 0).then_some(max_mb * 1_048_576);
         settings.source_connection = side1.spec().cloned();
-        let s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        let mut s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        let live2 = match &side2 {
+            Opened::Live(s) => Some(s),
+            _ => None,
+        };
+        common::add_backup(args, project.as_ref().map(|p| &p.backup), live2, &mut s)?;
         common::write_script(args, &s)?;
         common::report_warnings(args, &s);
         common::check_warnings(args, &s)?;
