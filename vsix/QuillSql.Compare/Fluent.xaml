@@ -425,7 +425,7 @@
                         <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource Q.Divider}" BorderThickness="0,0,0,1">
                             <TabPanel IsItemsHost="True" Margin="6,0" KeyboardNavigation.TabIndex="1" />
                         </Border>
-                        <ContentPresenter ContentSource="SelectedContent" Margin="{TemplateBinding Padding}" />
+                        <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" Margin="{TemplateBinding Padding}" />
                     </DockPanel>
                 </ControlTemplate>
             </Setter.Value>
@@ -495,7 +495,7 @@
                         <StackPanel DockPanel.Dock="Left" IsItemsHost="True" Width="210" Margin="12,12,4,12" KeyboardNavigation.TabIndex="1" />
                         <Border Margin="8,12,16,12" CornerRadius="8" BorderThickness="1"
                                 Background="{DynamicResource Q.Layer}" BorderBrush="{DynamicResource Q.CardStroke}">
-                            <ContentPresenter ContentSource="SelectedContent" />
+                            <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" />
                         </Border>
                     </DockPanel>
                 </ControlTemplate>
