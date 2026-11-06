@@ -516,10 +516,9 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
-    // Scripts folders and source control are schema compare only so far.
-    const FOLDERS: [&str; 6] = ["scripts1", "scripts2", "sourcecontrol1", "sourcecontrol2", "revision1", "revision2"];
-    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"].into_iter().chain(FOLDERS) {
-        if args.has(name) && (command == "data" || !FOLDERS.contains(&name)) {
+    let _ = command;
+    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"] {
+        if args.has(name) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }
     }
@@ -860,9 +859,14 @@ pub fn load(source: &Source, _args: &Args, decrypt: bool) -> Result<Database, Ar
     }
 }
 
+/// Writes a SQL Compare snapshot (`.snp`), or QuillSQL's JSON model for a `.json` path.
 pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
-    let json = serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?;
-    std::fs::write(path, json).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", path.display())))
+    let bytes = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+        serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?
+    } else {
+        crate::sources::snp_write::write(db)
+    };
+    std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", path.display())))
 }
 
 pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {

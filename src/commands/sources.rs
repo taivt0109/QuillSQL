@@ -82,6 +82,15 @@ pub fn load(path: &Path, revision: Option<&str>, args: &Args, options: &Options)
     Ok((db, f))
 }
 
+/// Folders with an SSDT database project are compared with SsdtCompatibleOptions on.
+pub fn ssdt_options(options: Options, folders: &[Option<&folder::Folder>]) -> Options {
+    if !folders.iter().flatten().any(|f| f.is_ssdt()) {
+        return options;
+    }
+    let group = Options::parse("SsdtCompatibleOptions").unwrap_or_default();
+    group.iter().fold(options, |o, x| o.with(x))
+}
+
 /// `/makescripts:<folder>`: writes database 1 as a scripts folder.
 pub fn make_scripts(args: &Args, db: &Database, dir: &Path, options: &Options, from: &str) -> Result<u8, ArgError> {
     let mut db = db.clone();
