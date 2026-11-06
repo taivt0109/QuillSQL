@@ -267,3 +267,54 @@ fn rebuild_keeps_data() {
 fn ids_count(rows: &[tiberius::Row]) -> i32 {
     rows[0].get::<i32, _>(0).unwrap()
 }
+
+const KEYS: &str = include_str!("fixtures/compare/keys.sql");
+
+#[test]
+fn data_compare_orders_awkward_keys() {
+    use quillsql::data::compare::compare;
+    use quillsql::data::mapping::DataMappings;
+    use quillsql::data::store::RowKind;
+    use quillsql::data::{DataOpt, DataOptions};
+    let Some(server) = server() else { return };
+    server.create("QuillTest_Data1", KEYS);
+    // Copy every row, then change a few in the second database.
+    let copy = "INSERT INTO dbo.KeyGuid (Id, V) SELECT Id, V FROM QuillTest_Data1.dbo.KeyGuid;";
+    let script = KEYS.replace("INSERT INTO dbo.KeyGuid (Id, V) SELECT TOP (500) NEWID(), ROW_NUMBER() OVER (ORDER BY (SELECT 1)) FROM sys.all_objects;", copy);
+    let changes = "UPDATE dbo.KeyText SET V = 100 WHERE Code = N'ß';\nDELETE FROM dbo.KeyText WHERE Code = N'中';\nINSERT INTO dbo.KeyText (Code, V) VALUES (N'new', 0);\nUPDATE TOP (3) dbo.KeyGuid SET V = -V;\nDELETE TOP (2) FROM dbo.KeyGuid WHERE V > 0;\nUPDATE dbo.KeyMixed SET V = 2.000 WHERE V = 2;\nUPDATE dbo.KeyVarchar SET Code = 'b' WHERE Code = 'B';";
+    server.create("QuillTest_Data2", &format!("{script}\nGO\n{changes}"));
+    let db1 = catalog::read_database(&server.spec("QuillTest_Data1")).unwrap();
+    let db2 = catalog::read_database(&server.spec("QuillTest_Data2")).unwrap();
+    let run = |opts: &DataOptions| {
+        compare(&server.spec("QuillTest_Data1"), &server.spec("QuillTest_Data2"), &db1, &db2, opts, &DataMappings::default(), |_| true, 4, |_, _| {}).unwrap()
+    };
+    let result = run(&DataOptions::default_set());
+    let get = |name: &str| result.tables.iter().find(|t| t.pair.source.name == name).unwrap();
+    for t in &result.tables {
+        assert!(t.error.is_none(), "{}: {:?}", t.pair.source, t.error);
+        assert!(!t.repeated_keys, "{}", t.pair.source);
+    }
+    let text = get("KeyText");
+    assert_eq!((text.count(RowKind::Different), text.count(RowKind::OnlyIn1), text.count(RowKind::OnlyIn2)), (1, 1, 1));
+    assert_eq!(text.count(RowKind::Identical), 13);
+    let guid = get("KeyGuid");
+    assert_eq!((guid.count(RowKind::Different), guid.count(RowKind::OnlyIn1), guid.count(RowKind::OnlyIn2)), (3, 2, 0));
+    let mixed = get("KeyMixed");
+    assert!(mixed.identical(), "2 and 2.000 are the same decimal: {:?}", mixed.counts);
+    // 'B' → 'b' is the same key in a case-insensitive column; the value differs only by case.
+    let varchar = get("KeyVarchar");
+    assert!(varchar.identical(), "{:?}", varchar.counts);
+    // With binary collation, 'B' and 'b' are different keys.
+    let binary = run(&DataOptions::default_set().with(DataOpt::ForceBinaryCollation));
+    let varchar = binary.tables.iter().find(|t| t.pair.source.name == "KeyVarchar").unwrap();
+    assert_eq!((varchar.count(RowKind::OnlyIn1), varchar.count(RowKind::OnlyIn2)), (1, 1), "{:?}", varchar.error);
+    // The stored rows can be read back.
+    let rows = quillsql::data::store::read_all(&text.path, &text.offsets[RowKind::Different as usize]).unwrap();
+    assert_eq!(rows[0].source[0], quillsql::data::value::Value::Str("ß".into()));
+    // Checksums agree for an identical table and disagree for a changed one.
+    let ck = run(&DataOptions::default_set().with(DataOpt::UseChecksumComparison));
+    assert!(ck.tables.iter().find(|t| t.pair.source.name == "KeyMixed").unwrap().by_checksum);
+    assert!(!ck.tables.iter().find(|t| t.pair.source.name == "KeyGuid").unwrap().by_checksum);
+    server.drop("QuillTest_Data1");
+    server.drop("QuillTest_Data2");
+}

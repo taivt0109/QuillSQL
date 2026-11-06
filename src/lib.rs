@@ -5,6 +5,7 @@ pub mod args;
 pub mod catalog;
 pub mod commands;
 pub mod complete;
+pub mod data;
 pub mod db;
 pub mod info;
 pub mod keywords;

@@ -215,8 +215,21 @@ fn run_stdin(opts: &Options) -> Result<(), String> {
 fn main() -> ExitCode {
     // `quill schema ...` and `quill data ...` take SQL Compare style switches, not clap's.
     let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(String::as_str) == Some("schema") {
-        return ExitCode::from(quillsql::commands::schema::run(&argv[2..]));
+    // The database drivers' futures are deep; the main thread's 1 MB stack on Windows is too small.
+    let command: Option<fn(&[String]) -> u8> = match argv.get(1).map(String::as_str) {
+        Some("schema") => Some(quillsql::commands::schema::run),
+        Some("data") => Some(quillsql::commands::data::run),
+        _ => None,
+    };
+    if let Some(command) = command {
+        let rest = argv[2..].to_vec();
+        let code = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || command(&rest))
+            .ok()
+            .and_then(|h| h.join().ok())
+            .unwrap_or(quillsql::args::exit::GENERAL_ERROR);
+        return ExitCode::from(code);
     }
     let cli = Cli::parse();
     let opts = match cli.options() {
