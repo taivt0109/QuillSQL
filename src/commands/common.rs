@@ -516,10 +516,9 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
-    // Scripts folders and source control are schema compare only so far.
-    const FOLDERS: [&str; 6] = ["scripts1", "scripts2", "sourcecontrol1", "sourcecontrol2", "revision1", "revision2"];
-    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"].into_iter().chain(FOLDERS) {
-        if args.has(name) && (command == "data" || !FOLDERS.contains(&name)) {
+    let _ = command;
+    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"] {
+        if args.has(name) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }
     }
