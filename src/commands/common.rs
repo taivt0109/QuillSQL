@@ -82,7 +82,7 @@ macro_rules! source_switches {
                 aliases: &[concat!("b", $n)],
                 takes_value: true,
                 repeatable: false,
-                help: "Backup files (;-separated) in place of the database (not supported yet)",
+                help: "Backup files (;-separated) in place of the database",
             },
             Switch {
                 name: concat!("backuppasswords", $n),
@@ -577,7 +577,7 @@ pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOpt
 }
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
     let _ = command;
-    for name in ["backup1", "backup2", "sca1", "sca2"] {
+    for name in ["sca1", "sca2"] {
         if args.has(name) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }
@@ -695,6 +695,8 @@ pub enum Source {
     Snapshot(std::path::PathBuf),
     /// A scripts folder, at a source-control revision when one is given.
     Scripts { path: std::path::PathBuf, revision: Option<String> },
+    /// Backup files: a backup set read without restoring it.
+    Backup(super::backups::BackupSpec),
 }
 
 /// The project named by `/project`, if any.
@@ -756,6 +758,9 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
     if let Some(s) = super::sources::source(args, n)? {
         return Ok(Some(s));
     }
+    if let Some(s) = super::backups::source(args, n)? {
+        return Ok(Some(s));
+    }
     let given = ["snapshot", "connection", "database", "server"].iter().any(|k| args.has(&key(k)));
     if !given && let Some(p) = project(args)? {
         let mut side = if n == 1 { p.source } else { p.target };
@@ -765,6 +770,15 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
         if side.is_scripts() {
             let revision = (!side.revision.is_empty()).then(|| side.revision.clone());
             return Ok(Some(Source::Scripts { path: side.path.into(), revision }));
+        }
+        if side.is_backup() {
+            let files = side.path.split(';').filter(|f| !f.is_empty()).map(std::path::PathBuf::from).collect();
+            let passwords = match args.get(&key("backuppasswords")) {
+                Some(p) => p.split(',').map(str::to_string).collect(),
+                None => Vec::new(),
+            };
+            let set = (!side.backup_set.is_empty()).then(|| side.backup_set.clone());
+            return Ok(Some(Source::Backup(super::backups::BackupSpec { files, passwords, set })));
         }
         if side.server.is_empty() && side.database.is_empty() {
             return Ok(None);
@@ -916,6 +930,7 @@ pub fn load(source: &Source, _args: &Args, decrypt: bool) -> Result<Database, Ar
         Source::Scripts { path, revision } => {
             super::sources::load(path, revision.as_deref(), _args, &crate::schema::Options::default_set()).map(|(db, _)| db)
         }
+        Source::Backup(spec) => super::backups::load(spec),
     }
 }
 
