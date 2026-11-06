@@ -36,6 +36,7 @@ runs on the command line and in CI.
 | **Safety at a glance** | Color the tab and editor of production connections; ask before `DELETE` or `UPDATE` without `WHERE`; highlight every use of a name. |
 | **Database tools** | Find procedures and views that reference objects that no longer exist; search the history of every query you ran. |
 | **Your way** | An Options window for every behavior, keyboard shortcuts for every command, English or Vietnamese. |
+| **Schema and Data Compare** | Compare two databases' schema or data, see every difference, and deploy a script that makes them match. In SSMS, as its own app, or in CI with SQL Compare's command-line switches. |
 | **Command line** | `quill` formats folders of `.sql` files and runs the analysis in CI. |
 
 ## Install
@@ -323,6 +324,51 @@ Exit codes: 0 success, 1 changes found (`--check`) or warnings (`--analyze`), 2 
 UTF-16 files keep their encoding; files in a legacy code page are refused rather than guessed at.
 Run `quill --help` for every option.
 
+## Schema and Data Compare
+
+Compare two databases and make the second like the first: their **schema** (tables, columns,
+keys, indexes, views, procedures, functions, types, sequences, synonyms, users, roles,
+permissions, extended properties) or their **data** (row by row, by primary key or a key you
+choose).
+
+- **In SSMS:** right-click a database in Object Explorer > **QuillSQL: Compare Schema With...**
+  or **Compare Data With...** (the database is the source, with its connection), or
+  **Tools > QuillSQL > Schema Compare / Data Compare**.
+- **Without SSMS:** **QuillSQL Compare** in the Start menu (`QuillCompare.exe`).
+- **In CI:** `quill schema` and `quill data`, below.
+
+The window has the same four tabs as SQL Compare: **Data sources**, **Table mapping** (Data
+Compare: **Tables & views**, with keys, WHERE filters and columns to leave out), **Owner mapping**
+and **Options** (every SQL Compare / Data Compare option, with QuillSQL defaults, My defaults and
+Save as my defaults). Results show what differs; for schema, the SQL of both sides line by line.
+**Deploy** shows the script and its warnings (data loss, truncation, NOT NULL...) and runs it in
+one transaction, or opens it in a query window.
+
+Projects are saved as `.qsc` (schema) and `.qdc` (data) JSON files that you can keep in Git.
+Passwords are never written to them: "Remember credentials" keeps them in Windows Credential
+Manager. SQL Compare `.scp` and SQL Data Compare `.sdc` projects open too (without passwords).
+
+### Command line
+
+The switches, aliases and exit codes are the ones `SQLCompare.exe` and `SQLDataCompare.exe` use,
+so a pipeline can swap the executable:
+
+```powershell
+$env:QUILL_PASSWORD1 = '...'; $env:QUILL_PASSWORD2 = '...'
+quill schema /s1:dev /db1:Shop /u1:deploy /s2:prod /db2:Shop /u2:deploy /verbose
+quill schema /s1:dev /db1:Shop /s2:prod /db2:Shop /scriptfile:deploy.sql /synchronize /abortOnWarnings:High
+quill schema /project:DEV_to_PROD.qsc /assertidentical            # exit 0 identical, 79 different
+quill schema /s1:prod /db1:Shop /makesnapshot:prod.json          # compare later with /snapshot2:prod.json
+quill data /s1:dev /db1:Shop /s2:test /db2:Shop /include:Table:^\[dbo\] /export:C:\out /synchronize
+```
+
+| | |
+|---|---|
+| Sources | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` or `QUILL_PASSWORD1..2` (omit for Windows authentication), `/activedirectory1..2` with `QUILL_ACCESS_TOKEN1..2`, `/connection1..2` (connection string), `/encrypt1..2`, `/trustServerCertificate1..2`, `/snapshot1..2`, `/project` |
+| Choose | `/include` and `/exclude` with `type[:regex]` (object types, `Identical`, `Different`, `Missing`, `Additional`), `/options:Default,IgnoreComments,...`; data: `/comparisonkeys`, `/includeColumns`, `/excludeColumns` |
+| Output | `/scriptfile`, `/synchronize`, `/report` + `/reporttype:Html\|Xml`, `/export` (data, CSV), `/json`, `/showWarnings`, `/abortOnWarnings:Medium\|High`, `/transactionIsolationLevel`, `/force` |
+| Exit codes | 0 success · 61 stopped by warnings · 63 identical · 64 usage · 74 file exists (use `/force`) · 79 `/assertidentical` and different · 126 database error |
+
 ## Formatting options
 
 `quill --style file.json` and the extension (which reads `%USERPROFILE%\.quillsql.json`) take a
@@ -391,6 +437,10 @@ installed copies offer the update within a day.
   colors and history still work.
 - `insertSemicolons` skips ambiguous places, for example before `THROW`.
 - Smart Rename of database objects produces a script; it does not change other objects for you.
+- Compare does not yet script: turning system versioning on or off, changing a user-defined type
+  that columns use, CLR assemblies, full-text indexes, partition functions and schemes, column-level
+  permissions, and `sql_variant` data. It warns where this matters.
+- The Compare windows are in English only for now.
 - Tab colors depend on the layout of SSMS 21's document tabs and may need an update for a future
   SSMS.
 

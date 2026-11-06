@@ -8,7 +8,16 @@ use crate::catalog::Database;
 use crate::schema::select::Selection;
 use crate::schema::{self, DiffKind, Difference, Mappings, Options, deploy, print};
 
-const ACTIONS: [Switch; 6] = [
+const ACTIONS: [Switch; 9] = [
+    Switch { name: "report", aliases: &["r"], takes_value: true, repeatable: false, help: "Write a comparison report to a file" },
+    Switch { name: "reporttype", aliases: &["rt"], takes_value: true, repeatable: false, help: "Xml (default) or Html" },
+    Switch {
+        name: "reportAllObjectsWithDifferences",
+        aliases: &["rad"],
+        takes_value: false,
+        repeatable: false,
+        help: "Report identical objects too",
+    },
     Switch {
         name: "makesnapshot",
         aliases: &["mksnap"],
@@ -141,6 +150,21 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
         for (table, from, to) in &comparison.auto_mapped_columns {
             println!("Column {table}.[{from}] was mapped to [{to}] because they are alike (turn off with /options:...,NoAutoColumnMapping).");
+        }
+    }
+
+    if let Some(path) = args.get("report") {
+        let path = Path::new(path);
+        common::check_output(path, args)?;
+        let all = args.has("reportAllObjectsWithDifferences") || selection.include_identical;
+        let text = match args.get("reporttype").unwrap_or("xml").to_ascii_lowercase().as_str() {
+            "xml" => schema::report::xml(&comparison, &db1.name, &db2.name, all),
+            "html" | "interactive" | "simple" => schema::report::html(&comparison, &db1.name, &db2.name, all),
+            other => return Err(ArgError::new(exit::INVALID_VALUE, format!("/reporttype: '{other}' is not Xml or Html"))),
+        };
+        std::fs::write(path, text).map_err(|e| ArgError::new(exit::REPORT_FAILED, format!("{}: {e}", path.display())))?;
+        if !quiet {
+            println!("Report written to {}.", path.display());
         }
     }
 
