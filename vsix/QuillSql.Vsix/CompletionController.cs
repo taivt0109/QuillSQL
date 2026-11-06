@@ -149,7 +149,8 @@ namespace QuillSql.Vsix
                         case VSConstants.VSStd2KCmdID.PAGEDN: _popup.Move(8); return VSConstants.S_OK;
                         case VSConstants.VSStd2KCmdID.RETURN:
                         case VSConstants.VSStd2KCmdID.TAB:
-                            if (command == VSConstants.VSStd2KCmdID.TAB ? Settings.Current.InsertWithTab : Settings.Current.InsertWithEnter)
+                            // With nothing selected the list only shows guesses: the key does its usual job.
+                            if (_popup.Selected != null && (command == VSConstants.VSStd2KCmdID.TAB ? Settings.Current.InsertWithTab : Settings.Current.InsertWithEnter))
                             {
                                 Commit();
                                 return VSConstants.S_OK;
@@ -160,8 +161,8 @@ namespace QuillSql.Vsix
                             // Optional keys that insert the suggestion and then type themselves.
                             var typedChar = (char)Convert.ToUInt16(Marshal.GetObjectForNativeVariant(input));
                             var settings = Settings.Current;
-                            if ((typedChar == ' ' && settings.InsertWithSpace) || (typedChar == '.' && settings.InsertWithDot)
-                                || (typedChar == ',' && settings.InsertWithComma) || (typedChar == '(' && settings.InsertWithParenthesis))
+                            if (_popup.Selected != null && ((typedChar == ' ' && settings.InsertWithSpace) || (typedChar == '.' && settings.InsertWithDot)
+                                || (typedChar == ',' && settings.InsertWithComma) || (typedChar == '(' && settings.InsertWithParenthesis)))
                             {
                                 Commit();
                             }
@@ -359,7 +360,11 @@ namespace QuillSql.Vsix
                 return false;
             }
             var editor = EditorContext.For(_view);
-            var hit = editor != null && editor.Caret == _autoClosed && editor.Caret < editor.Text.Length && editor.Text[editor.Caret] == typed;
+            // The closing character moves right as the text inside is typed: it is the one at the
+            // caret when only that text, on the same line and without another closer, lies between.
+            var between = editor == null || editor.Caret < _autoClosed ? null : editor.Text.Substring(_autoClosed, editor.Caret - _autoClosed);
+            var hit = between != null && between.IndexOf('\n') < 0 && between.IndexOf(typed) < 0
+                && editor.Caret < editor.Text.Length && editor.Text[editor.Caret] == typed;
             _autoClosed = -1;
             if (hit)
             {
@@ -474,8 +479,9 @@ namespace QuillSql.Vsix
                 return;
             }
             var typed = text.Substring(result.Start, caret - result.Start);
-            // Nothing to offer when the only suggestion is exactly what was typed.
-            if (!explicitRequest && items.Length == 1 && string.Equals(items[0].Insert, typed, StringComparison.OrdinalIgnoreCase))
+            // Nothing to offer when the only suggestion is exactly what was typed. One that differs
+            // only in case stays, so Tab or Enter turns `select` into SELECT and `customerid` into CustomerId.
+            if (!explicitRequest && items.Length == 1 && string.Equals(items[0].Insert, typed, StringComparison.Ordinal))
             {
                 _popup.Close();
                 return;
@@ -489,7 +495,18 @@ namespace QuillSql.Vsix
             var screen = new NativePoint { X = point[0].x, Y = point[0].y + lineHeight };
             ClientToScreen(window, ref screen);
             _replaceStart = result.Start;
-            _popup.Show(items, window, screen.X, screen.Y, Settings.Current.ShowDefinitionBox);
+            // Select what the engine is sure of, or what was picked last time for the same letters;
+            // a list of guesses opens with nothing selected. Ctrl+Space always selects.
+            var select = explicitRequest ? 0 : result.Selected ?? -1;
+            if (typed.Length > 0 && Picks.Last(typed) is string picked)
+            {
+                var at = Array.FindIndex(items, i => i.Insert == picked);
+                if (at >= 0)
+                {
+                    select = at;
+                }
+            }
+            _popup.Show(items, window, screen.X, screen.Y, Settings.Current.ShowDefinitionBox, select);
             LastShown = string.Join(",", items.Take(20).Select(i => i.Label));
             Log.Verbose("suggest " + items.Length + ": " + LastShown);
         }
@@ -503,6 +520,7 @@ namespace QuillSql.Vsix
             {
                 return;
             }
+            Picks.Remember(before.Substring(_replaceStart, caret - _replaceStart), item.Insert);
             // `ALTER PROCEDURE name`: fill in the object's whole definition.
             var alter = System.Text.RegularExpressions.Regex.Match(before.Substring(0, _replaceStart), @"\bALTER\s+(PROC|PROCEDURE|VIEW|FUNCTION)\s+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (alter.Success && Settings.Current.GenerateAlter && (item.Kind == "procedure" || item.Kind == "view" || item.Kind == "function" || item.Kind == "table_function"))

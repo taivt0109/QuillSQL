@@ -147,13 +147,15 @@ namespace QuillSql.Vsix
             _definition.Visibility = string.IsNullOrEmpty(info) ? Visibility.Collapsed : Visibility.Visible;
         }
 
-        public void Show(IList<CompletionItem> items, IntPtr window, int screenX, int screenY, bool showDefinition)
+        /// <summary>Opens the list with `select` selected, or nothing selected when it is -1.</summary>
+        public void Show(IList<CompletionItem> items, IntPtr window, int screenX, int screenY, bool showDefinition, int select)
         {
             _showDefinition = showDefinition;
             var rows = items.Select(i => new Row(i)).ToList();
             _list.ItemsSource = rows;
-            _list.SelectedIndex = 0;
-            _list.ScrollIntoView(_list.SelectedItem);
+            _list.SelectedIndex = Math.Min(select, rows.Count - 1);
+            _list.ScrollIntoView(_list.SelectedIndex >= 0 ? _list.SelectedItem : rows.FirstOrDefault());
+            UpdateDefinition();
             // Popup offsets are device-independent; the editor reports physical pixels.
             var scale = GetDpiForWindow(window) / 96.0;
             if (scale <= 0)
@@ -171,7 +173,8 @@ namespace QuillSql.Vsix
             {
                 return;
             }
-            var index = Math.Max(0, Math.Min(_list.Items.Count - 1, _list.SelectedIndex + delta));
+            // From no selection, the arrows start at the first item.
+            var index = _list.SelectedIndex < 0 ? 0 : Math.Max(0, Math.Min(_list.Items.Count - 1, _list.SelectedIndex + delta));
             _list.SelectedIndex = index;
             _list.ScrollIntoView(_list.SelectedItem);
         }

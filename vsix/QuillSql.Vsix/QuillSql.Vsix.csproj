@@ -37,6 +37,7 @@
     <Compile Include="McpTools.cs" />
     <Compile Include="QueryWindows.cs" />
     <Compile Include="ObjectLinks.cs" />
+    <Compile Include="Picks.cs" />
     <Compile Include="CodeAnalysis.cs" />
     <Compile Include="Commands.cs" />
     <Compile Include="CompletionController.cs" />

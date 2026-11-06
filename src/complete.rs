@@ -79,13 +79,89 @@ pub struct Completion {
     /// UTF-16 offset where the replaced text starts; it ends at the caret.
     pub start: usize,
     pub items: Vec<Item>,
+    /// The item to select as the list opens: one that matches what was typed for sure (the whole
+    /// word, its start, or the initials of its parts). None when the matches are only guesses,
+    /// so Enter and Tab keep their usual meaning instead of inserting a guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<usize>,
 }
 
+/// How well a label matches what was typed: 0 the whole word, 1 its start, 2 the initials of
+/// its parts (`cid` for CustomerId, `od` for OrderDetail), 3 somewhere inside; None for no match.
+fn match_quality(label: &str, typed: &str) -> Option<u8> {
+    let label = label.trim_start_matches('@');
+    let lower = label.to_ascii_lowercase();
+    let needle = typed.trim_start_matches('@').to_ascii_lowercase();
+    if needle.is_empty() {
+        return Some(1);
+    }
+    if lower == needle {
+        return Some(0);
+    }
+    if lower.starts_with(&needle) {
+        return Some(1);
+    }
+    if camel_match(&label_parts(label), &needle.chars().collect::<Vec<_>>()) {
+        return Some(2);
+    }
+    if needle.len() >= 2 && lower.contains(&needle) {
+        return Some(3);
+    }
+    None
+}
+
+/// The parts of a name, lowercased: words split at underscores, dots, spaces and case changes
+/// (CustomerId: customer, id; HTTPStatus: http, status).
+fn label_parts(label: &str) -> Vec<Vec<char>> {
+    let chars: Vec<char> = label.chars().collect();
+    let mut parts: Vec<Vec<char>> = Vec::new();
+    let mut current = Vec::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        let previous = if i > 0 { chars[i - 1] } else { ' ' };
+        let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+        let new_part = c.is_uppercase() && (previous.is_lowercase() || previous.is_ascii_digit() || (previous.is_uppercase() && next_lower));
+        if new_part && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+        current.extend(c.to_lowercase());
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Whether the typed letters start the first part and then, in order, the start of later parts:
+/// each part used gives one or more of its first letters (`cid`: C-ustomer, I-d; `custid`).
+fn camel_match(parts: &[Vec<char>], needle: &[char]) -> bool {
+    fn rest(parts: &[Vec<char>], needle: &[char]) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        let Some((part, later)) = parts.split_first() else { return false };
+        let most = part.len().min(needle.len());
+        (1..=most).rev().any(|take| part[..take] == needle[..take] && (take == needle.len() || (0..later.len()).any(|skip| rest(&later[skip..], &needle[take..]))))
+    }
+    parts.len() > 1 && rest(parts, needle)
+}
 const MAX_ITEMS: usize = 300;
 
 const STATEMENT_KEYWORDS: &[&str] = &[
     "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH", "DECLARE", "SET", "EXEC", "IF",
     "BEGIN", "END", "WHILE", "RETURN", "CREATE", "ALTER", "DROP", "TRUNCATE", "PRINT", "USE",
+];
+
+/// Keywords inside conditions, select lists and the clauses that follow them.
+const EXPRESSION_KEYWORDS: &[&str] = &[
+    "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END", "AS",
+    "ASC", "DESC", "DISTINCT", "TOP", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "UNION", "UNION ALL", "JOIN",
+    "INNER JOIN", "LEFT JOIN", "OVER", "PARTITION BY", "COLLATE", "OFFSET", "FETCH",
 ];
 
 /// What may follow a table and its alias in FROM.
@@ -711,7 +787,7 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
 
 pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, snippets: &[Snippet], options: CompleteOptions) -> Completion {
     let caret = utf16_to_byte(text, caret_utf16);
-    let none = |at: usize| Completion { start: byte_to_utf16(text, at), items: Vec::new() };
+    let none = |at: usize| Completion { start: byte_to_utf16(text, at), items: Vec::new(), selected: None };
     let before = &text[..caret];
 
     // Never suggest inside a string or comment.
@@ -743,6 +819,12 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         _ => (String::new(), caret, false),
     };
     let variable = variable || (prefix.is_empty() && before.ends_with('@'));
+
+    // `GO` alone on its line ends a batch (the lexer reads it as one): offering GOTO or GROUPING
+    // right after it would let Enter replace it.
+    if touching && head.last().is_some_and(|t| t.kind == Kind::Go) {
+        return none(caret);
+    }
 
     // A qualifier such as `t.` or `dbo.` right before the word.
     let mut qualifier: Vec<String> = Vec::new();
@@ -998,7 +1080,7 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                     let insert = if NILADIC.contains(f) { f.to_string() } else { format!("{f}()") };
                     items.push(Item { label: f.to_string(), insert, kind: "function", detail: "built-in function".into() });
                 }
-                for kw in STATEMENT_KEYWORDS {
+                for kw in STATEMENT_KEYWORDS.iter().chain(EXPRESSION_KEYWORDS) {
                     items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
                 }
             }
@@ -1018,29 +1100,30 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
     }
 
     // Rank: prefix matches, then substring matches; then by kind and name.
-    let p = prefix.to_ascii_lowercase();
     let mut scored: Vec<(u8, u8, bool, Item)> = items
         .into_iter()
         .filter_map(|it| {
+            let exact_or_prefix = match_quality(&it.label, &prefix)?;
+            // The whole word ranks with its start; both come before initials and inner matches.
+            let quality = if exact_or_prefix == 0 { 1 } else { exact_or_prefix };
             let label = it.label.to_ascii_lowercase();
             let label = label.trim_start_matches('@');
-            let needle = p.trim_start_matches('@');
-            let quality = if needle.is_empty() || label.starts_with(needle) {
-                0
-            } else if needle.len() >= 3 && label.contains(needle) {
-                1
-            } else {
-                return None;
-            };
+            let needle = prefix.to_ascii_lowercase();
+            let needle = needle.trim_start_matches('@');
             // System catalog views sort after the database's own objects.
             let system = it.detail.starts_with("sys.") || it.detail.starts_with("INFORMATION_SCHEMA.");
-            let exact_snippet = it.kind == "snippet" && label == needle;
-            let rank = if exact_snippet { 0 } else { rank(it.kind, context) };
+            // A whole word typed in another case (`join`, `customerid`) comes first, so Tab or Enter
+            // gives it its proper case instead of a longer name that starts with it.
+            let exact = !needle.is_empty() && label == needle;
+            let rank = if exact { 0 } else { rank(it.kind, context) };
             Some((quality, rank, system, it))
         })
         .collect();
     scored.sort_by_key(|x| (x.0, x.1, x.2, x.3.label.to_ascii_lowercase()));
     scored.dedup_by(|x, y| x.3.insert == y.3.insert && x.3.kind == y.3.kind);
-    let items = scored.into_iter().take(MAX_ITEMS).map(|(_, _, _, it)| it).collect();
-    Completion { start: byte_to_utf16(text, prefix_start), items }
+    let items: Vec<Item> = scored.into_iter().take(MAX_ITEMS).map(|(_, _, _, it)| it).collect();
+    // Select the first item only when something was typed and it matches for sure; a list of guesses,
+    // or one opened by a space before anything is typed, starts with nothing selected.
+    let selected = items.first().filter(|it| !prefix.is_empty() && match_quality(&it.label, &prefix).is_some_and(|q| q <= 2)).map(|_| 0);
+    Completion { start: byte_to_utf16(text, prefix_start), items, selected }
 }

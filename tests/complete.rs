@@ -52,9 +52,13 @@ fn system_views_appear_once_their_schema_is_typed() {
 }
 
 #[test]
-fn short_prefixes_only_match_the_start() {
+fn inner_matches_come_after_the_names_that_start_with_it() {
     let l = labels("select * from us|");
-    assert!(!l.contains(&"Customers".into()), "{l:?}");
+    let customers = l.iter().position(|x| x == "Customers");
+    let first_start = l.iter().position(|x| x.to_ascii_lowercase().starts_with("us"));
+    if let (Some(c), Some(s)) = (customers, first_start) {
+        assert!(s < c, "{l:?}");
+    }
 }
 
 #[test]
@@ -241,4 +245,43 @@ fn columns_after_where_and_by_and_comparisons() {
         let first: Vec<&str> = l.iter().take(8).map(String::as_str).collect();
         assert!(first.iter().any(|x| x.contains("Total")) && first.iter().any(|x| x.contains("Name")), "{tail}: {first:?}");
     }
+}
+#[test]
+fn nothing_for_go_alone_on_its_line() {
+    assert!(labels("select 1\nGO|").is_empty());
+    assert!(labels("select 1\n  go|\nselect 2").is_empty());
+    assert!(labels("GO|").is_empty());
+    // Inside a statement it is the start of a word, such as GROUP.
+    assert!(labels("select 1\nGRO|").iter().any(|l| l == "GROUP BY" || l.starts_with("GROUP")));
+}
+#[test]
+fn a_whole_word_typed_in_another_case_comes_first() {
+    // Customers has a column named Order, sales.Orders a table: `order` puts the column first.
+    let l = labels("select c.Name from dbo.Customers c where c.order|");
+    assert_eq!(l.first().map(String::as_str), Some("Order"), "{l:?}");
+    let l = labels("select * from dbo.Customers c where c.Name = 'x' and|");
+    assert_eq!(l.first().map(String::as_str), Some("AND"), "{l:?}");
+}
+#[test]
+fn camel_case_initials_and_inner_matches() {
+    let l = labels("select * from dbo.Customers c where c.cid|");
+    assert_eq!(l.first().map(String::as_str), Some("CustomerId"), "{l:?}");
+    // `ust` is only inside a name: listed, but not selected.
+    let r = run("select * from dbo.Customers c where c.ust|");
+    assert!(r.items.iter().any(|i| i.label == "CustomerId"), "{:?}", r.items.iter().map(|i| &i.label).collect::<Vec<_>>());
+    assert_eq!(r.selected, None);
+}
+
+#[test]
+fn only_sure_matches_are_selected() {
+    // `and` matches RAND only inside, but the keyword AND exactly: AND is selected.
+    let r = run("select * from dbo.Customers c where c.Name = 'x' and|");
+    assert_eq!(r.items.first().map(|i| i.label.as_str()), Some("AND"));
+    assert_eq!(r.selected, Some(0));
+    // A list opened by a space, before anything is typed, selects nothing.
+    assert_eq!(run("select * from dbo.Customers c where |").selected, None);
+    // A prefix selects its first match.
+    assert_eq!(run("sel|").selected, Some(0));
+    // Something that only appears inside other words selects nothing.
+    assert_eq!(run("select * from dbo.Customers c where c.Name = 'x' and c.ame|").selected, None);
 }

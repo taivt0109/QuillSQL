@@ -64,6 +64,8 @@ namespace QuillSql.Vsix
     {
         [DataMember(Name = "start")] public int Start { get; set; }
         [DataMember(Name = "items")] public CompletionItem[] Items { get; set; }
+        /// <summary>The item to select as the list opens, when what was typed matches it for sure.</summary>
+        [DataMember(Name = "selected")] public int? Selected { get; set; }
     }
 
     [DataContract]
