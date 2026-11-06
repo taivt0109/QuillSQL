@@ -103,18 +103,18 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     if !c.null_member() {
         (s.texts, s.encrypted) = c.blob_store()?;
     }
-    for _ in 0..2 {
-        // Assembly binaries and XML schema collection contents.
-        if !c.null_member() {
-            c.blob_store()?;
-        }
+    if !c.null_member() {
+        s.assembly_blobs = c.blob_store()?.0;
+    }
+    if !c.null_member() {
+        s.xml_blobs = c.blob_store()?.0;
     }
     c.member(Cur::assembly)?;
     if !c.null_member() {
         c.dependencies()?;
     }
     s.synonyms = c.member(Cur::synonym)?;
-    c.member(Cur::xml_schema_collection)?;
+    s.xml_schema_collections = c.member(Cur::xml_schema_collection)?;
     s.message_types = c.member(Cur::message_type)?;
     s.contracts = c.member(Cur::contract)?;
     s.queues = c.member(Cur::queue)?;
@@ -176,6 +176,10 @@ struct Snap {
     event_notifications: Vec<EventNotification>,
     partition_functions: Vec<PartitionFunction>,
     partition_schemes: Vec<PartitionScheme>,
+    /// XML schema collections with the id of their content in `xml_blobs`.
+    xml_schema_collections: Vec<(Raw<XmlSchemaCollection>, i32)>,
+    xml_blobs: HashMap<u64, Vec<u8>>,
+    assembly_blobs: HashMap<u64, Vec<u8>>,
     dependencies: Vec<(u8, String, u8, String)>,
     props: Vec<RawProp>,
     /// Comments blob store: module and default text by id.
@@ -1786,14 +1790,13 @@ impl Cur<'_> {
         Ok(())
     }
 
-    fn xml_schema_collection(&mut self) -> R<()> {
+    fn xml_schema_collection(&mut self) -> R<(Raw<XmlSchemaCollection>, i32)> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
+        let mut x = XmlSchemaCollection { name: self.s()?, schema: self.s()?, ..Default::default() };
+        let id = self.i32()?;
+        self.bool()?; // case-sensitive
         self.eprops()?;
-        self.perms()?;
+        let perms = self.perms()?;
         if v <= 13.65 {
             let n = self.count()?;
             for _ in 0..n {
@@ -1805,9 +1808,10 @@ impl Cur<'_> {
             }
         }
         if v >= 7.0 {
-            self.str()?;
+            x.owner = self.str()?.filter(|o| !o.is_empty());
         }
-        self.two_ss(v)
+        self.two_ss(v)?;
+        Ok((Raw { item: x, perms, system: false }, id))
     }
 
     fn message_type(&mut self) -> R<Raw<MessageType>> {
@@ -2320,6 +2324,12 @@ impl Snap {
         }
         db.event_notifications = std::mem::take(&mut self.event_notifications);
         db.event_notifications.sort_by(|a, b| a.name.cmp(&b.name));
+        for (x, id) in std::mem::take(&mut self.xml_schema_collections) {
+            let mut item = x.item;
+            perms_on("XML SCHEMA COLLECTION", Some(&item.schema), &item.name, &x.perms);
+            item.definition = self.xml_blobs.get(&(id as i64 as u64)).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+            db.xml_schema_collections.push(item);
+        }
         db.partition_functions = std::mem::take(&mut self.partition_functions);
         db.partition_schemes = std::mem::take(&mut self.partition_schemes);
         db.defaults = std::mem::take(&mut self.defaults);

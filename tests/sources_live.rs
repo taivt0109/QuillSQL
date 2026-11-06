@@ -66,10 +66,9 @@ const BINDINGS: &str = include_str!("fixtures/compare/sources_bindings.sql");
 const SHOP_DATA: &str = include_str!("fixtures/compare/shop_data.sql");
 
 /// Object types our .snp files do not carry in full yet (the objects fixture).
-const NOT_IN_SNP: [ObjectType; 8] = [
+const NOT_IN_SNP: [ObjectType; 7] = [
     ObjectType::Assembly,
     ObjectType::SecurityPolicy,
-    ObjectType::XmlSchemaCollection,
     ObjectType::Function,
     ObjectType::Role,
     ObjectType::StoredProcedure,

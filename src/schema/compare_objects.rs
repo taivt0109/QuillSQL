@@ -18,6 +18,7 @@ pub(super) fn xml_key(x: &str) -> String {
     let mut out = String::with_capacity(x.len());
     let mut pending = String::new();
     let mut after_tag = false;
+    let mut in_tag = false;
     for c in x.chars() {
         if c.is_whitespace() && after_tag {
             pending.push(c);
@@ -27,8 +28,24 @@ pub(super) fn xml_key(x: &str) -> String {
             out.push_str(&pending);
         }
         pending.clear();
+        // Space before the end of a tag (`<b x="1" />`) is not significant either.
+        if c == '>' && in_tag {
+            let empty = out.ends_with('/');
+            if empty {
+                out.pop();
+            }
+            out.truncate(out.trim_end().len());
+            if empty {
+                out.push('/');
+            }
+        }
         out.push(c);
         after_tag = c == '>';
+        in_tag = match c {
+            '<' => true,
+            '>' => false,
+            _ => in_tag,
+        };
     }
     out
 }
@@ -621,5 +638,6 @@ mod tests {
     fn xml_without_layout() {
         assert_eq!(xml_key("<a>\r\n  <b x=\"1\"/>\r\n</a>"), "<a><b x=\"1\"/></a>");
         assert_eq!(xml_key("<a> text </a>"), "<a> text </a>");
+        assert_eq!(xml_key("<a>\r\n  <b x=\"1\" />\r\n</a >"), "<a><b x=\"1\"/></a>");
     }
 }

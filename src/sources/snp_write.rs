@@ -379,17 +379,26 @@ impl<'a> W<'a> {
             })
             .collect();
         self.comments();
-        for _ in 0..2 {
-            // Assembly binaries and XML schema collection contents.
-            self.f32(BLOBS);
-            self.i32(0);
-            self.i32(0);
+        // Assembly binaries.
+        self.f32(BLOBS);
+        self.i32(0);
+        self.i32(0);
+        // XML schema collection contents, by the collection's id.
+        let xml_ids: Vec<i32> = db.xml_schema_collections.iter().map(|_| self.id()).collect();
+        self.f32(BLOBS);
+        self.len(xml_ids.len());
+        for (x, id) in db.xml_schema_collections.iter().zip(&xml_ids) {
+            self.u64(*id as i64 as u64);
+            self.len(x.definition.len());
+            self.b.b.extend(x.definition.as_bytes());
         }
+        self.i32(0);
         self.empty_coll(); // assemblies
         self.f32(VERSION); // assembly dependencies
         self.i32(0);
         self.coll(&db.synonyms, W::synonym);
-        self.empty_coll(); // XML schema collections
+        let xml: Vec<(&XmlSchemaCollection, i32)> = db.xml_schema_collections.iter().zip(xml_ids).collect();
+        self.coll(&xml, |w, (x, id)| w.xml_schema_collection(x, *id));
         self.message_types();
         self.contracts();
         self.queues();
@@ -1696,6 +1705,19 @@ impl<'a> W<'a> {
         }
         self.no_eprops();
         self.no_ss(1);
+    }
+
+    fn xml_schema_collection(&mut self, x: &XmlSchemaCollection, id: i32) {
+        let cs = self.cs;
+        self.f32(VERSION);
+        self.s(&x.name);
+        self.s(&x.schema);
+        self.i32(id);
+        self.bool(cs);
+        self.no_eprops();
+        self.perms_on("XML SCHEMA COLLECTION", Some(&x.schema), Some(&x.name));
+        self.str(x.owner.as_deref());
+        self.no_ss(2);
     }
 
     fn service_binding(&mut self, b: &ServiceBinding) {
