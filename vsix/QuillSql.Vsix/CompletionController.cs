@@ -20,10 +20,16 @@ namespace QuillSql.Vsix
     /// </summary>
     internal sealed class CompletionController : IOleCommandTarget, IVsTextViewEvents
     {
+        /// <summary>Words after which a space opens the suggestions: tables after these...</summary>
         private static readonly string[] TriggerAfterSpace =
         {
             "FROM", "JOIN", "EXEC", "EXECUTE", "INTO", "UPDATE", "APPLY", "USING", "TABLE",
+            // ...and columns, aliases and functions in conditions, lists and expressions.
+            "SELECT", "WHERE", "AND", "OR", "NOT", "ON", "BY", "HAVING", "SET", "CASE", "WHEN", "THEN", "ELSE", "DISTINCT",
         };
+
+        /// <summary>Characters after which a space opens the suggestions: comparisons and lists.</summary>
+        private const string TriggerAfterSpaceSymbols = "=<>,(+-*/";
 
         private readonly IVsTextView _view;
         private readonly CompletionPopup _popup = new CompletionPopup();
@@ -387,7 +393,10 @@ namespace QuillSql.Vsix
             {
                 var before = text.Substring(0, caret).TrimEnd();
                 var word = new string(before.Reverse().TakeWhile(char.IsLetter).Reverse().ToArray());
-                if (TriggerAfterSpace.Contains(word, StringComparer.OrdinalIgnoreCase))
+                var last = before.Length == 0 ? '\0' : before[before.Length - 1];
+                // A word only counts when it stands alone: "brand" does not end with the keyword AND.
+                var alone = word.Length == before.Length || !IsWordChar(before[before.Length - word.Length - 1]);
+                if ((alone && TriggerAfterSpace.Contains(word, StringComparer.OrdinalIgnoreCase)) || (word.Length == 0 && TriggerAfterSpaceSymbols.IndexOf(last) >= 0))
                 {
                     Trigger(false);
                 }

@@ -38,6 +38,8 @@ namespace QuillSql.Vsix
         public ConnectionTarget Target;
         public string Key;
         public bool AllowData;
+        /// <summary>Seconds a lookup may take, from Options > AI.</summary>
+        public int Timeout = AiSettings.DefaultToolTimeout;
         /// <summary>All the conversation's windows that are still open.</summary>
         public List<QueryWindow> Windows;
     }
@@ -48,7 +50,7 @@ namespace QuillSql.Vsix
     /// the user allows it) rows from read-only queries. It listens on 127.0.0.1 only, answers only
     /// requests carrying the token of a chat turn in progress, and every tool only reads.
     /// </summary>
-    internal static class McpServer
+    internal static partial class McpServer
     {
         private const int MaxResult = 30000;
         private static readonly ConcurrentDictionary<string, McpSession> Sessions = new ConcurrentDictionary<string, McpSession>();
@@ -219,7 +221,7 @@ namespace QuillSql.Vsix
                     result = new Dictionary<string, object>();
                     break;
                 case "tools/list":
-                    result = new Dictionary<string, object> { ["tools"] = Tools.Select(t => t.Describe()).ToArray() };
+                    result = new Dictionary<string, object> { ["tools"] = All.Select(t => t.Describe()).ToArray() };
                     break;
                 case "tools/call":
                     result = Call(parameters, session);
@@ -239,7 +241,7 @@ namespace QuillSql.Vsix
         {
             var name = parameters != null && parameters.TryGetValue("name", out var n) ? n as string : null;
             var arguments = (parameters != null && parameters.TryGetValue("arguments", out var a) ? a as Dictionary<string, object> : null) ?? new Dictionary<string, object>();
-            var tool = Tools.FirstOrDefault(t => t.Name == name);
+            var tool = All.FirstOrDefault(t => t.Name == name);
             var call = Interlocked.Increment(ref _calls);
             session.Started?.Invoke(call, name, arguments);
             string text;
@@ -261,6 +263,12 @@ namespace QuillSql.Vsix
             catch (ToolException ex)
             {
                 text = ex.Message;
+                failed = true;
+            }
+            catch (SqlException ex) when (ex.Number == -2)
+            {
+                text = "Timed out after " + AiAssistant.LoadSettings().ToolTimeoutSeconds + " seconds (the developer sets this limit in Options > AI). "
+                    + "Narrow the lookup (fewer days, one table or index, TOP), use a more specific tool, or ask the developer to raise the limit.";
                 failed = true;
             }
             catch (SqlException ex)
@@ -313,6 +321,7 @@ namespace QuillSql.Vsix
                 Target = window?.Connection,
                 Key = window?.Key() ?? "",
                 AllowData = session.AllowData,
+                Timeout = AiAssistant.LoadSettings().ToolTimeoutSeconds,
                 Windows = windows,
             };
         }
@@ -381,7 +390,7 @@ namespace QuillSql.Vsix
         private static string Tables(ToolContext session, string sql, int maxRows, int maxCell, string[] titles, params SqlParameter[] parameters)
         {
             using (var connection = session.Target.CreateConnection())
-            using (var command = new SqlCommand(Marker + sql, connection) { CommandTimeout = 60 })
+            using (var command = new SqlCommand(Marker + sql, connection) { CommandTimeout = session.Timeout })
             {
                 command.Parameters.AddRange(parameters);
                 connection.Open();
@@ -417,7 +426,7 @@ namespace QuillSql.Vsix
         {
             var rows = new List<object[]>();
             using (var connection = session.Target.CreateConnection())
-            using (var command = new SqlCommand(Marker + sql, connection) { CommandTimeout = 60 })
+            using (var command = new SqlCommand(Marker + sql, connection) { CommandTimeout = session.Timeout })
             {
                 command.Parameters.AddRange(parameters);
                 connection.Open();
@@ -433,6 +442,12 @@ namespace QuillSql.Vsix
             }
             return rows;
         }
+
+        /// <summary>
+        /// Leaves QuillSQL's own lookups out of Query Store results (Query Store drops the marker
+        /// comment): statements on system views, which a workload hardly ever runs.
+        /// </summary>
+        internal const string NotOurs = "qt.query_sql_text NOT LIKE N'%sys.%'";
 
         /// <summary>Starts QuillSQL's own catalog queries, so the plan cache tools can leave them out.</summary>
         private const string Marker = "/* QuillSQL tool */\n";
@@ -576,6 +591,11 @@ namespace QuillSql.Vsix
             }
             return sb.Append(editor.Text).ToString();
         }
+
+        private static Tool[] _all;
+
+        /// <summary>Every tool: the everyday ones, then the in-depth ones of McpTools.cs.</summary>
+        private static Tool[] All => _all ?? (_all = Tools.Concat(DeepTools).ToArray());
 
         /// <summary>Background waits that say nothing about a workload.</summary>
         private static readonly string[] BenignWaits =
@@ -956,7 +976,7 @@ FROM sys.query_store_query_text AS qt
 JOIN sys.query_store_query AS q ON q.query_text_id = qt.query_text_id
 JOIN sys.query_store_plan AS p ON p.query_id = q.query_id
 JOIN sys.query_store_runtime_stats AS rs ON rs.plan_id = p.plan_id
-WHERE qt.query_sql_text LIKE '%' + @e + '%' ESCAPE '\' AND rs.last_execution_time >= DATEADD(day, -@days, SYSUTCDATETIME())
+WHERE qt.query_sql_text LIKE '%' + @e + '%' ESCAPE '\' AND rs.last_execution_time >= DATEADD(day, -@days, SYSUTCDATETIME()) AND " + NotOurs + @"
 GROUP BY q.query_id, q.object_id, qt.query_sql_text
 ORDER BY SUM(rs.avg_duration * rs.count_executions) DESC;", 25, 600, null,
                     new SqlParameter("@e", Literal(Text(a, "text"))), new SqlParameter("@days", Number(a, "days", 7, 1, 60))),
@@ -1013,7 +1033,7 @@ ORDER BY wait_time_ms DESC;", 15);
                         {
                             foreach (var batch in target.Batches ?? new[] { sql })
                             {
-                                using (var command = new SqlCommand(batch, connection, transaction) { CommandTimeout = 120 })
+                                using (var command = new SqlCommand(batch, connection, transaction) { CommandTimeout = s.Timeout * 2 })
                                 using (var reader = command.ExecuteReader())
                                 {
                                     do
@@ -1133,7 +1153,7 @@ ORDER BY ps.index_id, ps.partition_number;", 200, new SqlParameter("@t", Text(a,
                         }
                         // Inside a transaction that is always rolled back, should anything still write.
                         using (var transaction = connection.BeginTransaction())
-                        using (var command = new SqlCommand(sql, connection, transaction) { CommandTimeout = 30 })
+                        using (var command = new SqlCommand(sql, connection, transaction) { CommandTimeout = s.Timeout })
                         {
                             string result;
                             using (var reader = command.ExecuteReader())

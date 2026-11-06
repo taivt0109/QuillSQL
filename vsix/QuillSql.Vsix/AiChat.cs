@@ -156,7 +156,11 @@ namespace QuillSql.Vsix
             "When a window is connected you have read-only tools on its database: objects and code (search_objects, find_columns, describe_object, " +
             "get_definition, dependencies, search_definitions), indexes and statistics (index_usage, missing_indexes, statistics, stats_histogram, " +
             "index_fragmentation, largest_tables), plans and history (estimated_plan, query_store_top, query_store_search, query_store_query, " +
-            "plan_cache_top) and the server now (current_activity, wait_stats, server_info). Use them whenever you need a fact instead of guessing " +
+            "plan_cache_top) and the server now (current_activity, wait_stats, server_info), and in-depth ones: queries_using_index, query_store_regressed, " +
+            "query_store_waits, plan_warnings, parameter_sniffing, procedure_stats, memory_grants, resource_usage, blocking_chains, locks, open_transactions, " +
+            "deadlocks, unused_indexes, duplicate_indexes, unindexed_foreign_keys, heaps, stale_statistics, index_operational_stats, file_io_latency, " +
+            "log_usage, tempdb_usage, identity_usage, recent_changes, sessions_summary and column_profile. Prefer the most specific tool over writing " +
+            "your own queries on system views: they are tuned and time-limited. Use them whenever you need a fact instead of guessing " +
             "or asking for it, and say briefly what you looked at. Before advising to change or drop something, check dependencies. " +
             "run_query and measure_query run the query, so they work only when the developer allows reading data; prefer the other tools. " +
             "End every answer with one last line exactly in the form `" + NextMarker + " question one | question two | question three`: " +

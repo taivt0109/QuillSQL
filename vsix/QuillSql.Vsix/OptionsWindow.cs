@@ -608,10 +608,15 @@ namespace QuillSql.Vsix
         {
             var model = new ComboBox { IsEditable = true, ItemsSource = new[] { "", "sonnet", "opus", "haiku" }, Text = _ai.Model ?? "", Width = 240, MinHeight = 24, HorizontalAlignment = HorizontalAlignment.Left };
             var language = new TextBox { Text = _ai.Language ?? "", Width = 240, MinHeight = 24, VerticalContentAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+            var timeout = new TextBox { Text = _ai.ToolTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture), Width = 80, MinHeight = 24, VerticalContentAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
             _apply.Add(() =>
             {
                 _ai.Model = model.Text.Trim();
                 _ai.Language = language.Text.Trim();
+                if (int.TryParse(timeout.Text.Trim(), out var seconds))
+                {
+                    _ai.ToolTimeout = Math.Max(10, Math.Min(600, seconds));
+                }
             });
             var claude = AiAssistant.FindClaude();
             var status = new StackPanel { Orientation = Orientation.Horizontal };
@@ -625,7 +630,9 @@ namespace QuillSql.Vsix
                 statusPill,
                 Row(Label("Model (empty: your default)"), model),
                 Row(Label("Answer language"), language),
-                Note("For example Vietnamese or English. Explanations and SQL comments are written in it."));
+                Note("For example Vietnamese or English. Explanations and SQL comments are written in it."),
+                Row(Label("Time limit of a database lookup (seconds)"), timeout),
+                Note("How long one lookup of the AI (a search, a plan, Query Store...) may run, from 10 to 600. Raise it for large databases; keep it low on busy production servers. Measuring a query may take twice as long."));
         }
 
         private UIElement Snippets()

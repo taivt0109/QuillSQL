@@ -173,7 +173,7 @@ ORDER BY i.object_id, i.index_id;";
                         throw new InvalidOperationException("Query Store is " + (value ?? "not available") + " in this database. Turn it on with ALTER DATABASE ... SET QUERY_STORE = ON.");
                     }
                 }
-                const string query = @"
+                var query = @"
 SET NOCOUNT ON;
 WITH per_plan AS (
     SELECT p.query_id, p.plan_id,
@@ -200,6 +200,7 @@ SELECT TOP (@top) q.query_id, qt.query_sql_text, pq.executions,
 FROM per_query AS pq
 JOIN sys.query_store_query AS q ON q.query_id = pq.query_id
 JOIN sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id
+WHERE " + McpServer.NotOurs + @"
 ORDER BY pq.total_duration DESC;";
                 using (var command = new SqlCommand(query, connection) { CommandTimeout = Timeout })
                 {

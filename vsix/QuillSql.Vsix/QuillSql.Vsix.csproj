@@ -34,6 +34,7 @@
     <Compile Include="AiChat.cs" />
     <Compile Include="AiChatPane.cs" />
     <Compile Include="McpServer.cs" />
+    <Compile Include="McpTools.cs" />
     <Compile Include="QueryWindows.cs" />
     <Compile Include="ObjectLinks.cs" />
     <Compile Include="CodeAnalysis.cs" />
@@ -103,6 +104,7 @@
     <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.Xaml" />
     <Reference Include="System.Xml" />
+    <Reference Include="System.Xml.Linq" />
     <Reference Include="WindowsBase" />
     <Reference Include="System.Design" />
     <Reference Include="Microsoft.CSharp" />

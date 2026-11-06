@@ -244,8 +244,16 @@ windows for a conversation on one topic: ask, then keep asking, and Claude remem
   partitions), read a definition, index usage, missing-index hints, statistics, an estimated plan,
   Query Store, the queries running now and the server settings. Each lookup shows as a step under
   the answer; click it to see what Claude read.
-- **Let AI read data** (off by default) also lets Claude run read-only SELECTs, at most 200 rows,
-  in a transaction that is always rolled back; statements that write are refused.
+  In depth, it can also find which queries use an index, queries that got slower, what queries
+  wait on, plan warnings (implicit conversions, spills, key lookups...), parameter sniffing,
+  procedure statistics, memory grants, CPU/IO/memory use, blocking chains, locks, open
+  transactions, recent deadlocks, unused and duplicate indexes, foreign keys without an index,
+  heaps, stale statistics, page splits and lock waits per index, file latency, log and tempdb use,
+  identity columns close to their limit, recent schema changes and connections.
+- **Let AI read data** (off by default) also lets Claude run read-only SELECTs, measure a query
+  and profile a column, at most 200 rows, in a transaction that is always rolled back; statements
+  that write are refused.
+- Each lookup may take at most 60 seconds; change it in **Options > AI** (10 to 600).
 - Nothing needs installing or configuring in Claude Code: QuillSQL serves these tools from SSMS
   on 127.0.0.1, only during an answer, behind a one-time token, and passes them to `claude` for
   that answer only.

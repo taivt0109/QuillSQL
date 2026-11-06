@@ -233,3 +233,12 @@ fn a_new_statement_or_clause_after_a_table_and_its_alias() {
     // Still nothing while the alias itself is being typed.
     assert!(labels("select * from dbo.Customers cu|").is_empty());
 }
+#[test]
+fn columns_after_where_and_by_and_comparisons() {
+    let base = "select * from dbo.Customers c\njoin sales.Orders o on o.CustomerId = c.CustomerId\n";
+    for tail in ["where |", "where c.Name > 'x' and |", "where c.Name > 'x' or |", "group by |", "order by |", "where o.Total > |"] {
+        let l = labels(&format!("{base}{tail}"));
+        let first: Vec<&str> = l.iter().take(8).map(String::as_str).collect();
+        assert!(first.iter().any(|x| x.contains("Total")) && first.iter().any(|x| x.contains("Name")), "{tail}: {first:?}");
+    }
+}

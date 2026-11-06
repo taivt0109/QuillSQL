@@ -207,8 +207,34 @@ namespace QuillSql.Vsix
         private void OnMouseDown(object sender, MouseButtonEventArgs e)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            if (!Ctrl || _linked == null)
+            if (!Ctrl || !Active())
             {
+                return;
+            }
+            if (_linked == null)
+            {
+                // Clicked before the name was underlined (Ctrl pressed without moving the mouse):
+                // look it up now, and pin its card if it is an object. The click itself goes on.
+                var clicked = PositionAt(e.GetPosition(_view.VisualElement));
+                var name = clicked == null ? null : NameAt(clicked.Value);
+                if (name != null)
+                {
+                    var view = _view;
+                    var key = Commands.MetadataKey(out _);
+                    var text = view.TextSnapshot.GetText();
+                    ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                    {
+                        await TaskScheduler.Default;
+                        var reply = EngineProcess.Shared.Request("object_at", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + clicked.Value);
+                        var found = reply == null ? null : Json.Parse<ObjectAtReply>(reply)?.Result;
+                        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                        if (found != null && !view.IsClosed)
+                        {
+                            CardPopup.Close();
+                            CardPopup.ShowPinned(view, clicked.Value);
+                        }
+                    }).FileAndForget("quillsql/objectlink");
+                }
                 return;
             }
             var position = PositionAt(e.GetPosition(_view.VisualElement));

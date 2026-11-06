@@ -28,11 +28,18 @@ namespace QuillSql.Vsix
         [DataMember(Name = "language")] public string Language { get; set; }
         /// <summary>Whether the AI chat may run read-only SELECTs to look at rows.</summary>
         [DataMember(Name = "allowData")] public bool AllowData { get; set; }
+        /// <summary>Seconds a database lookup of the AI may take; 0 means the default.</summary>
+        [DataMember(Name = "toolTimeout")] public int ToolTimeout { get; set; }
+
+        public const int DefaultToolTimeout = 60;
+
+        /// <summary>The lookup time limit in seconds, within 10 to 600.</summary>
+        public int ToolTimeoutSeconds => ToolTimeout <= 0 ? DefaultToolTimeout : Math.Max(10, Math.Min(600, ToolTimeout));
 
         public void Save()
         {
             Directory.CreateDirectory(Updater.Folder);
-            File.WriteAllText(FilePath, "{\"model\":" + Json.Str(Model ?? "") + ",\"language\":" + Json.Str(Language ?? "") + ",\"allowData\":" + Json.Bool(AllowData) + "}");
+            File.WriteAllText(FilePath, "{\"model\":" + Json.Str(Model ?? "") + ",\"language\":" + Json.Str(Language ?? "") + ",\"allowData\":" + Json.Bool(AllowData) + ",\"toolTimeout\":" + ToolTimeoutSeconds + "}");
         }
     }
 
