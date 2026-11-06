@@ -221,6 +221,12 @@ fn bound_defaults_and_rules() {
     let s = converge(&server, a, b, &Options::default_set());
     let (u, alter, bind) = (s.sql.find("sp_unbindefault").unwrap(), s.sql.find("ALTER COLUMN [a] [bigint]").unwrap(), s.sql.find("sp_bindefault").unwrap());
     assert!(u < alter && alter < bind, "{}", s.sql);
+    // A new NOT NULL column with a bound default: the table is rebuilt and the rows get the default.
+    server.create(a, &format!("{}\nGO\nEXEC sp_bindefault N'dbo.Zero', N'dbo.T.c'", base.replace("b int NULL)", "b int NULL, c int NOT NULL)")));
+    server.create(b, &format!("{base}INSERT INTO dbo.T (a, b) VALUES (1, 1), (2, 2)"));
+    let s = converge(&server, a, b, &Options::default_set());
+    assert!(s.warnings.iter().any(|w| w.message.contains("The default [dbo].[Zero] must be bound to it")), "{:?}", s.warnings);
+    assert_eq!(server.scalar(b, "SELECT COUNT(*) FROM dbo.T WHERE c = 0"), 2);
     // IgnoreBindings: nothing to do.
     server.create(b, base);
     let (s, _) = script(&server, a, b, &Options::default_set().with(Opt::IgnoreBindings));

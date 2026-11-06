@@ -832,7 +832,7 @@ impl<'a> Planner<'a> {
         }
         self.module_step(Phase::CreateObjects, format!("Creating {name}"), statements, &ModuleSettings::default());
         self.table_children(s);
-        self.bind_columns(s, None);
+        self.bind_columns(s, None, true);
     }
 
     /// Indexes, checks, foreign keys and triggers of a new or rebuilt table.
@@ -1283,7 +1283,7 @@ impl<'a> Planner<'a> {
 
     /// sp_bindefault / sp_bindrule for the source columns of a table; `only` limits it to
     /// columns that lost or never had the binding in the target.
-    fn bind_columns(&mut self, s: &Table, only: Option<&[&str]>) {
+    fn bind_columns(&mut self, s: &Table, only: Option<&[&str]>, defaults: bool) {
         if self.opts.has(Opt::IgnoreBindings) {
             return;
         }
@@ -1293,7 +1293,7 @@ impl<'a> Planner<'a> {
                 continue;
             }
             let column = format!("{name}.{}", quote(&c.name));
-            if let Some(d) = &c.bound_default {
+            if let Some(d) = c.bound_default.as_ref().filter(|_| defaults) {
                 let sql = self.ex.binding(&name, &c.name, d, false, Check::Create, &format!("EXEC sp_bindefault {}, {}", literal(d), literal(&column)));
                 self.group(Phase::BindColumns, "Binding defaults to columns", vec![sql]);
             }
@@ -1503,7 +1503,7 @@ impl<'a> Planner<'a> {
         self.step(Phase::CreateDefaults, format!("Altering {name}"), after_defaults);
         self.sub_objects(s, t);
         self.change_tracking(s, t);
-        self.bind_columns(s, Some(&rebind));
+        self.bind_columns(s, Some(&rebind), true);
     }
 
     /// Change tracking of a table altered in place. It needs the primary key, so a key that is
@@ -1891,6 +1891,14 @@ impl<'a> Planner<'a> {
             }
         }
         let tmp_q = tmp.quoted();
+        // Bound defaults go on the new table before the copy, for NOT NULL columns that get no value.
+        if !self.opts.has(Opt::IgnoreBindings) {
+            for c in &s.columns {
+                if let Some(d) = &c.bound_default {
+                    statements.push(format!("EXEC sp_bindefault {}, {}", literal(d), literal(&format!("{tmp_q}.{}", quote(&c.name)))));
+                }
+            }
+        }
         if !into.is_empty() {
             if identity {
                 statements.push(format!("SET IDENTITY_INSERT {tmp_q} ON"));
@@ -1924,7 +1932,7 @@ impl<'a> Planner<'a> {
         }
         self.module_step(Phase::CreateObjects, format!("Rebuilding {name}"), statements, &ModuleSettings::default());
         self.table_children(s);
-        self.bind_columns(s, None);
+        self.bind_columns(s, None, false);
     }
 
     // ---- Extended properties ----
