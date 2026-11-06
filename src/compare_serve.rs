@@ -99,12 +99,13 @@ fn session(request: &Value) -> Result<u64, String> {
     request.get("session").and_then(Value::as_u64).ok_or_else(|| "'session' is missing".to_string())
 }
 
-fn load_side(side: &SourceSpec, n: u8, progress: &dyn Fn(&str)) -> Result<Database, String> {
-    load_side_with_warnings(side, n, progress).map(|(db, _)| db)
+/// `decrypt` follows DecryptPost2kEncryptedObjects; data compare never needs module text.
+fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<Database, String> {
+    load_side_with_warnings(side, n, decrypt, progress).map(|(db, _)| db)
 }
 
 /// A side and, for a scripts folder, what its parser skipped.
-fn load_side_with_warnings(side: &SourceSpec, n: u8, progress: &dyn Fn(&str)) -> Result<(Database, Vec<String>), String> {
+fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<(Database, Vec<String>), String> {
     if side.is_scripts() {
         progress(&format!("Reading database scripts from '{}'", side.path));
         let f = crate::sources::folder::read(std::path::Path::new(&side.path))?;
@@ -120,7 +121,7 @@ fn load_side_with_warnings(side: &SourceSpec, n: u8, progress: &dyn Fn(&str)) ->
         return Ok((db, Vec::new()));
     }
     progress(&format!("Reading {}", side.describe()));
-    Ok((catalog::read_database(&side.connection(n)?)?, Vec::new()))
+    Ok((catalog::read_database_with(&side.connection(n)?, decrypt)?, Vec::new()))
 }
 
 fn schema_options(p: &Project) -> Result<Options, String> {
@@ -184,15 +185,16 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         "snapshot" => {
             let side: SourceSpec = field(request, "source")?;
             let path: String = field(request, "path")?;
-            let db = load_side(&side, 1, progress)?;
+            let db = load_side(&side, 1, true, progress)?;
             std::fs::write(&path, serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"tables": db.tables.len()}))
         }
         "schema_compare" => {
             let project: Project = field(request, "project")?;
             let opts = schema_options(&project)?;
-            let (db1, mut warnings) = load_side_with_warnings(&project.source, 1, progress)?;
-            let (db2, w2) = load_side_with_warnings(&project.target, 2, progress)?;
+            let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
+            let (db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
+            let (db2, w2) = load_side_with_warnings(&project.target, 2, decrypt, progress)?;
             warnings.extend(w2);
             progress("Comparing");
             let mut comparison = schema::compare(&db1, &db2, &opts, &project.schema_mappings);
@@ -274,8 +276,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             if project.source.is_snapshot() || project.target.is_snapshot() {
                 opts = opts.without(DataOpt::IncludeViews).without(DataOpt::UseChecksumComparison);
             }
-            let db1 = load_side(&project.source, 1, progress)?;
-            let db2 = load_side(&project.target, 2, progress)?;
+            let db1 = load_side(&project.source, 1, false, progress)?;
+            let db2 = load_side(&project.target, 2, false, progress)?;
             let (pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
             let tables: Vec<Value> = pairs
                 .iter()
@@ -316,9 +318,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let opts = data_options(&project)?;
             let (s1, s2) = (project.source.connection(1)?, project.target.connection(2)?);
             progress(&format!("Reading {}", project.source.describe()));
-            let db1 = catalog::read_database(&s1)?;
+            let db1 = catalog::read_database_with(&s1, false)?;
             progress(&format!("Reading {}", project.target.describe()));
-            let db2 = catalog::read_database(&s2)?;
+            let db2 = catalog::read_database_with(&s2, false)?;
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
             let result = crate::data::compare::compare(
