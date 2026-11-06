@@ -57,6 +57,18 @@ struct DataSession {
     script: Option<DeploymentScript>,
     /// Row orders built for the All rows tab and for sorting, by (table, kind, sort).
     views: Views,
+    /// Scripts-folder sides, loaded into temporary databases for the life of the session.
+    staged: [Option<crate::sources::staging::Staging>; 2],
+}
+
+impl DataSession {
+    /// The database holding side `n` (1 or 2): a live database or a staged scripts folder.
+    fn spec(&self, n: u8) -> Result<crate::db::ConnectionSpec, String> {
+        match &self.staged[usize::from(n - 1)] {
+            Some(s) => Ok(s.spec.clone()),
+            None => if n == 1 { &self.project.source } else { &self.project.target }.connection(n),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -206,7 +218,13 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let side: SourceSpec = field(request, "source")?;
             let path: String = field(request, "path")?;
             let db = load_side(&side, 1, true, progress)?;
-            std::fs::write(&path, serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?).map_err(|e| format!("{path}: {e}"))?;
+            // SQL Compare's format, or QuillSQL's JSON model for a .json path.
+            let bytes = if path.to_ascii_lowercase().ends_with(".json") {
+                serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?
+            } else {
+                crate::sources::snp_write::write(&db)
+            };
+            std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"tables": db.tables.len()}))
         }
         // Writes a side as a scripts folder: the project's source with its options, or a source.
@@ -223,7 +241,11 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         "schema_compare" => {
             let project: Project = field(request, "project")?;
-            let opts = schema_options(&project)?;
+            let mut opts = schema_options(&project)?;
+            // Folders with an SSDT database project are compared with SsdtCompatibleOptions.
+            if [&project.source, &project.target].iter().any(|s| s.is_scripts() && crate::sources::sqlproj::find(std::path::Path::new(&s.path)).is_some()) {
+                opts = Options::parse("SsdtCompatibleOptions")?.iter().fold(opts, |o, x| o.with(x));
+            }
             let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
             let (db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
             // An empty database (`/empty2`): every object is created; only a script can be made.
@@ -422,15 +444,29 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         "data_compare" => {
             let project: Project = field(request, "project")?;
-            if project.source.is_scripts() || project.target.is_scripts() {
-                return Err("data compare needs live databases, not scripts folders".into());
-            }
             let opts = data_options(&project)?;
-            let (s1, s2) = (project.source.connection(1)?, project.target.connection(2)?);
+            // A scripts folder is loaded into a temporary database on the other side's server.
+            let host = [(&project.source, 1), (&project.target, 2)].into_iter().find(|(s, _)| !s.is_scripts() && !s.is_snapshot()).map(|(s, n)| s.connection(n)).transpose()?;
+            let mut staged: [Option<crate::sources::staging::Staging>; 2] = [None, None];
+            for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
+                if side.is_scripts() {
+                    let host = host.as_ref().ok_or("a scripts folder needs the other side to be a live database, to load its data")?;
+                    progress(&format!("Loading the data scripts of '{}'", side.path));
+                    let revision = (!side.revision.is_empty()).then_some(side.revision.as_str());
+                    staged[k] = Some(crate::sources::staging::stage(std::path::Path::new(&side.path), revision, host)?);
+                }
+            }
+            let spec = |k: usize, side: &SourceSpec| staged[k].as_ref().map(|s| Ok(s.spec.clone())).unwrap_or_else(|| side.connection(k as u8 + 1));
+            let (s1, s2) = (spec(0, &project.source)?, spec(1, &project.target)?);
             progress(&format!("Reading {}", project.source.describe()));
-            let db1 = catalog::read_database_with(&s1, false)?;
+            let mut db1 = catalog::read_database_with(&s1, false)?;
             progress(&format!("Reading {}", project.target.describe()));
-            let db2 = catalog::read_database_with(&s2, false)?;
+            let mut db2 = catalog::read_database_with(&s2, false)?;
+            for (db, s) in [(&mut db1, &staged[0]), (&mut db2, &staged[1])] {
+                if let Some(s) = s {
+                    db.name = s.folder.database.name.clone();
+                }
+            }
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
             let result = crate::data::compare::compare(
@@ -447,7 +483,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             state.next += 1;
             let id = state.next;
             let reply = data_session_json(id, &db1.name, &db2.name, &result);
-            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new() });
+            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), staged });
             Ok(reply)
         }
         // `kind` 0–3 is a row kind (`RowKind::ALL` order), 4 every stored row in comparison order;
@@ -565,7 +601,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             settings.tables = tables.map(|ix| ix.iter().filter_map(|&i| s.result.tables.get(i)).map(|t| t.pair.source.clone()).collect());
             settings.selections = selections(request, &s.result)?;
             settings.max_transaction_bytes = request.get("maxTransactionSizeMB").and_then(Value::as_u64).filter(|&m| m > 0).map(|m| m * 1_048_576);
-            settings.source_connection = s.project.source.connection(1).ok();
+            settings.source_connection = s.spec(1).ok();
             let script = crate::data::sync::generate(&s.result, &s.db2, &opts, &settings)?;
             let reply = script_json(&script);
             s.script = Some(script);
@@ -589,7 +625,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let id = state.next;
             let mut reply = data_session_json(id, &source_name, &db2.name, &result);
             reply["project"] = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new() });
+            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), staged: [None, None] });
             Ok(reply)
         }
         "deploy" => {
@@ -614,6 +650,17 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 let changes = crate::sources::folder::sync(&s.db1, &target, &comparison.differences, &opts)?;
                 let list = |v: &[std::path::PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
                 return Ok(json!({"written": list(&changes.written), "deleted": list(&changes.deleted)}));
+            }
+            // A data comparison whose target is a scripts folder: run the script on the loaded
+            // copy, then write the changed tables' data scripts.
+            if let Some(s) = state.data.get(&id)
+                && let Some(staged) = &s.staged[1]
+            {
+                let script = s.script.as_ref().ok_or("create the deployment script first")?;
+                let ran = deploy::execute(&staged.spec, script, |i, n| progress(&format!("Running batch {} of {n}", i + 1)))?;
+                let changed: Vec<ObjectName> = s.result.tables.iter().filter(|t| t.error.is_none() && !t.identical()).map(|t| t.pair.target.clone()).collect();
+                let files = staged.write_back(&s.db2, &changed)?;
+                return Ok(json!({"batches": ran, "written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()}));
             }
             let (script, target) = if let Some(s) = state.schema.get(&id) {
                 (s.script.clone(), s.project.target.clone())
@@ -1042,6 +1089,59 @@ mod tests {
         assert!(handle(&mut state, &json!({"op": "nope"}), &none).is_err());
         assert!(handle(&mut state, &json!({"op": "data_rows", "session": 9}), &none).is_err());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Data compare with a scripts folder (needs QUILL_TEST_SERVER, like tests/compare_live.rs).
+    #[test]
+    fn data_compare_with_a_scripts_folder() {
+        let Ok(host) = std::env::var("QUILL_TEST_SERVER") else { return };
+        let user = std::env::var("QUILL_TEST_USER").unwrap_or_default();
+        let mut side = SourceSpec::database(&host, "QD_sources_Serve");
+        side.trust_server_certificate = true;
+        if !user.is_empty() {
+            side.authentication = crate::project::Authentication::Sql;
+            side.user = user;
+            side.password = std::env::var("QUILL_TEST_PASSWORD").ok();
+        }
+        let run = |db: &str, sql: &str| {
+            let mut s = side.clone();
+            s.database = db.into();
+            let spec = s.connection(1).unwrap();
+            let rt = crate::db::runtime().unwrap();
+            rt.block_on(async {
+                let mut c = crate::db::connect_async(&spec).await.unwrap();
+                crate::db::execute(&mut c, sql).await.unwrap();
+            });
+        };
+        run("master", "IF DB_ID('QD_sources_Serve') IS NOT NULL BEGIN ALTER DATABASE QD_sources_Serve SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE QD_sources_Serve; END; CREATE DATABASE QD_sources_Serve;");
+        run("QD_sources_Serve", "CREATE TABLE dbo.T (a int NOT NULL PRIMARY KEY, b nvarchar(10) NULL); INSERT dbo.T VALUES (1, N'x'), (2, N'y');");
+        let dir = std::env::temp_dir().join(format!("quill-serve-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = catalog::read_database(&side.connection(1).unwrap()).unwrap();
+        crate::sources::folder::write_all(&db, &dir, &Options::default_set()).unwrap();
+        std::fs::create_dir_all(dir.join("Data")).unwrap();
+        std::fs::write(dir.join("Data").join("dbo.T_Data.sql"), "INSERT INTO [dbo].[T] ([a], [b]) VALUES (1, N'x')\r\n").unwrap();
+
+        // Projects never carry passwords; the engine takes them from the environment.
+        // SAFETY: no other test reads or writes QUILL_PASSWORD1.
+        unsafe { std::env::set_var("QUILL_PASSWORD1", side.password.clone().unwrap_or_default()) };
+        let mut state = State::default();
+        let none = |_: &str| {};
+        let mut project = Project::new(crate::project::ProjectKind::Data);
+        project.source = side.clone();
+        project.target = SourceSpec { kind: "scripts".into(), path: dir.to_string_lossy().to_string(), ..Default::default() };
+        let p = serde_json::to_value(&project).unwrap();
+        let c = handle(&mut state, &json!({"op": "data_compare", "project": p}), &none).unwrap();
+        assert_eq!(c["targetName"], dir.file_name().unwrap().to_string_lossy().to_string(), "{c}");
+        let id = c["session"].as_u64().unwrap();
+        handle(&mut state, &json!({"op": "data_script", "session": id}), &none).unwrap();
+        let d = handle(&mut state, &json!({"op": "deploy", "session": id}), &none).unwrap();
+        assert_eq!(d["written"].as_array().unwrap().len(), 1, "{d}");
+        let text = std::fs::read_to_string(dir.join("Data").join("dbo.T_Data.sql")).unwrap();
+        assert!(text.contains("N'y'"), "{text}");
+        handle(&mut state, &json!({"op": "close", "session": id}), &none).unwrap();
+        run("master", "ALTER DATABASE QD_sources_Serve SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE QD_sources_Serve;");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

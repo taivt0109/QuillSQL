@@ -91,7 +91,7 @@ pub fn column_sql(c: &Column) -> String {
     let mut s = quote(&c.name);
     if let Some(comp) = &c.computed {
         s.push_str(" AS ");
-        s.push_str(&comp.definition);
+        s.push_str(&super::expr::rewrite(&comp.definition));
         if comp.persisted {
             s.push_str(" PERSISTED");
             if !c.nullable {
@@ -428,7 +428,7 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
             .iter()
             .map(|ck| {
                 let nfr = if ck.not_for_replication { "NOT FOR REPLICATION " } else { "" };
-                (ck, format!("CONSTRAINT {} CHECK {nfr}({})", quote(&ck.name), ck.definition))
+                (ck, format!("CONSTRAINT {} CHECK {nfr}({})", quote(&ck.name), super::expr::rewrite(&ck.definition)))
             })
             .collect()
     };
@@ -641,7 +641,7 @@ pub fn user_type(db: &Database, t: &UserType, o: &Options) -> String {
             }
             for ck in &t.check_constraints {
                 let named = if ck.system_named { String::new() } else { format!("CONSTRAINT {} ", quote(&ck.name)) };
-                lines.push(format!("{named}CHECK ({})", ck.definition));
+                lines.push(format!("{named}CHECK ({})", super::expr::rewrite(&ck.definition)));
             }
             let mut s = format!("CREATE TYPE {name} AS TABLE\n(\n{}\n)", lines.join(",\n"));
             if t.memory_optimized {

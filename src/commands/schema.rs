@@ -252,8 +252,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         Side::Source(s) => load(s, args, &options)?,
         Side::Empty => (Database { name: String::new(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }, None),
     };
+    // SSDT folders change how the comparison is made, not how scripts and files are written.
+    let compare_options = sources::ssdt_options(options.clone(), &[folder1.as_ref(), folder2.as_ref()]);
     console::verbose(&format!("Comparing database {} with database {}...", identifier(&source1, &db1), side_identifier(&side2, &db2)));
-    let mut comparison = schema::compare(&db1, &db2, &options, &mappings);
+    let mut comparison = schema::compare(&db1, &db2, &compare_options, &mappings);
     if let Some(p) = &project {
         for d in &mut comparison.differences {
             if p.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label())) {
