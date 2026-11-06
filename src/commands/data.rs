@@ -413,7 +413,8 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         settings.kinds = rules.kinds;
         settings.max_transaction_bytes = (max_mb > 0).then_some(max_mb * 1_048_576);
         settings.source_connection = Some(spec1.clone());
-        let s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        let mut s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        common::add_backup(args, project.as_ref().map(|p| &p.backup), staged2.is_none().then_some(&spec2), &mut s)?;
         common::write_script(args, &s)?;
         common::report_warnings(args, &s);
         common::check_warnings(args, &s)?;
@@ -433,7 +434,6 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
                 console::log("Nothing to deploy.");
             }
         } else {
-            common::make_backup(args, &spec2)?;
             let ran = deploy::execute(&spec2, script, |i, n| {
                 if verbose {
                     eprintln!("Running batch {} of {n}", i + 1);

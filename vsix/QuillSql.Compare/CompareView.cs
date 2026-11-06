@@ -603,14 +603,14 @@ namespace QuillSql.Compare
                 }).ToList();
                 var options = _session.Project.Strings("options");
                 wizard = new DeployWizard(_host, describe(source), live ? describe(target) : null, Ui.Plural(changes.Count, "object", "objects") + " selected for deployment", changes, dependencies, options.Contains("IncludeDependencies"),
-                    async (all, extra) =>
+                    async (all, extra, backup) =>
                     {
                         var project = _session.Project.Clone();
                         var opts = project.Strings("options").Where(o => o != "IncludeDependencies").Cast<object>().ToList();
                         if (all) opts.Add("IncludeDependencies");
                         project["options"] = opts;
                         var ids = selected.Concat(all ? new List<object>() : extra.Select(e => (object)e)).ToList();
-                        return await Ui.Try(_host.Owner, () => _engine.RequestObject("schema_script", new JsonObject { ["session"] = session, ["selected"] = ids, ["project"] = project }));
+                        return await Ui.Try(_host.Owner, () => _engine.RequestObject("schema_script", new JsonObject { ["session"] = session, ["selected"] = ids, ["project"] = project, ["backup"] = backup }));
                     });
             }
             else
@@ -632,18 +632,27 @@ namespace QuillSql.Compare
                     }
                 }
                 wizard = new DeployWizard(_host, describe(source), live ? describe(target) : null, results.SelectedRows.ToString("N0") + " rows selected for deployment", changes, null, false,
-                    async (all, extra) => await Ui.Try(_host.Owner, () => _engine.RequestObject("data_script", new JsonObject
+                    async (all, extra, backup) => await Ui.Try(_host.Owner, () => _engine.RequestObject("data_script", new JsonObject
                     {
                         ["session"] = session,
                         ["tables"] = results.SelectedTables,
                         ["kinds"] = new List<object> { false, true, true, true },
                         ["selections"] = results.Selections(),
+                        ["backup"] = backup,
                     })));
             }
             if (folder) wizard.DeployLabel = "Update the scripts folder";
-            else if (live) wizard.BackupDefaults = async differential => await Ui.Try(_host.Owner, () => _engine.RequestObject("backup_defaults", new JsonObject { ["session"] = session, ["differential"] = differential }));
+            else if (live) wizard.BackupDefaults = async () => await Ui.Try(_host.Owner, () => _engine.RequestObject("backup_defaults", new JsonObject { ["session"] = session }));
+            wizard.BackupSettings = _session.Project.Obj("backup");
             var outcome = wizard.Run();
             if (outcome.Choice == DeployWizard.Choice.None) return;
+            // The backup settings belong to the project, as in SQL Compare.
+            if (outcome.Backup != null && Json.Write(outcome.Backup) != Json.Write(_session.Project.Obj("backup") ?? new JsonObject { ["enabled"] = false }))
+            {
+                _session.Project["backup"] = outcome.Backup;
+                _dirty = true;
+                UpdateTitle();
+            }
             var sql = outcome.Script.Str("sql") ?? "";
             if (outcome.Choice == DeployWizard.Choice.OpenScript)
             {
@@ -664,11 +673,10 @@ namespace QuillSql.Compare
             }
             SetBusy(true, "Deploying…");
             var request = new JsonObject { ["session"] = session };
-            if (outcome.Backup != null) request["backup"] = outcome.Backup;
             var done = await Ui.Try(_host.Owner, () => _engine.RequestObject("deploy", request, Progress));
             SetBusy(false, done == null ? (folder ? "The scripts folder was not updated." : "The deployment failed and was rolled back.")
                 : done.ContainsKey("written") ? "Updated the scripts folder: " + Ui.Plural(done.List("written").Count, "file written", "files written") + ", " + done.List("deleted").Count + " deleted."
-                : "Deployed (" + done.Long("batches") + " batches)" + (done.Str("backup") != null ? "; backup in " + done.Str("backup") : "") + ".");
+                : "Deployed (" + done.Long("batches") + " batches).");
             if (done == null) return;
             if (outcome.Recompare) await Compare();
             Ui.Message(_host.Owner, "QuillSQL Compare", "Deployment was successful.", Ui.Tone.Info, "OK");
