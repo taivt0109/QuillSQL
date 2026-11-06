@@ -1,7 +1,11 @@
 //! T-SQL formatter engine.
 
 pub mod analysis;
+pub mod args;
+pub mod catalog;
+pub mod commands;
 pub mod complete;
+pub mod db;
 pub mod info;
 pub mod keywords;
 pub mod layout;

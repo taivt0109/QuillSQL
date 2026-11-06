@@ -213,6 +213,11 @@ fn run_stdin(opts: &Options) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
+    // `quill schema ...` and `quill data ...` take SQL Compare style switches, not clap's.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("schema") {
+        return ExitCode::from(quillsql::commands::schema::run(&argv[2..]));
+    }
     let cli = Cli::parse();
     let opts = match cli.options() {
         Ok(o) => o,
