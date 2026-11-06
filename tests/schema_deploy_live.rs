@@ -245,6 +245,24 @@ fn recovered_tables_and_rebuild_names() {
 }
 
 #[test]
+fn change_tracking_follows_the_primary_key() {
+    let Some(server) = server() else { return };
+    let (a, b) = ("QD_schemadeploy_Ct1", "QD_schemadeploy_Ct2");
+    let table = |key: &str| {
+        format!(
+            "ALTER DATABASE CURRENT SET CHANGE_TRACKING = ON\nGO\nCREATE TABLE dbo.T (a int NOT NULL, b int NOT NULL, CONSTRAINT PK_T PRIMARY KEY ({key}))\nGO\nALTER TABLE dbo.T ENABLE CHANGE_TRACKING"
+        )
+    };
+    server.create(a, &table("a, b"));
+    server.create(b, &table("a"));
+    let s = converge(&server, a, b, &Options::default_set());
+    assert!(s.sql.contains("DISABLE CHANGE_TRACKING") && s.warnings.iter().any(|w| w.message.contains("needs to be disabled and re-enabled")), "{}", s.sql);
+    assert_eq!(server.scalar(b, "SELECT COUNT(*) FROM sys.change_tracking_tables WHERE object_id = OBJECT_ID('dbo.T')"), 1);
+    server.drop(a);
+    server.drop(b);
+}
+
+#[test]
 fn modules_get_encrypted() {
     let Some(server) = server() else { return };
     let (a, b) = ("QD_schemadeploy_Enc1", "QD_schemadeploy_Enc2");
