@@ -94,3 +94,17 @@ GO
 GRANT EXECUTE ON TYPE::dbo.Amount TO QuillApp;
 GO
 GRANT SEND ON SERVICE::[//Quill/Service] TO QuillApp;
+GO
+EXEC sp_addextendedproperty N'MS_Description', N'CLR helpers', 'ASSEMBLY', N'QuillClr';
+EXEC sp_addextendedproperty N'MS_Description', N'Orders', 'SCHEMA', N'dbo', 'XML SCHEMA COLLECTION', N'OrderSchema';
+EXEC sp_addextendedproperty N'MS_Description', N'Zero', 'SCHEMA', N'dbo', 'DEFAULT', N'Zero';
+EXEC sp_addextendedproperty N'MS_Description', N'Positive', 'SCHEMA', N'dbo', 'RULE', N'Positive';
+EXEC sp_addextendedproperty N'MS_Description', N'Audit', 'TRIGGER', N'trgQuillDdl';
+EXEC sp_addextendedproperty N'MS_Description', N'Years', 'PARTITION FUNCTION', N'pfYears';
+EXEC sp_addextendedproperty N'MS_Description', N'Years', 'PARTITION SCHEME', N'psYears';
+EXEC sp_addextendedproperty N'MS_Description', N'Order', 'MESSAGE TYPE', N'//Quill/Order';
+EXEC sp_addextendedproperty N'MS_Description', N'Contract', 'CONTRACT', N'//Quill/Contract';
+EXEC sp_addextendedproperty N'MS_Description', N'Queue', 'SCHEMA', N'dbo', 'QUEUE', N'OrderQueue';
+EXEC sp_addextendedproperty N'MS_Description', N'Service', 'SERVICE', N'//Quill/Service';
+EXEC sp_addextendedproperty N'MS_Description', N'Route', 'ROUTE', N'QuillRoute';
+EXEC sp_addextendedproperty N'MS_Description', N'Binding', 'REMOTE SERVICE BINDING', N'QuillBinding';

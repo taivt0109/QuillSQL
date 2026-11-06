@@ -44,6 +44,7 @@ impl Comparer<'_> {
     /// Permissions on a securable that has no schema (`class` CERTIFICATE, SERVICE…).
     fn grants(&self, d: &mut Diffs, class: &str, a: &str, b: &str) {
         self.permissions(d, class, "", Some(a), "", Some(b));
+        self.xprops(d, class, None, a, b);
     }
 
     fn names(&self, a: &[String], b: &[String]) -> bool {
@@ -59,8 +60,8 @@ impl Comparer<'_> {
         let (db1, db2, o) = (self.db1, self.db2, self.opts);
         self.objects(ObjectType::Assembly, &db1.assemblies, &db2.assemblies, |a| (&NO_SCHEMA, &a.name), Comparer::assembly);
         self.objects(ObjectType::XmlSchemaCollection, &db1.xml_schema_collections, &db2.xml_schema_collections, |x| (&x.schema, &x.name), Comparer::xml_schema_collection);
-        self.objects(ObjectType::Default, &db1.defaults, &db2.defaults, |x| (&x.schema, &x.name), Comparer::bindable);
-        self.objects(ObjectType::Rule, &db1.rules, &db2.rules, |x| (&x.schema, &x.name), Comparer::bindable);
+        self.objects(ObjectType::Default, &db1.defaults, &db2.defaults, |x| (&x.schema, &x.name), |c, a, b| c.bindable(a, b, "DEFAULT"));
+        self.objects(ObjectType::Rule, &db1.rules, &db2.rules, |x| (&x.schema, &x.name), |c, a, b| c.bindable(a, b, "RULE"));
         if !o.has(Opt::IgnoreTriggers) {
             self.objects(ObjectType::DdlTrigger, &db1.ddl_triggers, &db2.ddl_triggers, |t| (&NO_SCHEMA, &t.name), Comparer::ddl_trigger);
         }
@@ -121,14 +122,16 @@ impl Comparer<'_> {
             d.add("Schema", Some(a.definition.clone()), Some(b.definition.clone()));
         }
         self.permissions(&mut d, "XML SCHEMA COLLECTION", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
+        self.xprops(&mut d, "XML SCHEMA COLLECTION", Some(&a.schema), &a.name, &b.name);
         d.out
     }
 
-    fn bindable(&self, a: &BindableObject, b: &BindableObject) -> Vec<PropDiff> {
+    fn bindable(&self, a: &BindableObject, b: &BindableObject, class: &str) -> Vec<PropDiff> {
         let mut d = Diffs::default();
         // A statement terminator is not part of the definition.
         let text = |x: &str| x.trim_end().trim_end_matches(';').to_string();
         self.module_text(&mut d, &text(&a.definition), &text(&b.definition), false, false);
+        self.xprops(&mut d, class, Some(&a.schema), &a.name, &b.name);
         d.out
     }
 
@@ -149,6 +152,7 @@ impl Comparer<'_> {
                 self.settings(&mut d, &a.settings, &b.settings);
             }
         }
+        self.xprops(&mut d, "TRIGGER", None, &a.name, &b.name);
         d.out
     }
 
@@ -159,6 +163,7 @@ impl Comparer<'_> {
         if a.boundaries != b.boundaries {
             d.add("Boundary values", Some(a.boundaries.join(", ")), Some(b.boundaries.join(", ")));
         }
+        self.xprops(&mut d, "PARTITION FUNCTION", None, &a.name, &b.name);
         d.out
     }
 
@@ -179,6 +184,7 @@ impl Comparer<'_> {
         if ka != kb || (consider_next && pa != pb) {
             d.add("Filegroups", Some(a.filegroups.join(", ")), Some(b.filegroups.join(", ")));
         }
+        self.xprops(&mut d, "PARTITION SCHEME", None, &a.name, &b.name);
         d.out
     }
 
@@ -285,6 +291,7 @@ impl Comparer<'_> {
             }
         }
         self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
+        self.xprops(&mut d, "QUEUE", Some(&a.schema), &a.name, &b.name);
         d.out
     }
 

@@ -2088,20 +2088,6 @@ impl<'a> Planner<'a> {
         for d in selected {
             let class = match d.object_type {
                 ObjectType::Role | ObjectType::User => continue,
-                t if !matches!(
-                    t,
-                    ObjectType::Table
-                        | ObjectType::View
-                        | ObjectType::Function
-                        | ObjectType::StoredProcedure
-                        | ObjectType::Sequence
-                        | ObjectType::Synonym
-                        | ObjectType::UserDefinedType
-                        | ObjectType::Schema
-                ) =>
-                {
-                    continue
-                }
                 ObjectType::Table => "TABLE",
                 ObjectType::View => "VIEW",
                 ObjectType::Function => "FUNCTION",
@@ -2110,9 +2096,13 @@ impl<'a> Planner<'a> {
                 ObjectType::Synonym => "SYNONYM",
                 ObjectType::UserDefinedType => "TYPE",
                 ObjectType::Schema => "SCHEMA",
-                _ => continue,
+                t => match objects::xprop_class(t) {
+                    Some(class) => class,
+                    None => continue,
+                },
             };
             let tn = self.target_name(d);
+            let scoped = d.object_type.schema_scoped();
             let of = |db: &'a Database, n: &ObjectName| -> Vec<&'a ExtendedProperty> {
                 db.extended_properties
                     .iter()
@@ -2120,6 +2110,8 @@ impl<'a> Planner<'a> {
                         p.class == class
                             && if class == "SCHEMA" {
                                 p.schema.as_deref() == Some(n.name.as_str())
+                            } else if !scoped {
+                                p.schema.is_none() && p.object.as_deref() == Some(n.name.as_str())
                             } else {
                                 p.schema.as_deref() == Some(n.schema.as_str()) && p.object.as_deref() == Some(n.name.as_str())
                             }
@@ -2128,7 +2120,11 @@ impl<'a> Planner<'a> {
             };
             let src_props = if d.kind == DiffKind::OnlyIn2 { Vec::new() } else { of(self.src, &d.name) };
             // A rebuilt or re-created object lost its properties with it.
-            let gone = d.kind == DiffKind::OnlyIn2 || self.recreate.contains(&d.name) || self.dropped.contains(&tn);
+            let gone = d.kind == DiffKind::OnlyIn2
+                || self.recreate.contains(&d.name)
+                || self.recreate.contains(&d.key())
+                || self.dropped.contains(&tn)
+                || self.dropped.contains(&d.target_key());
             let tgt_props = if d.kind == DiffKind::OnlyIn1 || gone { Vec::new() } else { of(self.tgt, &tn) };
             let levels = |p: &ExtendedProperty| ddl::xprop_levels(p, |s| s.to_string());
             for sp in &src_props {
