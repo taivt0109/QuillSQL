@@ -1,9 +1,15 @@
 //! Deployment-script parity against a real SQL Server (see compare_live.rs for the setup).
-//! Databases are named QD_schemadeploy_*.
+//! Databases are named QD_schemadeploy_<name>_<process id>: the same tests may run from several
+//! worktrees against one server at once, and a shared name lets one run drop the other's database.
 
 use quillsql::catalog::{self, IndexKind, XmlIndexKind};
 use quillsql::db::{self, Auth, ConnectionSpec};
 use quillsql::schema::{self, DiffKind, Mappings, Opt, Options, deploy};
+
+/// A database name of this test run.
+fn unique(name: &str) -> String {
+    format!("QD_schemadeploy_{name}_{}", std::process::id())
+}
 
 struct Server {
     host: String,
@@ -115,7 +121,7 @@ CREATE XML INDEX SXI_Sel_Name ON dbo.Sel (Body) USING XML INDEX SXI_Sel FOR (pat
 #[test]
 fn xml_and_spatial_indexes() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Ix1", "QD_schemadeploy_Ix2");
+    let (a, b) = (&unique("Ix1"), &unique("Ix2"));
     server.create(a, INDEXES);
     let model = catalog::read_database(&server.spec(a)).unwrap();
     let doc = model.table("dbo", "Doc").unwrap();
@@ -160,7 +166,7 @@ fn xml_and_spatial_indexes() {
 #[test]
 fn existence_checks_make_scripts_rerunnable() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Ex1", "QD_schemadeploy_Ex2");
+    let (a, b) = (&unique("Ex1"), &unique("Ex2"));
     let changed = format!("{SHOP}\nGO\n{SHOP_CHANGES}");
     for opts in [
         Options::default_set().with(Opt::ObjectExistenceChecks),
@@ -184,7 +190,7 @@ fn existence_checks_make_scripts_rerunnable() {
 #[test]
 fn ddl_triggers_are_disabled_for_the_deployment() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Ddl1", "QD_schemadeploy_Ddl2");
+    let (a, b) = (&unique("Ddl1"), &unique("Ddl2"));
     let block = "CREATE TRIGGER QD_block ON DATABASE FOR CREATE_TABLE AS BEGIN RAISERROR('no new tables', 16, 1); ROLLBACK; END";
     server.create(a, &format!("CREATE TABLE dbo.T (a int)\nGO\n{block}"));
     server.create(b, block);
@@ -200,7 +206,7 @@ fn ddl_triggers_are_disabled_for_the_deployment() {
 #[test]
 fn bound_defaults_and_rules() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Bind1", "QD_schemadeploy_Bind2");
+    let (a, b) = (&unique("Bind1"), &unique("Bind2"));
     let base = "CREATE DEFAULT dbo.Zero AS 0\nGO\nCREATE RULE dbo.Positive AS @v >= 0\nGO\nCREATE TABLE dbo.T (a int NULL, b int NULL)\nGO\n";
     let bound = format!("{base}EXEC sp_bindefault N'dbo.Zero', N'dbo.T.a'\nGO\nEXEC sp_bindrule N'dbo.Positive', N'dbo.T.a'\nGO\nEXEC sp_bindrule N'dbo.Positive', N'dbo.T.b'");
     server.create(a, &bound);
@@ -238,7 +244,7 @@ fn bound_defaults_and_rules() {
 #[test]
 fn recovered_tables_and_rebuild_names() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Rec1", "QD_schemadeploy_Rec2");
+    let (a, b) = (&unique("Rec1"), &unique("Rec2"));
     let leftover = "CREATE TABLE dbo.RG_Recovery_3_T (a int)\nGO\n";
     server.create(a, &format!("{leftover}CREATE TABLE dbo.T (a int IDENTITY(10, 1) NOT NULL, b int NULL)"));
     server.create(b, &format!("{leftover}CREATE TABLE dbo.T (a int IDENTITY(1, 1) NOT NULL, b int NULL)\nGO\nINSERT INTO dbo.T (b) VALUES (1), (2)"));
@@ -253,7 +259,7 @@ fn recovered_tables_and_rebuild_names() {
 #[test]
 fn change_tracking_follows_the_primary_key() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Ct1", "QD_schemadeploy_Ct2");
+    let (a, b) = (&unique("Ct1"), &unique("Ct2"));
     let table = |key: &str| {
         format!(
             "ALTER DATABASE CURRENT SET CHANGE_TRACKING = ON\nGO\nCREATE TABLE dbo.T (a int NOT NULL, b int NOT NULL, CONSTRAINT PK_T PRIMARY KEY ({key}))\nGO\nALTER TABLE dbo.T ENABLE CHANGE_TRACKING"
@@ -271,7 +277,7 @@ fn change_tracking_follows_the_primary_key() {
 #[test]
 fn modules_get_encrypted() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Enc1", "QD_schemadeploy_Enc2");
+    let (a, b) = (&unique("Enc1"), &unique("Enc2"));
     server.create(a, "CREATE VIEW dbo.V AS SELECT 1 AS c\nGO\nCREATE PROCEDURE dbo.P @x int AS SELECT @x");
     server.create(b, "SELECT 1");
     let (s, _) = script(&server, a, b, &Options::default_set().with(Opt::AddWithEncryption));
@@ -291,7 +297,7 @@ fn with_memory_optimized_filegroup(db: &str, rest: &str) -> String {
 #[test]
 fn memory_optimized_tables_are_rebuilt_through_a_copy() {
     let Some(server) = server() else { return };
-    let (a, b) = ("QD_schemadeploy_Mo1", "QD_schemadeploy_Mo2");
+    let (a, b) = (&unique("Mo1"), &unique("Mo2"));
     let disk = "CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, V nvarchar(20) NOT NULL CONSTRAINT DF_T_V DEFAULT (N'x'))\nGO\nINSERT INTO dbo.T (Id, V) VALUES (1, N'a'), (2, N'b'), (3, N'c')";
     let mo = |width: u32| {
         format!(
@@ -328,7 +334,7 @@ const SECRET_PROC: &str = "CREATE PROCEDURE dbo.Secret @n int\nWITH ENCRYPTION\n
 #[test]
 fn encrypted_modules_without_the_admin_connection() {
     let Some(server) = server() else { return };
-    let db = "QD_schemadeploy_Enc3";
+    let db = &unique("Enc3");
     server.create(db, SECRET_PROC);
     // The dedicated administrator connection isn't reachable here: the reader carries on and the
     // procedure stays encrypted.
@@ -346,7 +352,7 @@ fn encrypted_modules_without_the_admin_connection() {
 fn decrypts_images_read_over_the_admin_connection() {
     let Some(server) = server() else { return };
     let Ok(container) = std::env::var("QUILL_TEST_DOCKER_CONTAINER") else { return };
-    let db = "QD_schemadeploy_Enc4";
+    let db = &unique("Enc4");
     server.create(db, SECRET_PROC);
     let password = std::env::var("QUILL_TEST_PASSWORD").unwrap_or_default();
     let sql = "SET NOCOUNT ON; SELECT CONVERT(varchar(36), r.family_guid) + ' ' + CAST(v.objid AS varchar(12)) + ' ' + CAST(v.subobjid AS varchar(6)) + ' ' + CONVERT(varchar(max), v.imageval, 2) \
