@@ -332,7 +332,7 @@ namespace QuillSql.Compare
             {
                 var s = _session.Project.Obj(key);
                 if (s == null) return "?";
-                return s.Str("type") == "snapshot" ? Path.GetFileName(s.Str("path")) : (s.Str("server") + " / " + s.Str("database"));
+                return s.Str("type") == "snapshot" ? Path.GetFileName(s.Str("path")) : s.Str("type") == "scripts" ? s.Str("path") + (string.IsNullOrEmpty(s.Str("revision")) ? "" : " @ " + s.Str("revision")) : s.Str("type") == "empty" ? "Empty database" : (s.Str("server") + " / " + s.Str("database"));
             }
             var kind = _session.IsData ? "Data compare" : "Schema compare";
             var file = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : "New project";
@@ -385,10 +385,10 @@ namespace QuillSql.Compare
             _editor?.Collect();
             var source = _session.Project.Obj("source");
             var target = _session.Project.Obj("target");
-            bool incomplete(JsonObject s) => s == null || (s.Str("type") == "empty" ? false : s.Str("type") == "snapshot" ? string.IsNullOrEmpty(s.Str("path")) : string.IsNullOrEmpty(s.Str("server")) || string.IsNullOrEmpty(s.Str("database")));
+            bool incomplete(JsonObject s) => s == null || (s.Str("type") == "empty" ? false : s.Str("type") == "snapshot" || s.Str("type") == "scripts" ? string.IsNullOrEmpty(s.Str("path")) : string.IsNullOrEmpty(s.Str("server")) || string.IsNullOrEmpty(s.Str("database")));
             if (incomplete(source) || incomplete(target))
             {
-                Ui.Error(_host.Owner, "Choose a server and database (or a snapshot) for both the source and the target.");
+                Ui.Error(_host.Owner, "Choose a server and database (or a snapshot or scripts folder) for both the source and the target.");
                 if (!(_content.Content is ProjectEditor)) ShowEditor();
                 return;
             }
@@ -544,8 +544,12 @@ namespace QuillSql.Compare
             if (_session == null || (_schemaResults == null && _dataResults == null)) return;
             var target = _session.Project.Obj("target");
             var source = _session.Project.Obj("source");
-            string describe(JsonObject s) => s?.Str("type") == "snapshot" ? Path.GetFileName(s.Str("path")) : s?.Str("type") == "empty" ? "Empty database" : s?.Str("server") + " / " + s?.Str("database");
-            var live = target != null && target.Str("type") != "snapshot" && target.Str("type") != "empty";
+            string describe(JsonObject s) => s?.Str("type") == "snapshot" ? Path.GetFileName(s.Str("path"))
+                : s?.Str("type") == "scripts" ? s.Str("path") + (string.IsNullOrEmpty(s.Str("revision")) ? "" : " @ " + s.Str("revision"))
+                : s?.Str("type") == "empty" ? "Empty database" : s?.Str("server") + " / " + s?.Str("database");
+            // A scripts folder is updated file by file; a revision of one can only be scripted.
+            var folder = target?.Str("type") == "scripts";
+            var live = target != null && target.Str("type") != "snapshot" && target.Str("type") != "empty" && !(folder && !string.IsNullOrEmpty(target.Str("revision")));
             DeployWizard wizard;
             long session;
             if (_schemaResults != null)
@@ -609,6 +613,7 @@ namespace QuillSql.Compare
                         ["selections"] = results.Selections(),
                     })));
             }
+            if (folder) wizard.DeployLabel = "Update the scripts folder";
             var outcome = wizard.Run();
             if (outcome.Choice == DeployWizard.Choice.None) return;
             var sql = outcome.Script.Str("sql") ?? "";
@@ -631,7 +636,9 @@ namespace QuillSql.Compare
             }
             SetBusy(true, "Deploying…");
             var done = await Ui.Try(_host.Owner, () => _engine.RequestObject("deploy", new JsonObject { ["session"] = session }, Progress));
-            SetBusy(false, done == null ? "The deployment failed and was rolled back." : "Deployed (" + done.Long("batches") + " batches).");
+            SetBusy(false, done == null ? (folder ? "The scripts folder was not updated." : "The deployment failed and was rolled back.")
+                : done.ContainsKey("written") ? "Updated the scripts folder: " + Ui.Plural(done.List("written").Count, "file written", "files written") + ", " + done.List("deleted").Count + " deleted."
+                : "Deployed (" + done.Long("batches") + " batches).");
             if (done == null) return;
             if (outcome.Recompare) await Compare();
             Ui.Message(_host.Owner, "QuillSQL Compare", "Deployment was successful.", Ui.Tone.Info, "OK");

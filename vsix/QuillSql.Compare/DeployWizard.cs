@@ -70,6 +70,9 @@ namespace QuillSql.Compare
             _makeScript = makeScript;
         }
 
+        /// <summary>The first deployment method: deploying, or updating a scripts folder.</summary>
+        public string DeployLabel { get; set; } = "Deploy using QuillSQL Compare";
+
         public Outcome Run()
         {
             var outcome = new Outcome();
@@ -80,7 +83,7 @@ namespace QuillSql.Compare
             var page = 0;
 
             // Page 1: deployment method.
-            var deploy = new RadioButton { Content = "Deploy using QuillSQL Compare", IsChecked = _target != null, IsEnabled = _target != null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
+            var deploy = new RadioButton { Content = DeployLabel, IsChecked = _target != null, IsEnabled = _target != null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
             var recompare = Ui.Check("Recompare after deployment", true);
             var backup = Ui.Check("Back up target before deployment", false);
             backup.IsEnabled = false;
@@ -106,7 +109,7 @@ namespace QuillSql.Compare
             var methodPage = Ui.Column(deploy, deployOptions, script, scriptNote);
             if (_target == null)
             {
-                var why = Ui.Text("The target is a snapshot or an empty database, so the changes can only be scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+                var why = Ui.Text("The target is a snapshot, an empty database or a source control revision, so the changes can only be scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
                 why.Margin = new Thickness(0, 14, 0, 0);
                 methodPage.Children.Add(why);
             }
@@ -199,9 +202,9 @@ namespace QuillSql.Compare
                 else
                 {
                     title.Text = "Review deployment script";
-                    lead.Text = script.IsChecked == true ? "Review the summary, the warnings and the script, then open the script." : "Review the summary, the warnings and the script. It runs in one transaction and is rolled back if any statement fails.";
+                    lead.Text = script.IsChecked == true ? "Review the summary, the warnings and the script, then open the script." : DeployLabel == "Update the scripts folder" ? "Review the summary, the warnings and the script, then update the folder: the files of the deployed objects are rewritten." : "Review the summary, the warnings and the script. It runs in one transaction and is rolled back if any statement fails.";
                     content.Content = reviewBody;
-                    next.Content = script.IsChecked == true ? "Open script in editor" : "Deploy now";
+                    next.Content = script.IsChecked == true ? "Open script in editor" : DeployLabel == "Update the scripts folder" ? "Update scripts" : "Deploy now";
                     var high = made?.List("warnings").OfType<JsonObject>().Count(w => w.Str("severity") == "High") ?? 0;
                     next.IsEnabled = made != null && (made.Str("sql") ?? "").Length > 0;
                     if (high > 0) lead.Text += " There " + (high == 1 ? "is 1 high-severity warning" : "are " + high + " high-severity warnings") + ": data may be lost.";

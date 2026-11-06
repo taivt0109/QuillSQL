@@ -516,11 +516,10 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
-    for name in [
-        "backup1", "backup2", "scripts1", "scripts2", "sca1", "sca2", "sourcecontrol1", "sourcecontrol2", "revision1", "revision2", "makescripts", "makebackup",
-    ] {
-        // `quill data /makescripts` writes the data scripts.
-        if args.has(name) && !(command == "data" && name == "makescripts") {
+    // Scripts folders and source control are schema compare only so far.
+    const FOLDERS: [&str; 6] = ["scripts1", "scripts2", "sourcecontrol1", "sourcecontrol2", "revision1", "revision2"];
+    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"].into_iter().chain(FOLDERS) {
+        if args.has(name) && (command == "data" || !FOLDERS.contains(&name)) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }
     }
@@ -635,6 +634,8 @@ pub fn help_html(cli: &Cli) -> String {
 pub enum Source {
     Live(ConnectionSpec),
     Snapshot(std::path::PathBuf),
+    /// A scripts folder, at a source-control revision when one is given.
+    Scripts { path: std::path::PathBuf, revision: Option<String> },
 }
 
 /// The project named by `/project`, if any.
@@ -693,11 +694,18 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
             format!("The /password{n} switch cannot be used without the /username{n} or /project switches."),
         ));
     }
+    if let Some(s) = super::sources::source(args, n)? {
+        return Ok(Some(s));
+    }
     let given = ["snapshot", "connection", "database", "server"].iter().any(|k| args.has(&key(k)));
     if !given && let Some(p) = project(args)? {
         let mut side = if n == 1 { p.source } else { p.target };
         if side.is_snapshot() {
             return Ok(Some(Source::Snapshot(side.path.into())));
+        }
+        if side.is_scripts() {
+            let revision = (!side.revision.is_empty()).then(|| side.revision.clone());
+            return Ok(Some(Source::Scripts { path: side.path.into(), revision }));
         }
         if side.server.is_empty() && side.database.is_empty() {
             return Ok(None);
@@ -835,16 +843,19 @@ pub fn check_warnings(args: &Args, script: &deploy::DeploymentScript) -> Result<
     Ok(())
 }
 
-/// Reads one side of the comparison.
-pub fn load(source: &Source, _args: &Args) -> Result<Database, ArgError> {
+/// Reads one side of the comparison; `decrypt` reads encrypted modules over the admin connection.
+pub fn load(source: &Source, _args: &Args, decrypt: bool) -> Result<Database, ArgError> {
     match source {
         Source::Live(spec) => {
             console::verbose(&format!("Connecting to database '{}' on '{}'...", spec.database, spec.server));
-            catalog::read_database(spec).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
+            catalog::read_database_with(spec, decrypt).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
         }
         Source::Snapshot(path) => {
             console::verbose(&format!("Loading database snapshot from file: {}...", path.display()));
             load_snapshot(path)
+        }
+        Source::Scripts { path, revision } => {
+            super::sources::load(path, revision.as_deref(), _args, &crate::schema::Options::default_set()).map(|(db, _)| db)
         }
     }
 }
@@ -858,6 +869,9 @@ pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {
     let bytes = std::fs::read(path).map_err(|e| {
         ArgError::new(exit::IO_ERROR, format!("The specified snapshot file '{}' does not exist.  Reported error: {e}", path.display()))
     })?;
+    if crate::sources::snp::is_snp(&bytes) {
+        return crate::sources::snp::read(&bytes).map_err(|e| ArgError::new(exit::DATA_ERROR, format!("{}: {e}", path.display())));
+    }
     let db: Database = serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| {
         ArgError::new(
             exit::DATA_ERROR,

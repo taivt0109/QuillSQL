@@ -19,6 +19,10 @@
 //!   `data_report` {session, path, kinds} (HTML);
 //!   `data_session_save` {session, path} / `data_session_load` {path} → session.
 //! - `snapshot` {source, path} writes a schema snapshot.
+//!
+//! A side is a live database, a snapshot (QuillSQL JSON or SQL Compare `.snp`), or a scripts
+//! folder (`type: "scripts"`, `path`, optional source-control `revision`). Deploying to a
+//! scripts folder rewrites its files; `make_scripts` {project | source, path} writes one.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -41,6 +45,8 @@ struct SchemaSession {
     comparison: Comparison,
     project: Project,
     script: Option<DeploymentScript>,
+    /// The differences chosen for the last script, for deploying to a scripts folder.
+    selected: Vec<usize>,
 }
 
 struct DataSession {
@@ -102,13 +108,40 @@ fn session(request: &Value) -> Result<u64, String> {
     request.get("session").and_then(Value::as_u64).ok_or_else(|| "'session' is missing".to_string())
 }
 
-fn load_side(side: &SourceSpec, n: u8, progress: &dyn Fn(&str)) -> Result<Database, String> {
+/// `decrypt` follows DecryptPost2kEncryptedObjects; data compare never needs module text.
+fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<Database, String> {
+    load_side_with_warnings(side, n, decrypt, progress).map(|(db, _)| db)
+}
+
+/// A side and, for a scripts folder, what its parser skipped.
+fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<(Database, Vec<String>), String> {
+    if side.is_scripts() {
+        let checkout = match side.revision.as_str() {
+            "" => None,
+            r => {
+                progress(&format!("Getting revision {r} of '{}'", side.path));
+                Some(crate::sources::scm::checkout(&side.path, r)?)
+            }
+        };
+        progress(&format!("Reading database scripts from '{}'", side.path));
+        let dir = checkout.as_ref().map(|c| c.dir.clone()).unwrap_or_else(|| std::path::PathBuf::from(&side.path));
+        let mut f = crate::sources::folder::read(&dir)?;
+        if checkout.is_some() {
+            f.database.name = std::path::Path::new(&side.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(f.database.name);
+        }
+        let warnings = f.warnings.iter().cloned().chain(f.messages.iter().map(|m| m.text())).collect();
+        return Ok((f.database, warnings));
+    }
     if side.is_snapshot() {
         let bytes = std::fs::read(&side.path).map_err(|e| format!("{}: {e}", side.path))?;
-        return serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| format!("{} is not a snapshot: {e}", side.path));
+        if crate::sources::snp::is_snp(&bytes) {
+            return Ok((crate::sources::snp::read(&bytes).map_err(|e| format!("{}: {e}", side.path))?, Vec::new()));
+        }
+        let db = serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| format!("{} is not a snapshot: {e}", side.path))?;
+        return Ok((db, Vec::new()));
     }
     progress(&format!("Reading {}", side.describe()));
-    catalog::read_database(&side.connection(n)?)
+    Ok((catalog::read_database_with(&side.connection(n)?, decrypt)?, Vec::new()))
 }
 
 fn schema_options(p: &Project) -> Result<Options, String> {
@@ -172,26 +205,42 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         "snapshot" => {
             let side: SourceSpec = field(request, "source")?;
             let path: String = field(request, "path")?;
-            let db = load_side(&side, 1, progress)?;
+            let db = load_side(&side, 1, true, progress)?;
             std::fs::write(&path, serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"tables": db.tables.len()}))
+        }
+        // Writes a side as a scripts folder: the project's source with its options, or a source.
+        "make_scripts" => {
+            let path: String = field(request, "path")?;
+            let (side, opts) = match field::<Project>(request, "project") {
+                Ok(p) => (p.source.clone(), schema_options(&p)?),
+                Err(_) => (field::<SourceSpec>(request, "source")?, Options::default_set()),
+            };
+            let db = load_side(&side, 1, opts.has(Opt::DecryptPost2kEncryptedObjects), progress)?;
+            progress(&format!("Writing the scripts folder '{path}'"));
+            let files = crate::sources::folder::write_all(&db, std::path::Path::new(&path), &opts)?;
+            Ok(json!({"files": files}))
         }
         "schema_compare" => {
             let project: Project = field(request, "project")?;
             let opts = schema_options(&project)?;
-            let db1 = load_side(&project.source, 1, progress)?;
+            let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
+            let (db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
             // An empty database (`/empty2`): every object is created; only a script can be made.
             let db2 = if project.target.is_empty_database() {
                 Database { name: "Empty".into(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }
             } else {
-                load_side(&project.target, 2, progress)?
+                let (db2, w2) = load_side_with_warnings(&project.target, 2, decrypt, progress)?;
+                warnings.extend(w2);
+                db2
             };
             progress("Comparing");
             let comparison = compare_schemas(&db1, &db2, &opts, &project);
             state.next += 1;
             let id = state.next;
-            let s = SchemaSession { db1, db2, comparison, project, script: None };
-            let reply = schema_reply(id, &s);
+            let s = SchemaSession { db1, db2, comparison, project, script: None, selected: Vec::new() };
+            let mut reply = schema_reply(id, &s);
+            reply["warnings"] = json!(warnings);
             state.schema.insert(id, s);
             Ok(reply)
         }
@@ -225,8 +274,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         // Tables that look renamed, for the Table mapping tab: {project}.
         "schema_renames" => {
             let project: Project = field(request, "project")?;
-            let db1 = load_side(&project.source, 1, progress)?;
-            let db2 = load_side(&project.target, 2, progress)?;
+            let decrypt = schema_options(&project)?.has(Opt::DecryptPost2kEncryptedObjects);
+            let db1 = load_side(&project.source, 1, decrypt, progress)?;
+            let db2 = load_side(&project.target, 2, decrypt, progress)?;
             Ok(json!(schema::renames::detect(&db1, &db2, &project.schema_mappings)))
         }
         // Objects the selected ones need that differ too: what "Include dependencies" adds.
@@ -283,9 +333,23 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 target_database: s.db2.name.clone(),
                 target_major_version: if s.db2.server.is_azure_sql_database() { 99 } else { s.db2.server.major_version },
             };
-            let script = deploy::generate(&comparison, &s.db1, &s.db2, &opts, &s.project.schema_mappings, &settings)?;
+            let mut script = deploy::generate(&comparison, &s.db1, &s.db2, &opts, &s.project.schema_mappings, &settings)?;
+            if s.project.source.is_scripts() && !opts.has(Opt::IgnorePrePostScripts) {
+                let dir = std::path::Path::new(&s.project.source.path);
+                let (info, _) = crate::sources::folder::FolderInfo::read(dir);
+                let (pre, post) = crate::sources::folder::pre_post_scripts(dir, &info)?;
+                if let Some(pre) = pre {
+                    script.sql = format!("{}\r\nGO\r\n{}", pre.trim_end(), script.sql);
+                    script.batches.splice(0..0, deploy::split_batches(&pre));
+                }
+                if let Some(post) = post {
+                    script.sql = format!("{}\r\nGO\r\n{}\r\nGO\r\n", script.sql.trim_end(), post.trim_end());
+                    script.batches.extend(deploy::split_batches(&post));
+                }
+            }
             let reply = script_json(&script);
             s.script = Some(script);
+            s.selected = selected;
             Ok(reply)
         }
         "data_tables" => {
@@ -295,8 +359,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             if project.source.is_snapshot() || project.target.is_snapshot() {
                 opts = opts.without(DataOpt::IncludeViews).without(DataOpt::UseChecksumComparison);
             }
-            let db1 = load_side(&project.source, 1, progress)?;
-            let db2 = load_side(&project.target, 2, progress)?;
+            let db1 = load_side(&project.source, 1, false, progress)?;
+            let db2 = load_side(&project.target, 2, false, progress)?;
             let (pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
             let tables: Vec<Value> = pairs
                 .iter()
@@ -331,12 +395,15 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         "data_compare" => {
             let project: Project = field(request, "project")?;
+            if project.source.is_scripts() || project.target.is_scripts() {
+                return Err("data compare needs live databases, not scripts folders".into());
+            }
             let opts = data_options(&project)?;
             let (s1, s2) = (project.source.connection(1)?, project.target.connection(2)?);
             progress(&format!("Reading {}", project.source.describe()));
-            let db1 = catalog::read_database(&s1)?;
+            let db1 = catalog::read_database_with(&s1, false)?;
             progress(&format!("Reading {}", project.target.describe()));
-            let db2 = catalog::read_database(&s2)?;
+            let db2 = catalog::read_database_with(&s2, false)?;
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
             let result = crate::data::compare::compare(
@@ -500,6 +567,27 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         "deploy" => {
             let id = session(request)?;
+            // A scripts folder as the target: the selected objects' files are rewritten.
+            if let Some(s) = state.schema.get(&id)
+                && s.project.target.is_scripts()
+            {
+                if s.script.is_none() {
+                    return Err("create the deployment script first".into());
+                }
+                if !s.project.target.revision.is_empty() {
+                    return Err("the target is a source control revision; deploy to the scripts folder itself".into());
+                }
+                let opts = schema_options(&s.project)?;
+                let mut comparison = s.comparison.clone();
+                for (i, d) in comparison.differences.iter_mut().enumerate() {
+                    d.selected = s.selected.contains(&i);
+                }
+                progress(&format!("Writing to the scripts folder '{}'", s.project.target.path));
+                let target = crate::sources::folder::read(std::path::Path::new(&s.project.target.path))?;
+                let changes = crate::sources::folder::sync(&s.db1, &target, &comparison.differences, &opts)?;
+                let list = |v: &[std::path::PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+                return Ok(json!({"written": list(&changes.written), "deleted": list(&changes.deleted)}));
+            }
             let (script, target) = if let Some(s) = state.schema.get(&id) {
                 (s.script.clone(), s.project.target.clone())
             } else if let Some(s) = state.data.get(&id) {
@@ -961,5 +1049,72 @@ mod tests {
         let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
         assert_eq!(back["source"]["path"], path("one.json"));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn compares_and_deploys_scripts_folders() {
+        let mut state = State::default();
+        let none = |_: &str| {};
+        let base = std::env::temp_dir().join(format!("quill-serve-scripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let write = |dir: &str, file: &str, text: &str| {
+            let p = base.join(dir).join(file);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        write("a", "Tables/dbo.T.sql", "CREATE TABLE [dbo].[T]\r\n(\r\n[a] [int] NULL,\r\n[b] [int] NULL\r\n)\r\nGO\r\n");
+        write("a", "Tables/dbo.U.sql", "CREATE TABLE [dbo].[U]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\n");
+        write("b", "Tables/dbo.T.sql", "CREATE TABLE [dbo].[T]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\nPRINT 1\r\nGO\r\n");
+        let side = |d: &str| SourceSpec { kind: "scripts".into(), path: base.join(d).to_string_lossy().to_string(), ..Default::default() };
+        let mut project = Project::new(crate::project::ProjectKind::Schema);
+        project.source = side("a");
+        project.target = side("b");
+        let p = serde_json::to_value(&project).unwrap();
+        let c = handle(&mut state, &json!({"op": "schema_compare", "project": p}), &none).unwrap();
+        assert_eq!(c["differences"].as_array().unwrap().len(), 2);
+        assert!(c["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("Ignored statement")));
+        let id = c["session"].as_u64().unwrap();
+        handle(&mut state, &json!({"op": "schema_script", "session": id, "selected": [0, 1]}), &none).unwrap();
+        let d = handle(&mut state, &json!({"op": "deploy", "session": id}), &none).unwrap();
+        assert_eq!(d["written"].as_array().unwrap().len(), 2, "{d}");
+        assert!(base.join("b").join("Tables").join("dbo.U.sql").is_file());
+        let again = handle(&mut state, &json!({"op": "schema_compare", "project": p}), &none).unwrap();
+        assert!(again["differences"].as_array().unwrap().iter().all(|x| x["kind"] == "Equal"), "{again}");
+        let sql = handle(&mut state, &json!({"op": "schema_object_sql", "session": again["session"], "index": 1}), &none).unwrap();
+        assert!(sql["source"].as_str().unwrap().contains("[dbo].[U]"), "{sql}");
+
+        // make_scripts from a project's source and from a plain source.
+        let made = base.join("made").to_string_lossy().to_string();
+        let r = handle(&mut state, &json!({"op": "make_scripts", "project": p, "path": made}), &none).unwrap();
+        assert_eq!(r["files"], 2);
+        assert!(base.join("made").join("RedGateDatabaseInfo.xml").is_file());
+        let made2 = base.join("made2").to_string_lossy().to_string();
+        let src = serde_json::to_value(side("b")).unwrap();
+        handle(&mut state, &json!({"op": "make_scripts", "source": src, "path": made2}), &none).unwrap();
+        assert!(base.join("made2").join("Tables").join("dbo.U.sql").is_file());
+
+        // A revision of a folder in git.
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&base).args(args).output().is_ok_and(|o| o.status.success());
+        if git(&["init", "-q"]) {
+            git(&["config", "user.email", "t@example.com"]);
+            git(&["config", "user.name", "t"]);
+            git(&["add", "a"]);
+            git(&["commit", "-q", "-m", "a"]);
+            write("a", "Tables/dbo.V.sql", "CREATE TABLE [dbo].[V]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\n");
+            let mut at_head = project.clone();
+            at_head.source.revision = "HEAD".into();
+            at_head.target = side("a");
+            let c = handle(&mut state, &json!({"op": "schema_compare", "project": at_head}), &none).unwrap();
+            let only2: Vec<&Value> = c["differences"].as_array().unwrap().iter().filter(|x| x["kind"] == "OnlyIn2").collect();
+            assert_eq!(only2.len(), 1, "{c}");
+            assert_eq!(c["sourceName"], "a");
+            let mut to_revision = at_head.clone();
+            std::mem::swap(&mut to_revision.source, &mut to_revision.target);
+            let c = handle(&mut state, &json!({"op": "schema_compare", "project": to_revision}), &none).unwrap();
+            let id = c["session"].as_u64().unwrap();
+            handle(&mut state, &json!({"op": "schema_script", "session": id, "selected": [0, 1, 2]}), &none).unwrap();
+            assert!(handle(&mut state, &json!({"op": "deploy", "session": id}), &none).is_err());
+        }
+        std::fs::remove_dir_all(base).ok();
     }
 }
