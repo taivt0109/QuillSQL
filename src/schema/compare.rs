@@ -1140,6 +1140,11 @@ impl<'a> Comparer<'a> {
                 d.add("Login", a.login.clone(), b.login.clone());
             }
             d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
+            d.opt_prop("Certificate", a.certificate.as_deref(), b.certificate.as_deref());
+            d.opt_prop("Asymmetric key", a.asymmetric_key.as_deref(), b.asymmetric_key.as_deref());
+        }
+        if a.kind == "APPLICATION_ROLE" && b.kind == "APPLICATION_ROLE" {
+            d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
         }
         if a.is_role() && !o.has(Opt::IgnoreOwners) && !o.has(Opt::IgnoreSchemaObjectAuthorization) {
             d.opt_prop("Owner", a.owner.as_deref(), b.owner.as_deref());

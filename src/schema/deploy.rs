@@ -996,6 +996,7 @@ impl<'a> Planner<'a> {
     fn drop_table(&mut self, t: &'a Table) {
         let name = t.object_name();
         self.warn(warn::table_drop(&name.to_string()));
+        self.drop_fulltext_before(t);
         if t.temporal.is_some() {
             self.step(
                 Phase::DropObjects,
@@ -1546,7 +1547,7 @@ impl<'a> Planner<'a> {
                 vec![format!("ALTER TABLE {table} ADD\r\n{}", defs.join(",\r\n"))]
             }
         };
-        let (versioning_off, period_change) = self.versioning_change(s, t, &drops);
+        let (versioning_off, period_change) = self.versioning_change(s, t);
         statements.extend(period_change.0);
         statements.extend(drop_list(self, &computed_drops));
         statements.extend(add_list(self, &adds));
@@ -1887,6 +1888,7 @@ impl<'a> Planner<'a> {
             }
         }
         self.drop_inbound_foreign_keys(t, true);
+        self.drop_fulltext_before(t);
         if !t.memory_optimized {
             // Default constraint names are schema-wide, so the old ones are dropped before the new table takes them.
             for c in &t.columns {

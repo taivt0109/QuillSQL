@@ -6,13 +6,23 @@
 //! - `options` describes every schema and data option (for the Options tabs).
 //! - `databases` {source} lists databases; `test_connection` {source} returns the server version.
 //! - `project_load` {path} / `project_save` {path, project}.
-//! - `schema_compare` {project} → session with differences; `schema_object_sql` {session, index};
-//!   `schema_script` {session, selected:[index], project}; `deploy` {session} runs the last script.
+//! - `project_export` {path, project} writes a SQL Compare / Data Compare project (.scp, .sdc).
+//! - `schema_compare` {project} → session with differences and suggested renames;
+//!   `schema_object_sql` {session, index}; `schema_script` {session, selected:[index], project};
+//!   `schema_dependencies` {session, selected}; `schema_switch` {session}; `schema_report`
+//!   {session, path, format, selected, includeIdentical}; `schema_renames` {project};
+//!   `deploy` {session} runs the last script.
 //! - `data_tables` {project} previews table pairs and keys; `data_compare` {project} → session;
-//!   `data_rows` {session, table, kind, start, count}; `data_script` {session, kinds, tables,
-//!   selections, isolationLevel, maxTransactionSizeMB} (see `selections`);
+//!   `data_rows` {session, table, kind, start, count, sort}; `data_find`; `data_value`;
+//!   `data_script` {session, kinds, tables, selections, isolationLevel, maxTransactionSizeMB}
+//!   (see `selections`); `data_export` {session, folder, kinds, tables} (CSV);
+//!   `data_report` {session, path, kinds} (HTML);
 //!   `data_session_save` {session, path} / `data_session_load` {path} → session.
 //! - `snapshot` {source, path} writes a schema snapshot.
+//!
+//! A side is a live database, a snapshot (QuillSQL JSON or SQL Compare `.snp`), or a scripts
+//! folder (`type: "scripts"`, `path`, optional source-control `revision`). Deploying to a
+//! scripts folder rewrites its files; `make_scripts` {project | source, path} writes one.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -35,6 +45,8 @@ struct SchemaSession {
     comparison: Comparison,
     project: Project,
     script: Option<DeploymentScript>,
+    /// The differences chosen for the last script, for deploying to a scripts folder.
+    selected: Vec<usize>,
 }
 
 struct DataSession {
@@ -43,6 +55,8 @@ struct DataSession {
     result: DataComparison,
     project: Project,
     script: Option<DeploymentScript>,
+    /// Row orders built for the All rows tab and for sorting, by (table, kind, sort).
+    views: Views,
 }
 
 #[derive(Default)]
@@ -94,13 +108,40 @@ fn session(request: &Value) -> Result<u64, String> {
     request.get("session").and_then(Value::as_u64).ok_or_else(|| "'session' is missing".to_string())
 }
 
-fn load_side(side: &SourceSpec, n: u8, progress: &dyn Fn(&str)) -> Result<Database, String> {
+/// `decrypt` follows DecryptPost2kEncryptedObjects; data compare never needs module text.
+fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<Database, String> {
+    load_side_with_warnings(side, n, decrypt, progress).map(|(db, _)| db)
+}
+
+/// A side and, for a scripts folder, what its parser skipped.
+fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<(Database, Vec<String>), String> {
+    if side.is_scripts() {
+        let checkout = match side.revision.as_str() {
+            "" => None,
+            r => {
+                progress(&format!("Getting revision {r} of '{}'", side.path));
+                Some(crate::sources::scm::checkout(&side.path, r)?)
+            }
+        };
+        progress(&format!("Reading database scripts from '{}'", side.path));
+        let dir = checkout.as_ref().map(|c| c.dir.clone()).unwrap_or_else(|| std::path::PathBuf::from(&side.path));
+        let mut f = crate::sources::folder::read(&dir)?;
+        if checkout.is_some() {
+            f.database.name = std::path::Path::new(&side.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(f.database.name);
+        }
+        let warnings = f.warnings.iter().cloned().chain(f.messages.iter().map(|m| m.text())).collect();
+        return Ok((f.database, warnings));
+    }
     if side.is_snapshot() {
         let bytes = std::fs::read(&side.path).map_err(|e| format!("{}: {e}", side.path))?;
-        return serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| format!("{} is not a snapshot: {e}", side.path));
+        if crate::sources::snp::is_snp(&bytes) {
+            return Ok((crate::sources::snp::read(&bytes).map_err(|e| format!("{}: {e}", side.path))?, Vec::new()));
+        }
+        let db = serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| format!("{} is not a snapshot: {e}", side.path))?;
+        return Ok((db, Vec::new()));
     }
     progress(&format!("Reading {}", side.describe()));
-    catalog::read_database(&side.connection(n)?)
+    Ok((catalog::read_database_with(&side.connection(n)?, decrypt)?, Vec::new()))
 }
 
 fn schema_options(p: &Project) -> Result<Options, String> {
@@ -164,39 +205,105 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         "snapshot" => {
             let side: SourceSpec = field(request, "source")?;
             let path: String = field(request, "path")?;
-            let db = load_side(&side, 1, progress)?;
+            let db = load_side(&side, 1, true, progress)?;
             std::fs::write(&path, serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"tables": db.tables.len()}))
+        }
+        // Writes a side as a scripts folder: the project's source with its options, or a source.
+        "make_scripts" => {
+            let path: String = field(request, "path")?;
+            let (side, opts) = match field::<Project>(request, "project") {
+                Ok(p) => (p.source.clone(), schema_options(&p)?),
+                Err(_) => (field::<SourceSpec>(request, "source")?, Options::default_set()),
+            };
+            let db = load_side(&side, 1, opts.has(Opt::DecryptPost2kEncryptedObjects), progress)?;
+            progress(&format!("Writing the scripts folder '{path}'"));
+            let files = crate::sources::folder::write_all(&db, std::path::Path::new(&path), &opts)?;
+            Ok(json!({"files": files}))
         }
         "schema_compare" => {
             let project: Project = field(request, "project")?;
             let opts = schema_options(&project)?;
-            let db1 = load_side(&project.source, 1, progress)?;
-            let db2 = load_side(&project.target, 2, progress)?;
+            let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
+            let (db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
+            // An empty database (`/empty2`): every object is created; only a script can be made.
+            let db2 = if project.target.is_empty_database() {
+                Database { name: "Empty".into(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }
+            } else {
+                let (db2, w2) = load_side_with_warnings(&project.target, 2, decrypt, progress)?;
+                warnings.extend(w2);
+                db2
+            };
             progress("Comparing");
-            let mut comparison = schema::compare(&db1, &db2, &opts, &project.schema_mappings);
-            for d in &mut comparison.differences {
-                if project.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label())) {
-                    d.selected = false;
-                }
-            }
-            let differences: Vec<Value> = comparison.differences.iter().enumerate().map(|(i, d)| difference_json(i, d)).collect();
-            let auto: Vec<Value> = comparison
-                .auto_mapped_columns
-                .iter()
-                .map(|(t, a, b)| json!({"table": t.to_string(), "source": a, "target": b}))
-                .collect();
+            let comparison = compare_schemas(&db1, &db2, &opts, &project);
             state.next += 1;
             let id = state.next;
-            let reply = json!({
-                "session": id,
-                "sourceName": db1.name,
-                "targetName": db2.name,
-                "differences": differences,
-                "autoMapped": auto,
-            });
-            state.schema.insert(id, SchemaSession { db1, db2, comparison, project, script: None });
+            let s = SchemaSession { db1, db2, comparison, project, script: None, selected: Vec::new() };
+            let mut reply = schema_reply(id, &s);
+            reply["warnings"] = json!(warnings);
+            state.schema.insert(id, s);
             Ok(reply)
+        }
+        // Switch deployment direction: the target becomes the source, compared again from what
+        // was read (the same session, a new set of differences).
+        "schema_switch" => {
+            let id = session(request)?;
+            let s = state.schema.get_mut(&id).ok_or("the comparison is no longer open")?;
+            if s.project.target.is_empty_database() {
+                return Err("an empty database cannot be the source".into());
+            }
+            std::mem::swap(&mut s.db1, &mut s.db2);
+            let p = &mut s.project;
+            std::mem::swap(&mut p.source, &mut p.target);
+            for m in &mut p.schema_mappings.schemas {
+                *m = (m.1.clone(), m.0.clone());
+            }
+            for t in &mut p.schema_mappings.tables {
+                std::mem::swap(&mut t.source, &mut t.target);
+                for c in &mut t.columns {
+                    *c = (c.1.clone(), c.0.clone());
+                }
+            }
+            let opts = schema_options(&s.project)?;
+            s.comparison = compare_schemas(&s.db1, &s.db2, &opts, &s.project);
+            s.script = None;
+            let mut reply = schema_reply(id, s);
+            reply["project"] = serde_json::to_value(&s.project).map_err(|e| e.to_string())?;
+            Ok(reply)
+        }
+        // Tables that look renamed, for the Table mapping tab: {project}.
+        "schema_renames" => {
+            let project: Project = field(request, "project")?;
+            let decrypt = schema_options(&project)?.has(Opt::DecryptPost2kEncryptedObjects);
+            let db1 = load_side(&project.source, 1, decrypt, progress)?;
+            let db2 = load_side(&project.target, 2, decrypt, progress)?;
+            Ok(json!(schema::renames::detect(&db1, &db2, &project.schema_mappings)))
+        }
+        // Objects the selected ones need that differ too: what "Include dependencies" adds.
+        "schema_dependencies" => {
+            let s = state.schema.get(&session(request)?).ok_or("the comparison is no longer open")?;
+            let selected: Vec<usize> = field(request, "selected")?;
+            Ok(json!(dependencies(s, &selected)))
+        }
+        // A comparison report: {path, format: Html|Classic|Excel|Xml, selected (only these
+        // differences, else all), includeIdentical}.
+        "schema_report" => {
+            let s = state.schema.get(&session(request)?).ok_or("the comparison is no longer open")?;
+            let path: String = field(request, "path")?;
+            let format = request.get("format").and_then(Value::as_str).unwrap_or("Html");
+            let selected: Option<Vec<usize>> = request.get("selected").and_then(|v| serde_json::from_value(v.clone()).ok());
+            let include_identical = request.get("includeIdentical").and_then(Value::as_bool).unwrap_or(false);
+            let bytes = schema_report(s, format, selected.as_deref(), include_identical);
+            std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
+            Ok(json!(true))
+        }
+        // Saves a project as SQL Compare (.scp) or SQL Data Compare (.sdc) writes it.
+        "project_export" => {
+            let path: String = field(request, "path")?;
+            let project: Project = field(request, "project")?;
+            let bytes = crate::project::export_redgate(&project, &crate::commands::console::now().invariant_format());
+            std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
+            Ok(json!(true))
         }
         "schema_object_sql" => {
             let s = state.schema.get(&session(request)?).ok_or("the comparison is no longer open")?;
@@ -226,9 +333,23 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 target_database: s.db2.name.clone(),
                 target_major_version: if s.db2.server.is_azure_sql_database() { 99 } else { s.db2.server.major_version },
             };
-            let script = deploy::generate(&comparison, &s.db1, &s.db2, &opts, &s.project.schema_mappings, &settings)?;
+            let mut script = deploy::generate(&comparison, &s.db1, &s.db2, &opts, &s.project.schema_mappings, &settings)?;
+            if s.project.source.is_scripts() && !opts.has(Opt::IgnorePrePostScripts) {
+                let dir = std::path::Path::new(&s.project.source.path);
+                let (info, _) = crate::sources::folder::FolderInfo::read(dir);
+                let (pre, post) = crate::sources::folder::pre_post_scripts(dir, &info)?;
+                if let Some(pre) = pre {
+                    script.sql = format!("{}\r\nGO\r\n{}", pre.trim_end(), script.sql);
+                    script.batches.splice(0..0, deploy::split_batches(&pre));
+                }
+                if let Some(post) = post {
+                    script.sql = format!("{}\r\nGO\r\n{}\r\nGO\r\n", script.sql.trim_end(), post.trim_end());
+                    script.batches.extend(deploy::split_batches(&post));
+                }
+            }
             let reply = script_json(&script);
             s.script = Some(script);
+            s.selected = selected;
             Ok(reply)
         }
         "data_tables" => {
@@ -238,8 +359,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             if project.source.is_snapshot() || project.target.is_snapshot() {
                 opts = opts.without(DataOpt::IncludeViews).without(DataOpt::UseChecksumComparison);
             }
-            let db1 = load_side(&project.source, 1, progress)?;
-            let db2 = load_side(&project.target, 2, progress)?;
+            let db1 = load_side(&project.source, 1, false, progress)?;
+            let db2 = load_side(&project.target, 2, false, progress)?;
             let (pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
             let tables: Vec<Value> = pairs
                 .iter()
@@ -274,12 +395,15 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         "data_compare" => {
             let project: Project = field(request, "project")?;
+            if project.source.is_scripts() || project.target.is_scripts() {
+                return Err("data compare needs live databases, not scripts folders".into());
+            }
             let opts = data_options(&project)?;
             let (s1, s2) = (project.source.connection(1)?, project.target.connection(2)?);
             progress(&format!("Reading {}", project.source.describe()));
-            let db1 = catalog::read_database(&s1)?;
+            let db1 = catalog::read_database_with(&s1, false)?;
             progress(&format!("Reading {}", project.target.describe()));
-            let db2 = catalog::read_database(&s2)?;
+            let db2 = catalog::read_database_with(&s2, false)?;
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
             let result = crate::data::compare::compare(
@@ -296,30 +420,110 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             state.next += 1;
             let id = state.next;
             let reply = data_session_json(id, &db1.name, &db2.name, &result);
-            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None });
+            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new() });
             Ok(reply)
         }
+        // `kind` 0–3 is a row kind (`RowKind::ALL` order), 4 every stored row in comparison order;
+        // `sort` {column, side: source|target, descending} orders the rows by one column. Each row
+        // carries its kind and its position within the kind (what `selections` refer to).
         "data_rows" => {
-            let s = state.data.get(&session(request)?).ok_or("the comparison is no longer open")?;
+            let s = state.data.get_mut(&session(request)?).ok_or("the comparison is no longer open")?;
             let table: usize = field(request, "table")?;
             let kind: usize = field(request, "kind")?;
             let start: usize = field(request, "start")?;
             let count: usize = field(request, "count")?;
-            let t = s.result.tables.get(table).ok_or("no such table")?;
-            let k = RowKind::ALL.get(kind).copied().ok_or("no such row kind")?;
-            let offsets = &t.offsets[k as usize];
-            let rows = store::read_page(&t.path, offsets, start, count).map_err(|e| e.to_string())?;
+            let view = row_view(&mut s.views, &s.result.tables, table, kind, request.get("sort"))?;
+            let t = &s.result.tables[table];
+            let page: Vec<(RowKind, usize)> = view.iter().skip(start).take(count).copied().collect();
+            let offsets: Vec<u64> = page.iter().map(|&(k, i)| t.offsets[k as usize][i]).collect();
+            let rows = store::read_page(&t.path, &offsets, 0, offsets.len()).map_err(|e| e.to_string())?;
             let rows: Vec<Value> = rows
                 .iter()
-                .map(|r| {
+                .zip(&page)
+                .map(|(r, &(k, i))| {
                     json!({
-                        "source": r.source.iter().map(|v| v.display()).collect::<Vec<_>>(),
-                        "target": r.target.iter().map(|v| v.display()).collect::<Vec<_>>(),
+                        "kind": k as usize, "row": i,
+                        "source": r.source.iter().map(|v| summary(&v.display())).collect::<Vec<_>>(),
+                        "target": r.target.iter().map(|v| summary(&v.display())).collect::<Vec<_>>(),
                         "differs": r.differs,
                     })
                 })
                 .collect();
-            Ok(json!({"rows": rows, "total": offsets.len(), "counted": t.counts[k as usize]}))
+            let counted: u64 = if kind == ALL_ROWS { t.counts.iter().sum() } else { t.counts[kind] };
+            Ok(json!({"rows": rows, "total": view.len(), "counted": counted}))
+        }
+        // The next row (from `start`, or before it with `backward`) of a `data_rows` view in which
+        // some value contains `text`, ignoring case; null when there is none.
+        "data_find" => {
+            let s = state.data.get_mut(&session(request)?).ok_or("the comparison is no longer open")?;
+            let table: usize = field(request, "table")?;
+            let kind: usize = field(request, "kind")?;
+            let start: usize = field(request, "start").unwrap_or(0);
+            let text: String = field(request, "text")?;
+            let backward = request.get("backward").and_then(Value::as_bool).unwrap_or(false);
+            let view = row_view(&mut s.views, &s.result.tables, table, kind, request.get("sort"))?;
+            let t = &s.result.tables[table];
+            let needle = text.to_lowercase();
+            let positions: Box<dyn Iterator<Item = usize>> = if backward { Box::new((0..start.min(view.len())).rev()) } else { Box::new(start..view.len()) };
+            let positions: Vec<usize> = positions.collect();
+            for chunk in positions.chunks(500) {
+                let offsets: Vec<u64> = chunk.iter().map(|&p| { let (k, i) = view[p]; t.offsets[k as usize][i] }).collect();
+                let rows = store::read_page(&t.path, &offsets, 0, offsets.len()).map_err(|e| e.to_string())?;
+                if let Some(at) = rows.iter().position(|r| r.source.iter().chain(&r.target).any(|v| v.display().to_lowercase().contains(&needle))) {
+                    return Ok(json!(chunk[at]));
+                }
+            }
+            Ok(Value::Null)
+        }
+        // The whole value of one cell, for the value viewer: {table, kind, row, column, side}.
+        "data_value" => {
+            let s = state.data.get(&session(request)?).ok_or("the comparison is no longer open")?;
+            let table: usize = field(request, "table")?;
+            let kind: usize = field(request, "kind")?;
+            let row: usize = field(request, "row")?;
+            let column: usize = field(request, "column")?;
+            let target = request.get("side").and_then(Value::as_str) == Some("target");
+            let t = s.result.tables.get(table).ok_or("no such table")?;
+            let offset = *t.offsets.get(kind).and_then(|o| o.get(row)).ok_or("no such row")?;
+            let r = store::read_page(&t.path, &[offset], 0, 1).map_err(|e| e.to_string())?.pop().ok_or("no such row")?;
+            let side = if (target && !r.target.is_empty()) || r.source.is_empty() { &r.target } else { &r.source };
+            Ok(json!(side.get(column).map(|v| v.display())))
+        }
+        // CSV files as `quill data /export` writes them: {folder, kinds, tables}.
+        "data_export" => {
+            let s = state.data.get_mut(&session(request)?).ok_or("the comparison is no longer open")?;
+            let folder: String = field(request, "folder")?;
+            let kinds: [bool; 4] = field(request, "kinds").unwrap_or([false, true, true, true]);
+            let chosen: Option<Vec<usize>> = request.get("tables").and_then(|v| serde_json::from_value(v.clone()).ok());
+            let (db1, db2) = (s.source_name.clone(), s.db2.name.clone());
+            // Export only the chosen tables, then put every table back in its place.
+            let all = std::mem::take(&mut s.result.tables);
+            let (picked, rest): (Vec<_>, Vec<_>) = all.into_iter().enumerate().partition(|(i, _)| chosen.as_ref().is_none_or(|c| c.contains(i)));
+            let (picked_ix, picked): (Vec<usize>, Vec<_>) = picked.into_iter().unzip();
+            s.result.tables = picked;
+            let written = crate::commands::data::export_csv(&s.result, kinds, std::path::Path::new(&folder), &db1, &db2);
+            let mut back: Vec<(usize, _)> = picked_ix.into_iter().zip(std::mem::take(&mut s.result.tables)).chain(rest).collect();
+            back.sort_by_key(|(i, _)| *i);
+            s.result.tables = back.into_iter().map(|(_, t)| t).collect();
+            written.map_err(|e| format!("{folder}: {e}"))?;
+            Ok(json!(true))
+        }
+        // An HTML page of the results: {path, kinds}.
+        "data_report" => {
+            let s = state.data.get(&session(request)?).ok_or("the comparison is no longer open")?;
+            let path: String = field(request, "path")?;
+            let kinds: [bool; 4] = field(request, "kinds").unwrap_or([false, true, true, true]);
+            let side = |p: &SourceSpec, name: &str| format!("{}.{}", p.server, if name.is_empty() { &p.database } else { name });
+            let html = crate::data::report::html(
+                &s.result,
+                &side(&s.project.source, &s.source_name),
+                &side(&s.project.target, &s.db2.name),
+                &crate::commands::console::now().report_format(),
+                kinds,
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::write(&path, html).map_err(|e| format!("{path}: {e}"))?;
+            Ok(json!(true))
         }
         "data_script" => {
             let id = session(request)?;
@@ -358,11 +562,32 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let id = state.next;
             let mut reply = data_session_json(id, &source_name, &db2.name, &result);
             reply["project"] = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-            state.data.insert(id, DataSession { source_name, db2, result, project, script: None });
+            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new() });
             Ok(reply)
         }
         "deploy" => {
             let id = session(request)?;
+            // A scripts folder as the target: the selected objects' files are rewritten.
+            if let Some(s) = state.schema.get(&id)
+                && s.project.target.is_scripts()
+            {
+                if s.script.is_none() {
+                    return Err("create the deployment script first".into());
+                }
+                if !s.project.target.revision.is_empty() {
+                    return Err("the target is a source control revision; deploy to the scripts folder itself".into());
+                }
+                let opts = schema_options(&s.project)?;
+                let mut comparison = s.comparison.clone();
+                for (i, d) in comparison.differences.iter_mut().enumerate() {
+                    d.selected = s.selected.contains(&i);
+                }
+                progress(&format!("Writing to the scripts folder '{}'", s.project.target.path));
+                let target = crate::sources::folder::read(std::path::Path::new(&s.project.target.path))?;
+                let changes = crate::sources::folder::sync(&s.db1, &target, &comparison.differences, &opts)?;
+                let list = |v: &[std::path::PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+                return Ok(json!({"written": list(&changes.written), "deleted": list(&changes.deleted)}));
+            }
             let (script, target) = if let Some(s) = state.schema.get(&id) {
                 (s.script.clone(), s.project.target.clone())
             } else if let Some(s) = state.data.get(&id) {
@@ -373,6 +598,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let script = script.ok_or("create the deployment script first")?;
             if target.is_snapshot() {
                 return Err("the target is a snapshot; only a script can be created".into());
+            }
+            if target.is_empty_database() {
+                return Err("the target is an empty database; only a script can be created".into());
             }
             let spec = target.connection(2)?;
             let ran = deploy::execute(&spec, &script, |i, n| progress(&format!("Running batch {} of {n}", i + 1)))?;
@@ -386,6 +614,68 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         other => Err(format!("unknown op '{other}'")),
     }
+}
+
+/// The `data_rows` kind that lists every stored row.
+const ALL_ROWS: usize = 4;
+
+/// Values as the grid shows them: 256 characters at most, then `…` (`data_value` has the rest).
+fn summary(text: &str) -> String {
+    match text.char_indices().nth(256) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
+}
+
+/// The rows of a `data_rows` view, as (kind, position within the kind), built once and kept.
+type Views = HashMap<(usize, usize, String), Vec<(RowKind, usize)>>;
+
+fn row_view<'a>(views: &'a mut Views, tables: &[crate::data::compare::TableResult], table: usize, kind: usize, sort: Option<&Value>) -> Result<&'a Vec<(RowKind, usize)>, String> {
+    let t = tables.get(table).ok_or("no such table")?;
+    if kind > ALL_ROWS {
+        return Err("no such row kind".into());
+    }
+    let sort = sort.filter(|v| !v.is_null());
+    let key = (table, kind, sort.map(Value::to_string).unwrap_or_default());
+    if !views.contains_key(&key) {
+        let mut view: Vec<(RowKind, usize)> = if kind == ALL_ROWS {
+            // Comparison order is the order the rows were written in.
+            let mut all: Vec<(u64, RowKind, usize)> =
+                RowKind::ALL.iter().flat_map(|&k| t.offsets[k as usize].iter().enumerate().map(move |(i, &o)| (o, k, i))).collect();
+            all.sort_by_key(|x| x.0);
+            all.into_iter().map(|(_, k, i)| (k, i)).collect()
+        } else {
+            (0..t.offsets[kind].len()).map(|i| (RowKind::ALL[kind], i)).collect()
+        };
+        if let Some(sort) = sort {
+            let column = sort.get("column").and_then(Value::as_u64).ok_or("sort: 'column' is missing")? as usize;
+            // `key`: whichever side the row has.
+            let side = sort.get("side").and_then(Value::as_str).unwrap_or("source").to_string();
+            let descending = sort.get("descending").and_then(Value::as_bool).unwrap_or(false);
+            let mut values: HashMap<(RowKind, usize), Option<crate::data::value::Value>> = HashMap::new();
+            for &k in RowKind::ALL.iter().filter(|&&k| view.iter().any(|v| v.0 == k)) {
+                for (i, r) in store::read_all(&t.path, &t.offsets[k as usize]).map_err(|e| e.to_string())?.into_iter().enumerate() {
+                    // A side the row is missing from sorts last.
+                    let (mine, other) = if side == "target" { (r.target, r.source) } else { (r.source, r.target) };
+                    let values_of = if !mine.is_empty() { mine } else if side == "key" || k == RowKind::Identical { other } else { Vec::new() };
+                    values.insert((k, i), values_of.into_iter().nth(column));
+                }
+            }
+            view.sort_by(|a, b| {
+                let ord = match (&values[a], &values[b]) {
+                    // Text sorts ignoring case first, as people read it.
+                    (Some(crate::data::value::Value::Str(x)), Some(crate::data::value::Value::Str(y))) => x.to_lowercase().cmp(&y.to_lowercase()).then_with(|| x.cmp(y)),
+                    (Some(x), Some(y)) => crate::data::value::cmp_key(x, y),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                };
+                if descending && values[a].is_some() && values[b].is_some() { ord.reverse() } else { ord }
+            });
+        }
+        views.insert(key.clone(), view);
+    }
+    Ok(&views[&key])
 }
 
 fn notes_json(p: &crate::data::mapping::TablePair) -> Vec<Value> {
@@ -462,6 +752,118 @@ fn selections(request: &Value, result: &DataComparison) -> Result<HashMap<Object
         out.insert(t.pair.source.clone(), sel);
     }
     Ok(out)
+}
+
+/// The comparison with the project's unticked objects left unselected.
+fn compare_schemas(db1: &Database, db2: &Database, opts: &Options, project: &Project) -> Comparison {
+    let mut comparison = schema::compare(db1, db2, opts, &project.schema_mappings);
+    for d in &mut comparison.differences {
+        if project.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label())) {
+            d.selected = false;
+        }
+    }
+    comparison
+}
+
+/// The reply describing a schema comparison session, with suggested table renames.
+fn schema_reply(id: u64, s: &SchemaSession) -> Value {
+    let differences: Vec<Value> = s.comparison.differences.iter().enumerate().map(|(i, d)| difference_json(i, d)).collect();
+    let auto: Vec<Value> = s.comparison.auto_mapped_columns.iter().map(|(t, a, b)| json!({"table": t.to_string(), "source": a, "target": b})).collect();
+    json!({
+        "session": id,
+        "sourceName": s.db1.name,
+        "targetName": s.db2.name,
+        "differences": differences,
+        "autoMapped": auto,
+        "renames": schema::renames::detect(&s.db1, &s.db2, &s.project.schema_mappings),
+    })
+}
+
+/// Differences that the selected ones reference (created or changed objects need them) and
+/// that are not selected: {index, referencedBy: [names]}.
+fn dependencies(s: &SchemaSession, selected: &[usize]) -> Vec<Value> {
+    let diffs = &s.comparison.differences;
+    let mut found: Vec<(usize, Vec<String>)> = Vec::new();
+    let mut queue: Vec<usize> = selected.iter().copied().filter(|&i| diffs.get(i).is_some_and(|d| d.kind != DiffKind::OnlyIn2)).collect();
+    while let Some(i) = queue.pop() {
+        let from = &diffs[i].name;
+        for dep in s.db1.dependencies.iter().filter(|d| d.from == *from) {
+            let Some(j) = diffs.iter().position(|d| d.name == dep.to && matches!(d.kind, DiffKind::OnlyIn1 | DiffKind::Different)) else { continue };
+            if selected.contains(&j) {
+                continue;
+            }
+            match found.iter_mut().find(|f| f.0 == j) {
+                Some(f) => {
+                    if !f.1.contains(&from.to_string()) {
+                        f.1.push(from.to_string());
+                    }
+                }
+                None => {
+                    found.push((j, vec![from.to_string()]));
+                    queue.push(j);
+                }
+            }
+        }
+    }
+    found.sort_by_key(|f| f.0);
+    found.into_iter().map(|(i, by)| json!({"index": i, "referencedBy": by})).collect()
+}
+
+fn report_side(spec: &SourceSpec, db: &Database) -> schema::report::DataSource {
+    if spec.is_snapshot() {
+        let created = std::fs::metadata(&spec.path).and_then(|m| m.modified()).ok().map(|t| crate::commands::console::utc(t).report_format());
+        schema::report::DataSource { kind: "snapshot", server: String::new(), database: db.name.clone(), created }
+    } else {
+        schema::report::DataSource { kind: "live", server: spec.server.clone(), database: db.name.clone(), created: None }
+    }
+}
+
+/// A report as `quill schema /report` writes it, of the chosen differences.
+fn schema_report(s: &SchemaSession, format: &str, selected: Option<&[usize]>, include_identical: bool) -> Vec<u8> {
+    use schema::report::{self, Item, Report};
+    let ignore_ws = schema_options(&s.project).map(|o| o.has(Opt::IgnoreWhiteSpace)).unwrap_or(true);
+    let mut items: Vec<Item> = s
+        .comparison
+        .differences
+        .iter()
+        .enumerate()
+        .filter(|(i, d)| if d.kind == DiffKind::Equal { include_identical } else { selected.is_none_or(|sel| sel.contains(i)) })
+        .map(|(_, d)| {
+            let target = d.target_name.as_ref().unwrap_or(&d.name);
+            let (one, two) = match d.kind {
+                DiffKind::OnlyIn1 => (Some(&d.name), None),
+                DiffKind::OnlyIn2 => (None, Some(&d.name)),
+                _ => (Some(&d.name), Some(target)),
+            };
+            let left = one.and_then(|n| object_sql(&s.db1, d.object_type, n));
+            let right = two.and_then(|n| object_sql(&s.db2, d.object_type, n));
+            Item {
+                object_type: d.object_type,
+                kind: d.kind,
+                full_name: if d.name.schema.is_empty() { format!("[{}]", d.name.name) } else { d.name.quoted() },
+                owner1: one.map(|n| n.schema.clone()).unwrap_or_default(),
+                name1: one.map(|n| n.name.clone()).unwrap_or_default(),
+                owner2: two.map(|n| n.schema.clone()).unwrap_or_default(),
+                name2: two.map(|n| n.name.clone()).unwrap_or_default(),
+                lines: schema::linediff::compare(left.as_deref(), right.as_deref(), ignore_ws),
+            }
+        })
+        .collect();
+    report::order(&mut items);
+    let r = Report {
+        timestamp: crate::commands::console::now().report_format(),
+        source: report_side(&s.project.source, &s.db1),
+        target: report_side(&s.project.target, &s.db2),
+        items,
+        include_identical,
+    };
+    match format {
+        "Classic" => report::classic(&r).into_bytes(),
+        "Excel" => report::excel(&r).into_bytes(),
+        "Xlsx" => report::xlsx(&r),
+        "Xml" => report::xml(&r),
+        _ => report::html(&r).into_bytes(),
+    }
 }
 
 fn difference_json(i: usize, d: &crate::schema::Difference) -> Value {
@@ -599,5 +1001,122 @@ mod tests {
         assert!(handle(&mut state, &json!({"op": "nope"}), &none).is_err());
         assert!(handle(&mut state, &json!({"op": "data_rows", "session": 9}), &none).is_err());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn schema_session_ops() {
+        use crate::catalog::{Column, DataType, Dependency, Routine, Table};
+        let table = |name: &str, cols: &[&str]| Table {
+            schema: "dbo".into(),
+            name: name.into(),
+            columns: cols.iter().map(|c| Column { name: (*c).into(), data_type: DataType { name: "int".into(), ..Default::default() }, ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        let mut db1 = Database { name: "One".into(), ..Default::default() };
+        db1.tables = vec![table("Customer", &["Id", "Name"]), table("Orders", &["Id", "Total"])];
+        db1.routines.push(Routine { schema: "dbo".into(), name: "Report".into(), definition: "CREATE PROCEDURE dbo.Report AS SELECT Id FROM dbo.Orders".into(), ..Default::default() });
+        db1.dependencies.push(Dependency { from: ObjectName::new("dbo", "Report"), to: ObjectName::new("dbo", "Orders"), strong: false });
+        let mut db2 = Database { name: "Two".into(), ..Default::default() };
+        db2.tables = vec![table("Customers", &["Id", "Name"]), table("Orders", &["Id"])];
+        let dir = std::env::temp_dir().join(format!("quill-serve-schema-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |f: &str| dir.join(f).to_string_lossy().to_string();
+        std::fs::write(path("one.json"), serde_json::to_vec(&db1).unwrap()).unwrap();
+        std::fs::write(path("two.json"), serde_json::to_vec(&db2).unwrap()).unwrap();
+        let mut project = Project::new(crate::project::ProjectKind::Schema);
+        project.source = SourceSpec { kind: "snapshot".into(), path: path("one.json"), ..Default::default() };
+        project.target = SourceSpec { kind: "snapshot".into(), path: path("two.json"), ..Default::default() };
+        let project = serde_json::to_value(&project).unwrap();
+        let mut state = State::default();
+        let none = |_: &str| {};
+        let r = handle(&mut state, &json!({"op": "schema_compare", "project": project}), &none).unwrap();
+        let s = r["session"].clone();
+        assert_eq!(r["renames"][0]["source"]["name"], "Customer");
+        assert_eq!(r["renames"][0]["target"]["name"], "Customers");
+        let index = |r: &Value, name: &str| r["differences"].as_array().unwrap().iter().find(|d| d["name"] == name).unwrap()["index"].as_u64().unwrap();
+        let (report, orders) = (index(&r, "Report"), index(&r, "Orders"));
+        let deps = handle(&mut state, &json!({"op": "schema_dependencies", "session": s, "selected": [report]}), &none).unwrap();
+        assert_eq!(deps, json!([{"index": orders, "referencedBy": ["[dbo].[Report]"]}]));
+        let html = path("r.html");
+        handle(&mut state, &json!({"op": "schema_report", "session": s, "path": html, "format": "Html", "selected": [orders]}), &none).unwrap();
+        let text = std::fs::read_to_string(&html).unwrap();
+        assert!(text.contains("Orders") && !text.contains("Report</"), "only the chosen object is reported");
+        let switched = handle(&mut state, &json!({"op": "schema_switch", "session": s}), &none).unwrap();
+        assert_eq!((switched["sourceName"].as_str(), switched["targetName"].as_str()), (Some("Two"), Some("One")));
+        let report_now = switched["differences"].as_array().unwrap().iter().find(|d| d["name"] == "Report").unwrap();
+        assert_eq!(report_now["kind"], "OnlyIn2");
+        assert_eq!(switched["project"]["source"]["path"], path("two.json"));
+        let scp = path("p.scp");
+        handle(&mut state, &json!({"op": "project_export", "path": scp, "project": project}), &none).unwrap();
+        let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
+        assert_eq!(back["source"]["path"], path("one.json"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn compares_and_deploys_scripts_folders() {
+        let mut state = State::default();
+        let none = |_: &str| {};
+        let base = std::env::temp_dir().join(format!("quill-serve-scripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let write = |dir: &str, file: &str, text: &str| {
+            let p = base.join(dir).join(file);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        write("a", "Tables/dbo.T.sql", "CREATE TABLE [dbo].[T]\r\n(\r\n[a] [int] NULL,\r\n[b] [int] NULL\r\n)\r\nGO\r\n");
+        write("a", "Tables/dbo.U.sql", "CREATE TABLE [dbo].[U]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\n");
+        write("b", "Tables/dbo.T.sql", "CREATE TABLE [dbo].[T]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\nPRINT 1\r\nGO\r\n");
+        let side = |d: &str| SourceSpec { kind: "scripts".into(), path: base.join(d).to_string_lossy().to_string(), ..Default::default() };
+        let mut project = Project::new(crate::project::ProjectKind::Schema);
+        project.source = side("a");
+        project.target = side("b");
+        let p = serde_json::to_value(&project).unwrap();
+        let c = handle(&mut state, &json!({"op": "schema_compare", "project": p}), &none).unwrap();
+        assert_eq!(c["differences"].as_array().unwrap().len(), 2);
+        assert!(c["warnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("Ignored statement")));
+        let id = c["session"].as_u64().unwrap();
+        handle(&mut state, &json!({"op": "schema_script", "session": id, "selected": [0, 1]}), &none).unwrap();
+        let d = handle(&mut state, &json!({"op": "deploy", "session": id}), &none).unwrap();
+        assert_eq!(d["written"].as_array().unwrap().len(), 2, "{d}");
+        assert!(base.join("b").join("Tables").join("dbo.U.sql").is_file());
+        let again = handle(&mut state, &json!({"op": "schema_compare", "project": p}), &none).unwrap();
+        assert!(again["differences"].as_array().unwrap().iter().all(|x| x["kind"] == "Equal"), "{again}");
+        let sql = handle(&mut state, &json!({"op": "schema_object_sql", "session": again["session"], "index": 1}), &none).unwrap();
+        assert!(sql["source"].as_str().unwrap().contains("[dbo].[U]"), "{sql}");
+
+        // make_scripts from a project's source and from a plain source.
+        let made = base.join("made").to_string_lossy().to_string();
+        let r = handle(&mut state, &json!({"op": "make_scripts", "project": p, "path": made}), &none).unwrap();
+        assert_eq!(r["files"], 2);
+        assert!(base.join("made").join("RedGateDatabaseInfo.xml").is_file());
+        let made2 = base.join("made2").to_string_lossy().to_string();
+        let src = serde_json::to_value(side("b")).unwrap();
+        handle(&mut state, &json!({"op": "make_scripts", "source": src, "path": made2}), &none).unwrap();
+        assert!(base.join("made2").join("Tables").join("dbo.U.sql").is_file());
+
+        // A revision of a folder in git.
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&base).args(args).output().is_ok_and(|o| o.status.success());
+        if git(&["init", "-q"]) {
+            git(&["config", "user.email", "t@example.com"]);
+            git(&["config", "user.name", "t"]);
+            git(&["add", "a"]);
+            git(&["commit", "-q", "-m", "a"]);
+            write("a", "Tables/dbo.V.sql", "CREATE TABLE [dbo].[V]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\n");
+            let mut at_head = project.clone();
+            at_head.source.revision = "HEAD".into();
+            at_head.target = side("a");
+            let c = handle(&mut state, &json!({"op": "schema_compare", "project": at_head}), &none).unwrap();
+            let only2: Vec<&Value> = c["differences"].as_array().unwrap().iter().filter(|x| x["kind"] == "OnlyIn2").collect();
+            assert_eq!(only2.len(), 1, "{c}");
+            assert_eq!(c["sourceName"], "a");
+            let mut to_revision = at_head.clone();
+            std::mem::swap(&mut to_revision.source, &mut to_revision.target);
+            let c = handle(&mut state, &json!({"op": "schema_compare", "project": to_revision}), &none).unwrap();
+            let id = c["session"].as_u64().unwrap();
+            handle(&mut state, &json!({"op": "schema_script", "session": id, "selected": [0, 1, 2]}), &none).unwrap();
+            assert!(handle(&mut state, &json!({"op": "deploy", "session": id}), &none).is_err());
+        }
+        std::fs::remove_dir_all(base).ok();
     }
 }

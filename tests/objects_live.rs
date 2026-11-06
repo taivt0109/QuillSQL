@@ -261,3 +261,44 @@ fn keys_and_certificates_are_described() {
     server.drop(a);
     server.drop(b);
 }
+
+#[test]
+fn objects_round_trip_through_scripts_folders() {
+    use quillsql::sources::folder;
+    let Some(server) = server() else { return };
+    let a = "QD_objects_Folder";
+    server.create(a, &objects());
+    let live = catalog::read_database(&server.spec(a)).unwrap();
+    let dir = std::env::temp_dir().join(format!("{a}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let opts = options();
+    folder::write_all(&live, &dir, &opts).unwrap();
+    let f = folder::read(&dir).unwrap();
+    assert!(f.messages.is_empty(), "{:?}", f.messages);
+    for (x, y) in [(&f.database, &live), (&live, &f.database)] {
+        let c = schema::compare(x, y, &opts, &Mappings::default());
+        let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal).collect();
+        assert!(left.is_empty(), "{left:#?}");
+    }
+    // A deployment from the folder to an empty database gives the same objects.
+    let b = "QD_objects_FromFolder";
+    server.create(b, "SELECT 1");
+    let target = catalog::read_database(&server.spec(b)).unwrap();
+    let c = schema::compare(&f.database, &target, &opts, &Mappings::default());
+    let settings = deploy::ScriptSettings {
+        transaction_isolation_level: "SERIALIZABLE".into(),
+        source: dir.display().to_string(),
+        target: b.into(),
+        target_database: b.into(),
+        target_major_version: target.server.major_version,
+    };
+    let s = deploy::generate(&c, &f.database, &target, &opts, &Mappings::default(), &settings).unwrap();
+    deploy::execute(&server.spec(b), &s, |_, _| {}).unwrap_or_else(|e| panic!("{e}\n\n{}", s.sql));
+    let after = catalog::read_database(&server.spec(b)).unwrap();
+    let c = schema::compare(&live, &after, &opts, &Mappings::default());
+    let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal).collect();
+    assert!(left.is_empty(), "{left:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
+    server.drop(a);
+    server.drop(b);
+}
