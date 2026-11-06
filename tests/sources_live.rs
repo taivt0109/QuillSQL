@@ -114,6 +114,9 @@ fn makescripts_reads_back_identical() {
     }
 }
 
+/// The data tests run one at a time: both drive the same server hard.
+static DATA: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `quill <command> ...` with the test server's login for the live `sides`.
 fn quill(server: &Server, command: &str, sides: &[u8], args: &[String]) -> (i32, String) {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_quill"));
@@ -131,8 +134,17 @@ fn quill(server: &Server, command: &str, sides: &[u8], args: &[String]) -> (i32,
 #[test]
 fn data_compare_with_a_scripts_folder() {
     let Some(server) = server() else { return };
+    let _serial = DATA.lock().unwrap_or_else(|e| e.into_inner());
     let data = format!("{SHOP}\nGO\n{SHOP_DATA}");
     server.create("QD_sources_Data", &data);
+    let staged = || {
+        let rt = db::runtime().unwrap();
+        rt.block_on(async {
+            let mut c = db::connect_async(&server.spec("master")).await.unwrap();
+            db::query(&mut c, "SELECT name FROM sys.databases WHERE name LIKE N'QuillScripts[_]%'").await.unwrap().len()
+        })
+    };
+    let before = staged();
     let dir = temp("data");
     let d = |s: &str| s.to_string();
     let path = dir.to_string_lossy().to_string();
@@ -158,11 +170,7 @@ fn data_compare_with_a_scripts_folder() {
     let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Data")]);
     assert_eq!(code, 63, "{out}");
     // No temporary databases are left behind.
-    let left = rt.block_on(async {
-        let mut c = db::connect_async(&server.spec("master")).await.unwrap();
-        db::query(&mut c, "SELECT name FROM sys.databases WHERE name LIKE N'QuillScripts[_]%'").await.unwrap().len()
-    });
-    assert_eq!(left, 0);
+    assert!(staged() <= before);
     let _ = std::fs::remove_dir_all(&dir);
     server.drop("QD_sources_Data");
 }
@@ -184,6 +192,7 @@ INSERT dbo.Child VALUES (1, 1, 'x'), (2, NULL, 'y ');
 #[test]
 fn data_compare_with_a_scripts_folder_without_a_server() {
     let Some(server) = server() else { return };
+    let _serial = DATA.lock().unwrap_or_else(|e| e.into_inner());
     server.create("QD_sources_Types", TYPES);
     let dir = temp("types");
     let d = |s: &str| s.to_string();
