@@ -1,21 +1,53 @@
-//! The data deployment script: makes the rows of database 2 match database 1.
+//! The data deployment script: makes the rows of database 2 match database 1, in the layout
+//! SQL Data Compare writes.
 //!
-//! Inside one transaction: foreign keys (and, if asked, triggers) of the touched tables are
-//! disabled, rows are deleted and updated from child tables up to parents, inserted from
-//! parents down to children, then the constraints are enabled and checked again.
+//! Inside one transaction (unless split by size): triggers, foreign keys and (if asked)
+//! indexes of the deployed tables are disabled or dropped, rows are deleted and updated from
+//! child tables up to parents, inserted from parents down to children, then everything is
+//! restored. DDL triggers and identity reseeds come after the commit.
 
-use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::compare::{DataComparison, TableResult};
+use serde::{Deserialize, Serialize};
+
+use super::compare::{self, DataComparison, TableResult};
+use super::mapping::{self, ColumnPair, TablePair};
 use super::options::{DataOpt, DataOptions};
 use super::store::{self, RowKind, StoredRow};
-use super::value::Value;
-use crate::catalog::{DataType, Database, ObjectName};
-use crate::db::{literal, quote};
+use super::value::{Literal, Value, sql_string};
+use crate::catalog::{Database, ForeignKey, Index, IndexKind, ObjectName, Trigger};
+use crate::db::{ConnectionSpec, quote};
+use crate::schema::ddl;
 use crate::schema::deploy::{DeploymentScript, Severity, Warning};
 
+/// Which stored rows of one kind are deployed: all of them (`included`) or none, with the rows
+/// in `toggled` (positions within the kind, as `data_rows` numbers them) the other way round.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RowSelection {
+    pub included: bool,
+    pub toggled: BTreeSet<u64>,
+}
+
+impl Default for RowSelection {
+    fn default() -> Self {
+        RowSelection { included: true, toggled: BTreeSet::new() }
+    }
+}
+
+impl RowSelection {
+    pub fn selected(&self, row: u64) -> bool {
+        self.included != self.toggled.contains(&row)
+    }
+
+    pub fn count(&self, total: u64) -> u64 {
+        let toggled = self.toggled.iter().filter(|&&r| r < total).count() as u64;
+        if self.included { total - toggled } else { toggled }
+    }
+}
+
 pub struct SyncSettings {
+    /// `server.database` of each side, for the header.
     pub source: String,
     pub target: String,
     pub target_database: String,
@@ -24,29 +56,93 @@ pub struct SyncSettings {
     pub kinds: [bool; 4],
     /// Tables (source names) to deploy; `None` = every compared table.
     pub tables: Option<Vec<ObjectName>>,
+    /// Row-level choices per table (source name), indexed by `RowKind`.
+    pub selections: HashMap<ObjectName, [RowSelection; 4]>,
+    /// Commit and start a new transaction after this many bytes of row statements.
+    pub max_transaction_bytes: Option<u64>,
+    /// Database 1, to read values that were compared by hash.
+    pub source_connection: Option<ConnectionSpec>,
 }
 
-/// Statements per batch; the transaction spans batches.
-const BATCH: usize = 1000;
-const PAGE: usize = 10_000;
+impl SyncSettings {
+    pub fn new(source: &str, target: &str, target_database: &str) -> SyncSettings {
+        SyncSettings {
+            source: source.into(),
+            target: target.into(),
+            target_database: target_database.into(),
+            transaction_isolation_level: "SERIALIZABLE".into(),
+            kinds: [false, true, true, true],
+            tables: None,
+            selections: HashMap::new(),
+            max_transaction_bytes: None,
+            source_connection: None,
+        }
+    }
+}
+
+/// The execution blocks Vendor's executor sends without a GO, at most.
+const EXEC_CHUNK: usize = 32_000;
+
+/// A table to deploy and what to do with it.
+struct Plan<'a> {
+    t: &'a TableResult,
+    delete: bool,
+    update: bool,
+    add: bool,
+    rows: Option<&'a [RowSelection; 4]>,
+}
+
+impl Plan<'_> {
+    fn synced(&self) -> bool {
+        self.delete || self.update || self.add
+    }
+
+    fn selected(&self, kind: RowKind, row: u64) -> bool {
+        self.rows.is_none_or(|r| r[kind as usize].selected(row))
+    }
+}
+
+fn rows_word(n: u64) -> &'static str {
+    if n == 1 { "row" } else { "rows" }
+}
+
+/// The target table or view's triggers, indexes and foreign keys.
+struct Target<'a> {
+    triggers: &'a [Trigger],
+    indexes: &'a [Index],
+    foreign_keys: &'a [ForeignKey],
+    is_table: bool,
+    memory_optimized: bool,
+    edge: bool,
+}
+
+fn target_of<'a>(db: &'a Database, name: &ObjectName) -> Target<'a> {
+    if let Some(t) = db.table(&name.schema, &name.name) {
+        return Target {
+            triggers: &t.triggers,
+            indexes: &t.indexes,
+            foreign_keys: &t.foreign_keys,
+            is_table: true,
+            memory_optimized: t.memory_optimized,
+            edge: t.graph.as_deref() == Some("EDGE"),
+        };
+    }
+    let v = db.views.iter().find(|v| v.schema == name.schema && v.name == name.name);
+    Target {
+        triggers: v.map(|v| v.triggers.as_slice()).unwrap_or_default(),
+        indexes: v.map(|v| v.indexes.as_slice()).unwrap_or_default(),
+        foreign_keys: &[],
+        is_table: false,
+        memory_optimized: false,
+        edge: false,
+    }
+}
 
 pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, settings: &SyncSettings) -> Result<DeploymentScript, String> {
-    let mut w = Writer::default();
     let mut warnings = Vec::new();
     let transactions = !opts.has(DataOpt::DontUseTransactions);
-    let comments = !opts.has(DataOpt::DontOutputComments);
+    let mut w = Writer::new(!opts.has(DataOpt::DontOutputComments), settings.max_transaction_bytes, transactions);
 
-    let tables: Vec<&TableResult> = result
-        .tables
-        .iter()
-        .filter(|t| t.error.is_none() && !t.pair.is_view)
-        .filter(|t| settings.tables.as_ref().is_none_or(|only| only.contains(&t.pair.source)))
-        .filter(|t| {
-            (settings.kinds[RowKind::Different as usize] && t.count(RowKind::Different) > 0)
-                || (settings.kinds[RowKind::OnlyIn1 as usize] && t.count(RowKind::OnlyIn1) > 0)
-                || (settings.kinds[RowKind::OnlyIn2 as usize] && t.count(RowKind::OnlyIn2) > 0)
-        })
-        .collect();
     for t in result.tables.iter().filter(|t| t.error.is_some()) {
         warnings.push(Warning {
             severity: Severity::High,
@@ -54,315 +150,1065 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
             message: format!("not compared, so not deployed: {}", t.error.as_deref().unwrap_or_default()),
         });
     }
-    for t in &tables {
-        if t.by_checksum {
-            continue;
-        }
-        if t.count(RowKind::OnlyIn2) > 0 && settings.kinds[RowKind::OnlyIn2 as usize] {
-            warnings.push(Warning {
-                severity: Severity::High,
-                object: t.pair.target.to_string(),
-                message: format!("{} row(s) are deleted", t.count(RowKind::OnlyIn2)),
-            });
-        }
-    }
-    if opts.has(DataOpt::DropConstraintsAndIndexes) {
-        warnings.push(Warning { severity: Severity::Medium, object: String::new(), message: "dropping indexes and keys during data deployment is not supported yet; they are kept".into() });
-    }
-    if tables.is_empty() {
+    // Every compared table takes part in the ordering; only those with changes are deployed.
+    let plans: Vec<Plan> = result
+        .tables
+        .iter()
+        .filter(|t| t.error.is_none())
+        .map(|t| {
+            let chosen = settings.tables.as_ref().is_none_or(|only| only.contains(&t.pair.source)) && !t.identical();
+            let rows = settings.selections.get(&t.pair.source);
+            let wanted = |k: RowKind| {
+                chosen && settings.kinds[k as usize] && t.count(k) > 0 && rows.is_none_or(|r| r[k as usize].count(t.offsets[k as usize].len() as u64) > 0)
+            };
+            Plan { t, delete: wanted(RowKind::OnlyIn2), update: wanted(RowKind::Different), add: wanted(RowKind::OnlyIn1), rows }
+        })
+        .collect();
+    if !plans.iter().any(Plan::synced) {
         return Ok(DeploymentScript { sql: String::new(), warnings, batches: Vec::new() });
     }
+    // Row-level choices change the messages of every table, as in SQL Data Compare.
+    let by_row = plans.iter().any(|p| p.rows.is_some_and(|r| r.iter().any(|k| !k.toggled.is_empty() || !k.included)));
+    let (order, extra_fks) = dependency_order(&plans, target, opts, &mut warnings);
 
-    // Parents before children for inserts; the reverse for deletes and updates.
-    let order = dependency_order(&tables, target);
-
-    if opts.has(DataOpt::OutputCommentHeader) {
-        w.raw(&format!(
-            "/*\r\nRun this script on:\r\n\r\n{}    -  This database will be modified\r\n\r\nto synchronize it with:\r\n\r\n{}\r\n\r\nYou are recommended to back up your database before running this script\r\n\r\nScript created by QuillSQL {}\r\n\r\n*/\r\n",
+    // Header.
+    if opts.has(DataOpt::OutputCommentHeader) && !settings.source.is_empty() && !settings.target.is_empty() {
+        w.sql(&format!(
+            "/*\r\nRun this script on:\r\n\r\n{}    -  This database will be modified\r\n\r\nto synchronize it with:\r\n\r\n{}\r\n\r\nYou are recommended to back up your database before running this script\r\n\r\nScript created by QuillSQL {} at {}\r\n\r\n*/\r\n\t\t",
             settings.target,
             settings.source,
-            env!("CARGO_PKG_VERSION")
+            env!("CARGO_PKG_VERSION"),
+            now_text()
         ));
     }
-    w.batch("SET NUMERIC_ROUNDABORT OFF");
-    w.batch("SET ANSI_PADDING, ANSI_WARNINGS, CONCAT_NULL_YIELDS_NULL, ARITHABORT, QUOTED_IDENTIFIER, ANSI_NULLS, NOCOUNT ON");
-    w.batch("SET DATEFORMAT YMD");
     if opts.has(DataOpt::AddDatabaseUseStatement) && !settings.target_database.is_empty() {
-        w.batch(&format!("USE {}", quote(&settings.target_database)));
+        w.sql(&format!("USE {}", quote(&settings.target_database)));
+    }
+    w.sql("");
+    for s in ["SET NUMERIC_ROUNDABORT OFF", "SET ANSI_PADDING, ANSI_WARNINGS, CONCAT_NULL_YIELDS_NULL, ARITHABORT, QUOTED_IDENTIFIER, ANSI_NULLS, NOCOUNT ON", "SET DATEFORMAT YMD", "SET XACT_ABORT ON"] {
+        w.sql(s);
+        w.go();
     }
     if transactions {
-        w.batch("SET XACT_ABORT ON");
-        w.batch(&format!("SET TRANSACTION ISOLATION LEVEL {}", settings.transaction_isolation_level));
-        w.statement("BEGIN TRANSACTION");
+        w.sql(&format!("SET TRANSACTION ISOLATION LEVEL {}", settings.transaction_isolation_level));
+        w.go();
     }
-    let print = |w: &mut Writer, text: &str| {
-        if comments {
-            w.statement(&format!("PRINT({})", literal(text)));
+    let ddl_triggers = if opts.has(DataOpt::DisableDdlTriggers) { result.ddl_triggers.as_slice() } else { &[] };
+    if !ddl_triggers.is_empty() {
+        w.print("Disable all DDL triggers for database");
+        w.go();
+        w.sql("DISABLE TRIGGER ALL ON DATABASE");
+        w.go();
+    }
+    if transactions {
+        w.sql("");
+        w.sql("BEGIN TRANSACTION");
+    }
+
+    let tables: Vec<&Plan> = order.iter().map(|&i| &plans[i]).collect();
+    let fk_mode = opts.has(DataOpt::DisableKeys) || opts.has(DataOpt::DropConstraintsAndIndexes);
+    let drop_indexes = opts.has(DataOpt::DropConstraintsAndIndexes);
+    let key_index = |p: &Plan| p.t.pair.target_key_name.clone().or_else(|| p.t.pair.key_name.clone());
+    // Indexes dropped for DropConstraintsAndIndexes: (clustered pass, nonclustered pass).
+    let droppable = |p: &Plan, clustered: bool| -> Vec<&Index> {
+        let tg = target_of(target, &p.t.pair.target);
+        if !drop_indexes || !tg.is_table || tg.memory_optimized {
+            return Vec::new();
         }
+        let key = key_index(p);
+        // XML indexes depend on the clustered key and are not scripted here: such a table keeps it.
+        let has_xml = tg.indexes.iter().any(|i| i.kind == IndexKind::Xml);
+        tg.indexes
+            .iter()
+            .filter(|i| {
+                !matches!(i.kind, IndexKind::Xml | IndexKind::ClusteredColumnstore | IndexKind::NonclusteredColumnstore | IndexKind::Heap)
+                    && !i.disabled
+                    && Some(&i.name) != key.as_ref()
+                    && (i.kind == IndexKind::Clustered) == clustered
+                    && !(clustered && has_xml)
+            })
+            .collect()
     };
 
-    // Foreign keys touching the changed tables, and their triggers.
-    let changed: HashSet<ObjectName> = tables.iter().map(|t| t.pair.target.clone()).collect();
-    let mut fks: Vec<(ObjectName, String)> = Vec::new();
-    if opts.has(DataOpt::DisableKeys) {
-        for t in &target.tables {
-            for fk in t.foreign_keys.iter().filter(|fk| !fk.disabled) {
-                if changed.contains(&t.object_name()) || changed.contains(&fk.referenced_table) {
-                    fks.push((t.object_name(), fk.name.clone()));
-                }
-            }
-        }
-    }
-    let mut triggers: Vec<(ObjectName, String)> = Vec::new();
+    // Disable: DML triggers, foreign keys, indexes, columnstore indexes.
     if opts.has(DataOpt::DisableTriggers) {
-        for t in target.tables.iter().filter(|t| changed.contains(&t.object_name())) {
-            for tr in t.triggers.iter().filter(|tr| !tr.disabled) {
-                triggers.push((t.object_name(), tr.name.clone()));
+        for p in &tables {
+            let tg = target_of(target, &p.t.pair.target);
+            for (n, tr) in tg.triggers.iter().filter(|tr| !tr.disabled).enumerate() {
+                if n == 0 {
+                    w.print(&format!("Disable DML triggers on {}", p.t.pair.target));
+                }
+                w.sql(&trigger_sql(&p.t.pair.target, tr, tg.is_table, "DISABLE"));
             }
         }
     }
-    for (table, fk) in &fks {
-        print(&mut w, &format!("Drop constraints from {table}"));
-        w.statement(&format!("ALTER TABLE {} NOCHECK CONSTRAINT {}", table.quoted(), quote(fk)));
-    }
-    for (table, tr) in &triggers {
-        w.statement(&format!("DISABLE TRIGGER {} ON {}", crate::schema::ddl::qname(&table.schema, tr), table.quoted()));
-    }
-
-    let identity_tables: HashMap<ObjectName, bool> = target.tables.iter().map(|t| (t.object_name(), t.columns.iter().any(|c| c.identity.is_some()))).collect();
-
-    // Deletes and updates, children first.
-    for &i in order.iter().rev() {
-        let t = tables[i];
-        let p = &t.pair;
-        let name = p.target.quoted();
-        if settings.kinds[RowKind::OnlyIn2 as usize] && t.count(RowKind::OnlyIn2) > 0 {
-            print(&mut w, &format!("Delete {} row(s) from {}", t.count(RowKind::OnlyIn2), p.target));
-            for_each_row(t, RowKind::OnlyIn2, |row| {
-                let (where_, single) = key_where(t, &row.target);
-                if single {
-                    w.statement("SET ROWCOUNT 1");
+    if fk_mode {
+        for (i, p) in tables.iter().enumerate() {
+            let table = &p.t.pair.target;
+            let tg = target_of(target, table);
+            if tg.is_table {
+                for (n, fk) in tg.foreign_keys.iter().enumerate() {
+                    if n == 0 {
+                        w.print(&format!("Drop constraints from {table}"));
+                    }
+                    w.sql(&fk_off(table, fk, drop_indexes));
                 }
-                w.statement(&format!("DELETE FROM {name} WHERE {where_}"));
-                if single {
-                    w.statement("SET ROWCOUNT 0");
-                }
-            })?;
-        }
-        if settings.kinds[RowKind::Different as usize] && t.count(RowKind::Different) > 0 {
-            print(&mut w, &format!("Update {} row(s) in {}", t.count(RowKind::Different), p.target));
-            let identity_cols: Vec<usize> = (0..p.columns.len()).filter(|&c| p.columns[c].identity).collect();
-            let mut reinserted = Vec::new();
-            for_each_row(t, RowKind::Different, |row| {
-                // An identity value cannot be updated: the row is deleted and inserted again.
-                if identity_cols.iter().any(|&c| row.differs.get(c).copied().unwrap_or(false)) {
-                    reinserted.push(row.clone());
-                    return;
-                }
-                let sets: Vec<String> = (0..p.columns.len())
-                    .filter(|&c| row.differs.get(c).copied().unwrap_or(false) && !p.columns[c].read_only && !p.key.contains(&c))
-                    .map(|c| format!("{}={}", quote(&p.columns[c].target), value_sql(&row.source[c], &p.columns[c].target_type, &p.columns[c].source_type)))
-                    .collect();
-                if sets.is_empty() {
-                    return;
-                }
-                let (where_, single) = key_where(t, &row.target);
-                if single {
-                    w.statement("SET ROWCOUNT 1");
-                }
-                w.statement(&format!("UPDATE {name} SET {} WHERE {where_}", sets.join(", ")));
-                if single {
-                    w.statement("SET ROWCOUNT 0");
-                }
-            })?;
-            for row in &reinserted {
-                let (where_, _) = key_where(t, &row.target);
-                w.statement(&format!("DELETE FROM {name} WHERE {where_}"));
             }
-            if !reinserted.is_empty() {
-                insert_rows(&mut w, t, reinserted.iter(), true);
+            for (other, fk) in extra_fks[order[i]].iter().filter(|(_, fk)| !fk.disabled) {
+                w.print(&format!("Drop constraint {} from {other}", quote(&fk.name)));
+                w.sql(&fk_off(other, fk, drop_indexes));
             }
         }
     }
-    // Inserts, parents first.
-    for &i in &order {
-        let t = tables[i];
-        let p = &t.pair;
-        if settings.kinds[RowKind::OnlyIn1 as usize] && t.count(RowKind::OnlyIn1) > 0 {
-            print(&mut w, &format!("Add {} row(s) to {}", t.count(RowKind::OnlyIn1), p.target));
-            let has_identity = identity_tables.get(&p.target).copied().unwrap_or(false);
-            let mut rows = Vec::new();
-            for_each_row(t, RowKind::OnlyIn1, |row| rows.push(row))?;
-            insert_rows(&mut w, t, rows.iter(), has_identity);
+    for clustered in [false, true] {
+        for p in &tables {
+            for (n, ix) in droppable(p, clustered).into_iter().enumerate() {
+                if n == 0 {
+                    w.print(&format!("Drop unused indexes from {}", p.t.pair.target));
+                }
+                w.sql(&ddl::drop_index(&p.t.pair.target.quoted(), ix));
+            }
+        }
+    }
+    for p in &tables {
+        for ix in target_of(target, &p.t.pair.target).indexes.iter().filter(|i| i.kind == IndexKind::NonclusteredColumnstore && !i.disabled) {
+            w.go();
+            w.sql(&format!("ALTER INDEX {} ON {} DISABLE", quote(&ix.name), p.t.pair.target));
+            w.go();
         }
     }
 
-    for (table, tr) in &triggers {
-        w.statement(&format!("ENABLE TRIGGER {} ON {}", crate::schema::ddl::qname(&table.schema, tr), table.quoted()));
+    // Rows: deletes and updates children first, inserts parents first.
+    let fetch = Fetch { spec: settings.source_connection.as_ref() };
+    for p in &tables {
+        if p.delete {
+            write_deletes(&mut w, p, target, by_row, &mut warnings)?;
+        }
     }
-    for (table, fk) in &fks {
-        print(&mut w, &format!("Add constraints to {table}"));
-        let check = if opts.has(DataOpt::SkipFkChecks) { "" } else { "WITH CHECK " };
-        w.statement(&format!("ALTER TABLE {} {check}CHECK CONSTRAINT {}", table.quoted(), quote(fk)));
+    for p in &tables {
+        for c in &p.t.pair.columns {
+            if let Some(check) = mapping::type_check(&c.source_type, &c.target_type, None, None)
+                && check.has("TypeConversion")
+            {
+                warnings.push(Warning {
+                    severity: Severity::Medium,
+                    object: p.t.pair.target.to_string(),
+                    message: format!(
+                        "Conversion from field of type '{}' to field of type '{}' might not be possible.\n\nSource Field: {}.{}\nTarget Field: {}.{}",
+                        c.source_type.sql(),
+                        c.target_type.sql(),
+                        p.t.pair.source,
+                        quote(&c.source),
+                        p.t.pair.target,
+                        quote(&c.target)
+                    ),
+                });
+            }
+        }
     }
+    for p in &tables {
+        if p.update {
+            write_updates(&mut w, p, target, opts, by_row, &fetch, &mut warnings)?;
+        }
+    }
+    for p in tables.iter().rev() {
+        if p.add {
+            write_inserts(&mut w, p, target, opts, by_row, &fetch, &mut warnings)?;
+        }
+    }
+
+    // Restore: clustered indexes, nonclustered indexes, foreign keys, triggers, columnstore.
+    for clustered in [true, false] {
+        for p in &tables {
+            let table = p.t.pair.target.quoted();
+            for (n, ix) in droppable(p, clustered).into_iter().enumerate() {
+                if n == 0 {
+                    w.print(&format!("Add indexes to {}", p.t.pair.target));
+                }
+                for s in ddl::create_index(&table, ix) {
+                    w.sql(&s);
+                }
+            }
+        }
+    }
+    if fk_mode {
+        for (i, p) in tables.iter().enumerate() {
+            let table = &p.t.pair.target;
+            let tg = target_of(target, table);
+            if tg.is_table {
+                for (n, fk) in tg.foreign_keys.iter().enumerate() {
+                    if n == 0 {
+                        w.print(&format!("Add constraints to {table}"));
+                    }
+                    for s in fk_on(table, fk, drop_indexes, opts) {
+                        w.sql(&s);
+                    }
+                }
+            }
+            for (other, fk) in extra_fks[order[i]].iter().filter(|(_, fk)| !fk.disabled) {
+                for s in fk_on(other, fk, drop_indexes, opts) {
+                    w.sql(&s);
+                }
+            }
+        }
+    }
+    if opts.has(DataOpt::DisableTriggers) {
+        for p in &tables {
+            let tg = target_of(target, &p.t.pair.target);
+            for (n, tr) in tg.triggers.iter().filter(|tr| !tr.disabled).enumerate() {
+                if n == 0 {
+                    w.print(&format!("Add DML triggers to {}", p.t.pair.target));
+                }
+                w.sql(&trigger_sql(&p.t.pair.target, tr, tg.is_table, "ENABLE"));
+            }
+        }
+    }
+    for p in &tables {
+        for ix in target_of(target, &p.t.pair.target).indexes.iter().filter(|i| i.kind == IndexKind::NonclusteredColumnstore && !i.disabled) {
+            w.sql(&format!("ALTER INDEX {} ON {} REBUILD", quote(&ix.name), p.t.pair.target));
+        }
+    }
+
+    // Trailer.
     if transactions {
-        w.statement("COMMIT TRANSACTION");
+        w.sql("");
+        w.sql("COMMIT TRANSACTION");
+        w.go();
     }
-    w.flush();
+    for name in ddl_triggers {
+        w.print(&format!("Enable DDL trigger {}", quote(name)));
+        w.go();
+        w.sql(&format!("ENABLE TRIGGER {} ON DATABASE", quote(name)));
+        w.go();
+    }
     if opts.has(DataOpt::ReseedIdentity) {
-        for t in &tables {
-            if identity_tables.get(&t.pair.target).copied().unwrap_or(false) {
-                w.batch(&format!("DBCC CHECKIDENT({})", literal(&t.pair.target.quoted())));
+        for p in &plans {
+            let t = p.t;
+            let tg = target.table(&t.pair.target.schema, &t.pair.target.name);
+            let increment = tg
+                .and_then(|tg| tg.columns.iter().find_map(|c| c.identity.as_ref()))
+                .and_then(|i| i.increment.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            if let (Some(src), Some(dst)) = t.identity_current
+                && src != dst
+                && increment != 0.0
+                && t.pair.columns.iter().any(|c| c.identity && c.source_identity)
+            {
+                let name = t.pair.target.to_string();
+                w.print(&format!("Reseed identity on {name}"));
+                w.sql(&format!("DBCC CHECKIDENT(N'{name}', RESEED, {src})"));
+                w.sql(&format!("DBCC CHECKIDENT(N'{name}', RESEED)"));
+                w.go();
             }
         }
+        w.go();
     }
-    if !transactions {
+    w.finish();
+    if w.split {
         warnings.push(Warning {
-            severity: Severity::High,
+            severity: Severity::Medium,
             object: String::new(),
-            message: "the script does not use a transaction; a failure leaves the data partly changed".into(),
+            message: "The resulting script contains multiple transactions and cannot be rolled back in entirety".into(),
         });
     }
+    let mut seen = HashSet::new();
+    warnings.retain(|x| seen.insert((x.object.clone(), x.message.clone())));
     Ok(DeploymentScript { sql: w.text, warnings, batches: w.batches })
 }
 
-fn for_each_row(t: &TableResult, kind: RowKind, mut f: impl FnMut(StoredRow)) -> Result<(), String> {
+fn trigger_sql(table: &ObjectName, tr: &Trigger, is_table: bool, verb: &str) -> String {
+    if is_table {
+        format!("ALTER TABLE {table} {verb} TRIGGER {}", quote(&tr.name))
+    } else {
+        // ALTER TABLE cannot name a view.
+        format!("{verb} TRIGGER {} ON {table}", ddl::qname(&table.schema, &tr.name))
+    }
+}
+
+fn fk_off(table: &ObjectName, fk: &ForeignKey, drop: bool) -> String {
+    if drop {
+        format!("ALTER TABLE {table} DROP CONSTRAINT {}", quote(&fk.name))
+    } else {
+        format!("ALTER TABLE {table} NOCHECK CONSTRAINT {}", quote(&fk.name))
+    }
+}
+
+fn fk_on(table: &ObjectName, fk: &ForeignKey, dropped: bool, opts: &DataOptions) -> Vec<String> {
+    if dropped {
+        return ddl::add_foreign_key(&table.quoted(), fk, false);
+    }
+    if fk.disabled {
+        Vec::new()
+    } else if fk.not_trusted || opts.has(DataOpt::SkipFkChecks) {
+        vec![format!("ALTER TABLE {table} CHECK CONSTRAINT {}", quote(&fk.name))]
+    } else {
+        vec![format!("ALTER TABLE {table} WITH CHECK CHECK CONSTRAINT {}", quote(&fk.name))]
+    }
+}
+
+/// `M/d/yyyy h:mm:ss tt` (UTC).
+fn now_text() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let Some(t) = chrono::DateTime::from_timestamp(secs, 0) else { return String::new() };
+    let t = t.naive_utc();
+    use chrono::{Datelike, Timelike};
+    let h = t.hour();
+    let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+    format!("{}/{}/{} {h12}:{:02}:{:02} {} UTC", t.month(), t.day(), t.year(), t.minute(), t.second(), if h < 12 { "AM" } else { "PM" })
+}
+
+/// Reads full values of large columns from database 1 when a row is written.
+struct Fetch<'a> {
+    spec: Option<&'a ConnectionSpec>,
+}
+
+impl Fetch<'_> {
+    fn complete(&self, pair: &TablePair, values: &mut [Value]) -> Result<(), String> {
+        for c in 0..values.len() {
+            if matches!(values[c], Value::Large(..)) {
+                let spec = self.spec.ok_or_else(|| format!("{}: a large value of {} needs a connection to database 1", pair.source, pair.columns[c].source))?;
+                values[c] = compare::fetch_value(spec, pair, c, values)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn for_each_row(t: &TableResult, kind: RowKind, mut f: impl FnMut(u64, StoredRow) -> Result<(), String>) -> Result<(), String> {
+    const PAGE: usize = 10_000;
     let offsets = &t.offsets[kind as usize];
     let mut start = 0;
     while start < offsets.len() {
-        for row in store::read_page(&t.path, offsets, start, PAGE).map_err(|e| e.to_string())? {
-            f(row);
+        for (i, row) in store::read_page(&t.path, offsets, start, PAGE).map_err(|e| e.to_string())?.into_iter().enumerate() {
+            f((start + i) as u64, row)?;
         }
         start += PAGE;
     }
     Ok(())
 }
 
-fn value_sql(v: &Value, target: &DataType, source: &DataType) -> String {
-    match v {
-        Value::Bytes(_) if target.schema.is_some() || matches!(target.name.as_str(), "hierarchyid" | "geography" | "geometry") => {
-            format!("CAST({} AS {})", v.literal("varbinary"), target.sql())
-        }
-        // N'' follows the source type: Unicode data keeps its characters until the server converts it.
-        Value::Str(_) => {
-            let unicode = !matches!(source.name.as_str(), "char" | "varchar" | "text") || !matches!(target.name.as_str(), "char" | "varchar" | "text");
-            v.literal(if unicode { "nvarchar" } else { "varchar" })
-        }
-        Value::DateTime(_) if target.name == "date" => v.literal("date"),
-        other => other.literal(&target.name),
+fn literal_ctx<'a>(c: &'a ColumnPair, clr_as_text: bool, target_table: &'a str) -> Literal<'a> {
+    Literal {
+        source: &c.source_type,
+        target: &c.target_type,
+        source_collation: c.source_collation.as_deref(),
+        target_collation: c.target_collation.as_deref(),
+        clr_as_text,
+        // Node and edge ids name their table; $from_id and $to_id point at other tables.
+        graph_table: c.graph.as_deref().filter(|g| matches!(*g, "$node_id" | "$edge_id")).map(|_| target_table),
     }
 }
 
-/// `[k1] = v1 AND [k2] = v2`; with repeated keys every comparable column is matched and
-/// `true` asks for SET ROWCOUNT 1.
-fn key_where(t: &TableResult, values: &[Value]) -> (String, bool) {
-    let p = &t.pair;
-    let comparable = |c: usize| {
-        let ty = &p.columns[c].target_type;
-        !(matches!(ty.name.as_str(), "text" | "ntext" | "image" | "xml" | "geography" | "geometry") || ty.schema.is_some() || ty.length == Some(-1))
+fn is_inexact(c: &ColumnPair) -> bool {
+    let t = &c.target_type;
+    matches!(t.name.as_str(), "timestamp" | "rowversion" | "text" | "ntext" | "xml" | "image") || t.length == Some(-1)
+}
+
+/// ` WITH ( SNAPSHOT)` for memory-optimised tables inside a transaction.
+fn hint(target: &Database, table: &ObjectName, transactions: bool) -> &'static str {
+    if transactions && target_of(target, table).memory_optimized { " WITH ( SNAPSHOT)" } else { "" }
+}
+
+/// The WHERE condition for a row of the target: the key, or every comparable column when keys
+/// repeat, then the table's filter.
+fn where_sql(p: &TablePair, repeated: bool, values: &[Value], warnings: &mut Vec<Warning>) -> String {
+    let mut parts = Vec::new();
+    let mut inexact = false;
+    let cols: Vec<usize> = if repeated { (0..p.columns.len()).collect() } else { p.key.clone() };
+    for c in cols {
+        let col = &p.columns[c];
+        if is_inexact(col) {
+            inexact = true;
+            continue;
+        }
+        let name = quote(&col.target);
+        let lit = Literal { source: &col.target_type, graph_table: None, ..literal_ctx(col, false, "") };
+        let part = match &values[c] {
+            Value::Null => format!("{name} IS NULL"),
+            v @ Value::Clr(..) if matches!(col.target_type.name.as_str(), "geometry" | "geography") => format!("{name}.STEquals({})=1", v.sql(&lit)),
+            Value::Str(s) if Literal { source: &col.source_type, ..literal_ctx(col, false, "") }.source_needs_n() && !matches!(col.target_type.name.as_str(), "nchar" | "nvarchar" | "ntext" | "sysname") && col.graph.is_none() => {
+                let size = col.target_type.length.map(|l| if l < 0 { "max".to_string() } else { l.to_string() }).unwrap_or_else(|| "max".into());
+                let coll = col.target_collation.as_deref().unwrap_or("DATABASE_DEFAULT");
+                format!("{name} = cast({} COLLATE {coll} as {}({size}))", sql_string(s, true), col.target_type.name)
+            }
+            Value::Str(s) if col.graph.is_none() => {
+                let n = Literal { source: &col.source_type, ..literal_ctx(col, false, "") }.source_needs_n();
+                format!("{name} = {}", sql_string(s, n))
+            }
+            v => format!("{name} = {}", v.sql(&lit)),
+        };
+        parts.push(part);
+    }
+    if inexact && repeated {
+        warnings.push(Warning {
+            severity: Severity::High,
+            object: p.target.to_string(),
+            message: format!(
+                "Unable to use a full row-based where clause on table or view {} with repeating comparison keys; results may not be as expected. Table or view contains text, image, or xml data types.",
+                p.target
+            ),
+        });
+    }
+    let mut out = parts.join(" AND ");
+    if let Some(filter) = p.where2.as_deref().map(strip_filter).filter(|f| !f.is_empty()) {
+        out = if out.is_empty() { format!(" ({filter})") } else { format!("{out} AND ({filter})") };
+    }
+    out
+}
+
+/// A user filter without a leading WHERE and one pair of outer parentheses.
+fn strip_filter(f: &str) -> String {
+    let mut f = f.trim();
+    if f.len() > 5 && f[..5].eq_ignore_ascii_case("where") && f[5..].starts_with(char::is_whitespace) {
+        f = f[5..].trim();
+    }
+    if f.starts_with('(') && f.ends_with(')') {
+        let inner = &f[1..f.len() - 1];
+        let mut depth = 0i32;
+        let balanced = inner.chars().all(|c| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            depth >= 0
+        }) && depth == 0;
+        if balanced {
+            return inner.trim().to_string();
+        }
+    }
+    f.to_string()
+}
+
+fn write_deletes(w: &mut Writer, p: &Plan, target: &Database, by_row: bool, warnings: &mut Vec<Warning>) -> Result<(), String> {
+    let t = p.t;
+    let name = &t.pair.target;
+    let total = t.count(RowKind::OnlyIn2);
+    let repeated = t.repeated_keys;
+    let suffix = if repeated { " with non-unique comparison key" } else { "" };
+    let prefix = format!("DELETE FROM {name}{} WHERE ", hint(target, name, w.transactions));
+    let mut n = 0u64;
+    for_each_row(t, RowKind::OnlyIn2, |i, row| {
+        if !p.selected(RowKind::OnlyIn2, i) {
+            return Ok(());
+        }
+        if n == 0 {
+            if by_row {
+                w.print(&format!("Delete {} from {name}{suffix}", rows_word(total)));
+            } else {
+                w.print(&format!("Delete {total} {} from {name}{suffix}", rows_word(total)));
+            }
+            if repeated {
+                w.sql("SET ROWCOUNT 1");
+            }
+        }
+        n += 1;
+        w.sql(&format!("{prefix}{}", where_sql(&t.pair, repeated, &row.target, warnings)));
+        w.end_statement();
+        Ok(())
+    })?;
+    if n > 0 && repeated {
+        w.sql("SET ROWCOUNT 0");
+    }
+    if by_row && n > 0 && total > 1 {
+        w.print(&format!("Operation applied to {n} rows out of {total}"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_updates(w: &mut Writer, p: &Plan, target: &Database, opts: &DataOptions, by_row: bool, fetch: &Fetch, warnings: &mut Vec<Warning>) -> Result<(), String> {
+    let t = p.t;
+    let pair = &t.pair;
+    let name = &pair.target;
+    let tg = target_of(target, name);
+    let total = t.count(RowKind::Different);
+    let repeated = t.repeated_keys;
+    let clr_as_text = !opts.has(DataOpt::TransportClrBinary);
+    let target_name = name.name.clone();
+    let identity = (0..pair.columns.len()).find(|&c| pair.columns[c].identity);
+    let mut must_reinsert = identity.is_some_and(|c| !pair.key.contains(&c)) || tg.edge;
+    let differs = |c: usize| t.column_differences.get(c).copied().unwrap_or(0) > 0;
+    let candidates: Vec<usize> = (0..pair.columns.len()).filter(|&c| !pair.key.contains(&c) && differs(c)).collect();
+    let all_updatable = candidates.iter().all(|&c| !pair.columns[c].read_only);
+    if !candidates.iter().any(|&c| !pair.columns[c].read_only) && !tg.edge {
+        warnings.push(Warning {
+            severity: Severity::Low,
+            object: name.to_string(),
+            message: format!("Table {name} contains differences. However, these cannot be synchronized because no columns in the table can be updated."),
+        });
+        return Ok(());
+    }
+    if !p.add {
+        type_warnings(pair, opts, false, warnings);
+    }
+    let needs_reinsert = |row: &StoredRow| tg.edge || identity.is_some_and(|c| row.source.get(c) != row.target.get(c));
+    let suffix = if repeated { " with non-unique comparison key" } else { "" };
+    let message = |w: &mut Writer, reinsert: bool| {
+        if !by_row && all_updatable {
+            let text = if reinsert && tg.edge {
+                format!("Delete and re-insert {total} {} in {name} due to table being a SQL Graph EDGE table{suffix}", rows_word(total))
+            } else if reinsert {
+                format!("Delete and re-insert {total} {} in {name} due to identity row modification{suffix}", rows_word(total))
+            } else {
+                format!("Update {total} {} in {name}{suffix}", rows_word(total))
+            };
+            w.print(&text);
+        } else if reinsert {
+            w.print(&format!("Delete and re-insert {} in {name} due to identity row modification{suffix}", rows_word(total)));
+        } else {
+            w.print(&format!("Update {} in {name}{suffix}", rows_word(total)));
+        }
+        if repeated {
+            w.sql("SET ROWCOUNT 1");
+        }
     };
-    let cols: Vec<usize> = if t.repeated_keys { (0..p.columns.len()).filter(|&c| comparable(c)).collect() } else { p.key.clone() };
-    let parts: Vec<String> = cols
-        .iter()
-        .map(|&c| {
-            let col = quote(&p.columns[c].target);
-            match &values[c] {
-                Value::Null => format!("{col} IS NULL"),
-                v => format!("{col} = {}", value_sql(v, &p.columns[c].target_type, &p.columns[c].target_type)),
+    let mut header = false;
+    let mut reinserted = 0u64;
+    let h = hint(target, name, w.transactions);
+    // Rows whose identity changes (and every edge row) are deleted first, then inserted again.
+    if must_reinsert {
+        let mut deleted = 0u64;
+        for_each_row(t, RowKind::Different, |i, row| {
+            if !p.selected(RowKind::Different, i) {
+                return Ok(());
             }
-        })
-        .collect();
-    (parts.join(" AND "), t.repeated_keys)
+            if !header {
+                message(w, true);
+                header = true;
+            }
+            if needs_reinsert(&row) {
+                w.sql(&format!("DELETE FROM {name}{h} WHERE {}", where_sql(pair, repeated, &row.target, warnings)));
+                w.end_statement();
+                deleted += 1;
+            }
+            Ok(())
+        })?;
+        if deleted == 0 {
+            must_reinsert = false;
+        }
+    }
+    let mut updated = 0u64;
+    for_each_row(t, RowKind::Different, |i, row| {
+        if !p.selected(RowKind::Different, i) {
+            return Ok(());
+        }
+        if !header {
+            message(w, false);
+            header = true;
+        }
+        if must_reinsert && needs_reinsert(&row) {
+            return Ok(());
+        }
+        let mut source = row.source.clone();
+        let sets: Vec<usize> = candidates.iter().copied().filter(|&c| !pair.columns[c].read_only && row.differs.get(c).copied().unwrap_or(false)).collect();
+        if !sets.is_empty() {
+            fetch.complete(pair, &mut source)?;
+            let list: Vec<String> =
+                sets.iter().map(|&c| format!("{}={}", quote(&pair.columns[c].target), source[c].sql(&literal_ctx(&pair.columns[c], clr_as_text, &target_name)))).collect();
+            w.sql(&format!("UPDATE {name}{h} SET {} WHERE {}", list.join(", "), where_sql(pair, repeated, &row.target, warnings)));
+            updated += 1;
+        }
+        w.end_statement();
+        Ok(())
+    })?;
+    if must_reinsert {
+        let writable: Vec<usize> = (0..pair.columns.len()).filter(|&c| !pair.columns[c].read_only).collect();
+        let cols = writable.iter().map(|&c| quote(&pair.columns[c].target)).collect::<Vec<_>>().join(",");
+        if identity.is_some() && tg.is_table {
+            w.sql(&format!("SET IDENTITY_INSERT {name} ON"));
+        }
+        for_each_row(t, RowKind::Different, |i, row| {
+            if !p.selected(RowKind::Different, i) || !needs_reinsert(&row) {
+                return Ok(());
+            }
+            let mut source = row.source;
+            fetch.complete(pair, &mut source)?;
+            let values: Vec<String> = writable.iter().map(|&c| source[c].sql(&literal_ctx(&pair.columns[c], clr_as_text, &target_name))).collect();
+            w.sql(&format!("INSERT INTO {name} ({cols}) VALUES ({})", values.join(",")));
+            w.end_statement();
+            reinserted += 1;
+            Ok(())
+        })?;
+        if identity.is_some() && tg.is_table {
+            w.sql(&format!("SET IDENTITY_INSERT {name} OFF"));
+        }
+    }
+    if repeated {
+        w.sql("SET ROWCOUNT 0");
+    }
+    let n = if must_reinsert { reinserted.max(updated) } else { updated };
+    if n > 0 && (by_row || !all_updatable) && total > 1 {
+        w.print(&format!("Operation applied to {n} rows out of {total}"));
+    }
+    Ok(())
 }
 
-fn insert_rows<'a>(w: &mut Writer, t: &TableResult, rows: impl Iterator<Item = &'a StoredRow>, has_identity: bool) {
-    let p = &t.pair;
-    let writable: Vec<usize> = (0..p.columns.len()).filter(|&c| !p.columns[c].read_only).collect();
-    let identity = has_identity && writable.iter().any(|&c| p.columns[c].identity);
-    let name = p.target.quoted();
-    let cols = writable.iter().map(|&c| quote(&p.columns[c].target)).collect::<Vec<_>>().join(", ");
-    if identity {
-        w.statement(&format!("SET IDENTITY_INSERT {name} ON"));
-    }
-    for row in rows {
-        let values: Vec<String> =
-            writable.iter().map(|&c| value_sql(&row.source[c], &p.columns[c].target_type, &p.columns[c].source_type)).collect();
-        w.statement(&format!("INSERT INTO {name} ({cols}) VALUES ({})", values.join(", ")));
-    }
-    if identity {
-        w.statement(&format!("SET IDENTITY_INSERT {name} OFF"));
+/// The target-side type warnings of a table's column pairs.
+fn type_warnings(pair: &TablePair, opts: &DataOptions, force_collation: bool, warnings: &mut Vec<Warning>) {
+    let o = if force_collation { opts.clone().without(DataOpt::ForceBinaryCollation) } else { opts.clone() };
+    for c in &pair.columns {
+        if let Some(check) = mapping::type_check(&c.source_type, &c.target_type, c.source_collation.as_deref(), c.target_collation.as_deref()) {
+            let f1 = format!("{}.{}", pair.source, quote(&c.source));
+            let f2 = format!("{}.{}", pair.target, quote(&c.target));
+            for n in mapping::type_notes(&check, &f1, &f2, &pair.target, true, &o) {
+                warnings.push(Warning { severity: n.severity, object: pair.target.to_string(), message: n.text });
+            }
+        }
     }
 }
 
-/// Indexes into `tables`, referenced tables before the tables that reference them.
-fn dependency_order(tables: &[&TableResult], target: &Database) -> Vec<usize> {
-    let index: HashMap<ObjectName, usize> = tables.iter().enumerate().map(|(i, t)| (t.pair.target.clone(), i)).collect();
-    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); tables.len()];
+fn write_inserts(w: &mut Writer, p: &Plan, target: &Database, opts: &DataOptions, by_row: bool, fetch: &Fetch, warnings: &mut Vec<Warning>) -> Result<(), String> {
+    let t = p.t;
+    let pair = &t.pair;
+    let name = &pair.target;
+    let tg = target_of(target, name);
+    let total = t.count(RowKind::OnlyIn1);
+    let repeated = t.repeated_keys;
+    let clr_as_text = !opts.has(DataOpt::TransportClrBinary);
+    let target_name = name.name.clone();
+    let writable: Vec<usize> = (0..pair.columns.len()).filter(|&c| !pair.columns[c].read_only).collect();
+    let has_identity = tg.is_table && pair.columns.iter().any(|c| c.identity);
+    let prefix = format!("INSERT INTO {name} ({}) VALUES (", writable.iter().map(|&c| quote(&pair.columns[c].target)).collect::<Vec<_>>().join(", "));
+    type_warnings(pair, opts, true, warnings);
+    let suffix = if repeated { " with non-unique comparison key" } else { "" };
+    let mut n = 0u64;
+    for_each_row(t, RowKind::OnlyIn1, |i, row| {
+        if !p.selected(RowKind::OnlyIn1, i) {
+            return Ok(());
+        }
+        if n == 0 {
+            if by_row {
+                w.print(&format!("Add {} to {name}{suffix}", rows_word(total)));
+            } else {
+                w.print(&format!("Add {total} {} to {name}{suffix}", rows_word(total)));
+            }
+            if has_identity {
+                w.sql(&format!("SET IDENTITY_INSERT {name} ON"));
+            }
+            if repeated {
+                w.sql("SET ROWCOUNT 1");
+            }
+        }
+        n += 1;
+        let mut source = row.source;
+        fetch.complete(pair, &mut source)?;
+        let values: Vec<String> = writable.iter().map(|&c| source[c].sql(&literal_ctx(&pair.columns[c], clr_as_text, &target_name))).collect();
+        w.sql(&format!("{prefix}{})", values.join(", ")));
+        w.end_statement();
+        Ok(())
+    })?;
+    if n > 0 {
+        if has_identity {
+            w.sql(&format!("SET IDENTITY_INSERT {name} OFF"));
+        }
+        if repeated {
+            w.sql("SET ROWCOUNT 0");
+        }
+    }
+    if by_row && n > 0 && total > 1 {
+        w.print(&format!("Operation applied to {n} rows out of {total}"));
+    }
+    Ok(())
+}
+
+/// The order tables are deployed in (indexes into `plans`, deployed tables only): a table
+/// that depends on others comes before them, so deletes run children first and inserts (in
+/// reverse) parents first. Also returns, per plan, the foreign keys of other tables that must
+/// be disabled with it, and adds the circular-reference and undeployed-key warnings.
+fn dependency_order(plans: &[Plan], target: &Database, opts: &DataOptions, warnings: &mut Vec<Warning>) -> (Vec<usize>, Vec<Vec<(ObjectName, ForeignKey)>>) {
+    let names: Vec<&ObjectName> = plans.iter().map(|p| &p.t.pair.target).collect();
+    let mut extra: Vec<Vec<(ObjectName, ForeignKey)>> = vec![Vec::new(); plans.len()];
+    // "x depends on y" over the target database's objects.
+    let mut direct: HashSet<(ObjectName, ObjectName)> = HashSet::new();
+    for d in &target.dependencies {
+        if d.from != d.to {
+            direct.insert((d.from.clone(), d.to.clone()));
+        }
+    }
     for t in &target.tables {
-        let Some(&from) = index.get(&t.object_name()) else { continue };
         for fk in &t.foreign_keys {
-            if let Some(&to) = index.get(&fk.referenced_table)
-                && to != from
-            {
-                deps[from].push(to);
+            if fk.referenced_table != t.object_name() {
+                direct.insert((t.object_name(), fk.referenced_table.clone()));
             }
         }
     }
-    let mut order = Vec::new();
-    let mut state = vec![0u8; tables.len()];
-    fn visit(i: usize, deps: &[Vec<usize>], state: &mut [u8], order: &mut Vec<usize>) {
-        if state[i] != 0 {
-            return;
+    let graph = |n: &ObjectName| target.table(&n.schema, &n.name).and_then(|t| t.graph.clone());
+    for e in names.iter().filter(|n| graph(n).as_deref() == Some("EDGE")) {
+        for node in names.iter().filter(|n| graph(n).as_deref() == Some("NODE")) {
+            direct.insert(((*e).clone(), (*node).clone()));
         }
-        state[i] = 1;
-        for &d in &deps[i] {
-            visit(d, deps, state, order);
+    }
+    // Close over the compared tables: T → parent → child gives T → child; reaching T again is a cycle.
+    let mut deps = direct.clone();
+    let mut edges: Vec<(ObjectName, ObjectName)> = direct.iter().cloned().collect();
+    edges.sort();
+    let mut circular: BTreeSet<ObjectName> = BTreeSet::new();
+    let mut i = 0;
+    while i < edges.len() {
+        let (parent, child) = edges[i].clone();
+        for &t in &names {
+            if deps.contains(&(t.clone(), child.clone())) || !deps.contains(&(t.clone(), parent.clone())) {
+                continue;
+            }
+            if child == *t {
+                if circular.insert(t.clone()) {
+                    warnings.push(Warning { severity: Severity::High, object: t.to_string(), message: format!("Circular dependency for the table or view {t}") });
+                }
+            } else {
+                deps.insert((t.clone(), child.clone()));
+                edges.push((t.clone(), child.clone()));
+            }
         }
-        state[i] = 2;
-        order.push(i);
+        i += 1;
     }
-    for i in 0..tables.len() {
-        visit(i, &deps, &mut state, &mut order);
+    let is_table = |n: &ObjectName| target.table(&n.schema, &n.name).is_some();
+    let synced: Vec<bool> = plans.iter().map(Plan::synced).collect();
+    let n = synced.iter().filter(|s| **s).count();
+    let mut out: Vec<Option<usize>> = vec![None; n];
+    let mut slot = n;
+    let mut remaining: Vec<usize> = (0..plans.len()).collect();
+    let mut removed: HashSet<(usize, usize)> = HashSet::new();
+    let skip = opts.has(DataOpt::SkipFkChecks);
+    let severity = if skip { Severity::Medium } else { Severity::High };
+    for pass in 0.. {
+        let snapshot = std::mem::take(&mut remaining);
+        let mut placed = Vec::new();
+        for &x in &snapshot {
+            let blocked = snapshot.iter().any(|&y| y != x && synced[y] && is_table(names[y]) && deps.contains(&(names[x].clone(), names[y].clone())));
+            if blocked {
+                remaining.push(x);
+            } else {
+                if synced[x] {
+                    slot -= 1;
+                    out[slot] = Some(x);
+                }
+                placed.push(x);
+            }
+        }
+        if remaining.is_empty() {
+            break;
+        }
+        for &x in placed.iter().filter(|&&x| synced[x]) {
+            let (mut to, mut from) = (false, false);
+            for u in (0..plans.len()).filter(|&u| u != x) {
+                if !synced[u] {
+                    if direct.contains(&(names[x].clone(), names[u].clone())) {
+                        to = true;
+                    }
+                    if !removed.contains(&(u, x)) && direct.contains(&(names[u].clone(), names[x].clone())) && is_table(names[u]) {
+                        from = true;
+                    }
+                }
+                removed.insert((u, x));
+            }
+            let t = names[x];
+            if to {
+                let text = if skip {
+                    format!("The table {t} has foreign keys to other undeployed tables; the database may be left in an inconsistent state.")
+                } else {
+                    format!("The table {t} has foreign keys to other undeployed tables; the deployment script may fail when the keys are reinstated. To skip these integrity checks and leave the database without referential integrity, use \"Skip integrity checks for foreign key constraints\" under Deployment Behavior.")
+                };
+                warnings.push(Warning { severity, object: t.to_string(), message: text });
+            }
+            if from {
+                let text = if skip {
+                    format!("Undeployed tables have foreign keys to table {t}; the database may be left in an inconsistent state.")
+                } else {
+                    format!("Undeployed tables have foreign keys to table {t}; the deployment script may fail when the keys are reinstated.  To skip these integrity checks and leave the database without referential integrity, use \"Skip integrity checks for foreign key constraints\" under Deployment Behavior.")
+                };
+                warnings.push(Warning { severity, object: t.to_string(), message: text });
+            }
+        }
+        if pass + 1 > plans.len() {
+            for &x in &remaining {
+                if synced[x] && slot > 0 {
+                    slot -= 1;
+                    out[slot] = Some(x);
+                }
+            }
+            break;
+        }
     }
-    order
+    // Foreign keys of tables that are not deployed and reference a deployed one go off with it.
+    let deployed: HashSet<&ObjectName> = (0..plans.len()).filter(|&i| synced[i]).map(|i| names[i]).collect();
+    for x in (0..plans.len()).filter(|&i| synced[i]) {
+        for t in target.tables.iter().filter(|t| !deployed.contains(&t.object_name())) {
+            for fk in t.foreign_keys.iter().filter(|fk| fk.referenced_table == *names[x]) {
+                if !extra[x].iter().any(|(o, f)| *o == t.object_name() && f.name == fk.name) {
+                    extra[x].push((t.object_name(), fk.clone()));
+                }
+            }
+        }
+    }
+    (out.into_iter().flatten().collect(), extra)
 }
 
-#[derive(Default)]
+/// Builds the script the way SQL Data Compare's execution block does: each statement on its
+/// own line(s), `GO` only when something was written since the last one, PRINT comments
+/// preceded by a blank line.
 struct Writer {
     text: String,
     batches: Vec<String>,
     current: String,
-    count: usize,
+    written: bool,
+    comments: bool,
+    transactions: bool,
+    max_bytes: Option<u64>,
+    since_split: u64,
+    split: bool,
 }
 
 impl Writer {
-    fn raw(&mut self, s: &str) {
-        self.text.push_str(s);
+    fn new(comments: bool, max_bytes: Option<u64>, transactions: bool) -> Writer {
+        Writer { text: String::new(), batches: Vec::new(), current: String::new(), written: false, comments, transactions, max_bytes, since_split: 0, split: false }
     }
 
-    fn batch(&mut self, sql: &str) {
-        self.flush();
-        self.text.push_str(sql);
-        self.text.push_str("\r\nGO\r\n");
-        self.batches.push(sql.to_string());
-    }
-
-    fn statement(&mut self, sql: &str) {
-        let _ = write!(self.current, "{}\r\n", sql.replace("\r\n", "\n").replace('\n', "\r\n"));
-        self.count += 1;
-        if self.count >= BATCH {
-            self.flush();
-        }
-    }
-
-    fn flush(&mut self) {
-        if self.current.is_empty() {
+    /// One statement (or nothing, for ""), with a line break added when it lacks one.
+    fn sql(&mut self, s: &str) {
+        self.written = true;
+        if s.is_empty() {
             return;
         }
-        let batch = std::mem::take(&mut self.current);
-        self.text.push_str(&batch);
+        let mut s = s.replace("\r\n", "\n").replace('\n', "\r\n");
+        if !s.ends_with('\n') {
+            s.push_str("\r\n");
+        }
+        if self.current.len() + s.len() > EXEC_CHUNK && !self.current.trim().is_empty() {
+            self.batches.push(std::mem::take(&mut self.current));
+        }
+        self.since_split += s.len() as u64;
+        self.text.push_str(&s);
+        self.current.push_str(&s);
+    }
+
+    fn print(&mut self, message: &str) {
+        if self.comments {
+            self.sql(&format!("\r\nPRINT({})", sql_string(message, true)));
+        }
+    }
+
+    fn go(&mut self) {
+        if !self.written {
+            return;
+        }
         self.text.push_str("GO\r\n");
-        self.batches.push(batch);
-        self.count = 0;
+        if !self.current.trim().is_empty() {
+            self.batches.push(std::mem::take(&mut self.current));
+        }
+        self.current.clear();
+        self.written = false;
+    }
+
+    /// After each row statement: start a new transaction when this one has grown too large.
+    fn end_statement(&mut self) {
+        let Some(max) = self.max_bytes else { return };
+        if self.since_split <= max {
+            return;
+        }
+        if self.transactions {
+            self.split = true;
+            self.sql("COMMIT TRANSACTION");
+            self.go();
+            self.sql("BEGIN TRANSACTION");
+        } else {
+            self.go();
+        }
+        self.since_split = 0;
+    }
+
+    fn finish(&mut self) {
+        if !self.current.trim().is_empty() {
+            self.batches.push(std::mem::take(&mut self.current));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{Column, DataType, Identity, IndexColumn, Table};
+    use crate::data::mapping::{DataMappings, map_tables};
+    use crate::data::store::{Session, TableWriter};
+
+    fn col(name: &str, t: &str) -> Column {
+        Column { name: name.into(), data_type: DataType { name: t.into(), ..Default::default() }, nullable: true, ..Default::default() }
+    }
+
+    fn table(name: &str, cols: Vec<Column>, fks: Vec<ForeignKey>) -> Table {
+        Table {
+            schema: "dbo".into(),
+            name: name.into(),
+            indexes: vec![Index {
+                name: format!("PK_{name}"),
+                primary_key: true,
+                unique: true,
+                kind: IndexKind::Clustered,
+                columns: vec![IndexColumn { name: cols[0].name.clone(), descending: false }],
+                ..Default::default()
+            }],
+            columns: cols,
+            foreign_keys: fks,
+            ..Default::default()
+        }
+    }
+
+    /// The worked example: Orders references Customers; one delete, one update, two inserts.
+    fn example() -> (DataComparison, Database) {
+        let mut cid = col("CustomerID", "int");
+        cid.identity = Some(Identity { seed: "1".into(), increment: "1".into(), not_for_replication: false });
+        let mut email = col("Email", "varchar");
+        email.data_type.length = Some(100);
+        email.collation = Some("Latin1_General_CI_AS".into());
+        let mut oid = col("OrderID", "int");
+        oid.identity = cid.identity.clone();
+        let customers = table("Customers", vec![cid, col("Name", "nvarchar"), email], vec![]);
+        let fk = ForeignKey {
+            name: "FK_Orders_Customers".into(),
+            columns: vec!["CustomerID".into()],
+            referenced_table: ObjectName::new("dbo", "Customers"),
+            referenced_columns: vec!["CustomerID".into()],
+            on_delete: "NO_ACTION".into(),
+            on_update: "NO_ACTION".into(),
+            ..Default::default()
+        };
+        let orders = table("Orders", vec![oid, col("CustomerID", "int"), col("Amount", "money"), col("OrderDate", "datetime")], vec![fk]);
+        let db = Database { tables: vec![customers, orders], ..Default::default() };
+        let (pairs, _, _) = map_tables(&db, &db, &DataOptions::default_set(), &DataMappings::default());
+        let session = Session::create().unwrap();
+        let rows = |i: usize, rows: Vec<StoredRow>| {
+            let path = session.table_path(i);
+            let mut w = TableWriter::create(&path, false).unwrap();
+            for r in &rows {
+                w.write(r).unwrap();
+            }
+            (path, w.finish().unwrap())
+        };
+        let s = |v: &str| Value::Str(v.into());
+        let (p0, o0) = rows(0, vec![
+            StoredRow { kind: RowKind::Different, source: vec![Value::Int(1), s("Alice O'Neil"), s("a@x")], target: vec![Value::Int(1), s("Alice"), s("a@x")], differs: vec![false, true, false] },
+            StoredRow { kind: RowKind::OnlyIn1, source: vec![Value::Int(5), s("Bob"), s("bob@example.com")], target: vec![], differs: vec![] },
+        ]);
+        let (p1, o1) = rows(1, vec![
+            StoredRow { kind: RowKind::OnlyIn2, source: vec![], target: vec![Value::Int(3), Value::Int(1), Value::Decimal(10000, 4), Value::Null], differs: vec![] },
+            StoredRow {
+                kind: RowKind::OnlyIn1,
+                source: vec![Value::Int(10), Value::Int(5), Value::Decimal(999500, 4), Value::DateTime(739_920 * 86_400_000_000_000 + 9 * 3_600_000_000_000 + 30 * 60_000_000_000)],
+                target: vec![],
+                differs: vec![],
+            },
+        ]);
+        let result = |pair: TablePair, path, offsets, counts, diffs| TableResult {
+            pair,
+            counts,
+            offsets,
+            path,
+            error: None,
+            by_checksum: false,
+            repeated_keys: false,
+            identity_current: (None, None),
+            column_differences: diffs,
+        };
+        let mut pairs = pairs.into_iter();
+        let tables = vec![
+            result(pairs.next().unwrap(), p0, o0, [0, 1, 1, 0], vec![0, 1, 0]),
+            result(pairs.next().unwrap(), p1, o1, [0, 0, 1, 1], vec![0, 0, 0, 0]),
+        ];
+        (DataComparison { session, tables, only_in_1: vec![], only_in_2: vec![], ddl_triggers: vec![] }, db)
+    }
+
+    #[test]
+    fn script_layout() {
+        let (result, db) = example();
+        let settings = SyncSettings::new("DEV.Shop", "PROD.Shop", "Shop");
+        let script = generate(&result, &db, &DataOptions::default_set(), &settings).unwrap();
+        let header_end = script.sql.find("*/\r\n\t\t\r\n").expect("header ends with two tabs") + 8;
+        assert!(script.sql.starts_with("/*\r\nRun this script on:\r\n\r\nPROD.Shop    -  This database will be modified\r\n\r\nto synchronize it with:\r\n\r\nDEV.Shop\r\n"));
+        let body = &script.sql[header_end..];
+        let expected = "SET NUMERIC_ROUNDABORT OFF\r\nGO\r\n\
+SET ANSI_PADDING, ANSI_WARNINGS, CONCAT_NULL_YIELDS_NULL, ARITHABORT, QUOTED_IDENTIFIER, ANSI_NULLS, NOCOUNT ON\r\nGO\r\n\
+SET DATEFORMAT YMD\r\nGO\r\nSET XACT_ABORT ON\r\nGO\r\nSET TRANSACTION ISOLATION LEVEL SERIALIZABLE\r\nGO\r\nBEGIN TRANSACTION\r\n\
+\r\nPRINT(N'Drop constraints from [dbo].[Orders]')\r\n\
+ALTER TABLE [dbo].[Orders] NOCHECK CONSTRAINT [FK_Orders_Customers]\r\n\
+\r\nPRINT(N'Delete 1 row from [dbo].[Orders]')\r\n\
+DELETE FROM [dbo].[Orders] WHERE [OrderID] = 3\r\n\
+\r\nPRINT(N'Update 1 row in [dbo].[Customers]')\r\n\
+UPDATE [dbo].[Customers] SET [Name]=N'Alice O''Neil' WHERE [CustomerID] = 1\r\n\
+\r\nPRINT(N'Add 1 row to [dbo].[Customers]')\r\n\
+SET IDENTITY_INSERT [dbo].[Customers] ON\r\n\
+INSERT INTO [dbo].[Customers] ([CustomerID], [Name], [Email]) VALUES (5, N'Bob', 'bob@example.com')\r\n\
+SET IDENTITY_INSERT [dbo].[Customers] OFF\r\n\
+\r\nPRINT(N'Add 1 row to [dbo].[Orders]')\r\n\
+SET IDENTITY_INSERT [dbo].[Orders] ON\r\n\
+INSERT INTO [dbo].[Orders] ([OrderID], [CustomerID], [Amount], [OrderDate]) VALUES (10, 5, 99.9500, '2026-11-01 09:30:00.000')\r\n\
+SET IDENTITY_INSERT [dbo].[Orders] OFF\r\n\
+\r\nPRINT(N'Add constraints to [dbo].[Orders]')\r\n\
+ALTER TABLE [dbo].[Orders] WITH CHECK CHECK CONSTRAINT [FK_Orders_Customers]\r\n\
+COMMIT TRANSACTION\r\nGO\r\n";
+        assert_eq!(body, expected);
+        assert!(script.warnings.is_empty(), "{:?}", script.warnings);
+
+        // No comments; drop instead of NOCHECK; tiny transactions.
+        let opts = DataOptions::default_set().with(DataOpt::DontOutputComments).with(DataOpt::DropConstraintsAndIndexes);
+        let split = SyncSettings { max_transaction_bytes: Some(1), ..SyncSettings::new("a.b", "c.d", "d") };
+        let script = generate(&result, &db, &opts, &split).unwrap();
+        assert!(!script.sql.contains("PRINT"));
+        assert!(script.sql.contains("ALTER TABLE [dbo].[Orders] DROP CONSTRAINT [FK_Orders_Customers]\r\n"));
+        assert!(script.sql.contains("ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [FK_Orders_Customers] FOREIGN KEY ([CustomerID]) REFERENCES [dbo].[Customers] ([CustomerID])"));
+        assert!(script.sql.contains("DELETE FROM [dbo].[Orders] WHERE [OrderID] = 3\r\nCOMMIT TRANSACTION\r\nGO\r\nBEGIN TRANSACTION\r\n"));
+        assert!(script.warnings.iter().any(|w| w.message == "The resulting script contains multiple transactions and cannot be rolled back in entirety"));
+
+        // Row-level selection: only the insert into Orders; the messages carry no counts up front.
+        let mut sel = [RowSelection::default(), RowSelection::default(), RowSelection::default(), RowSelection::default()];
+        sel[RowKind::OnlyIn2 as usize].included = false;
+        let mut only = SyncSettings::new("a.b", "c.d", "d");
+        only.selections.insert(ObjectName::new("dbo", "Orders"), sel);
+        only.tables = Some(vec![ObjectName::new("dbo", "Orders")]);
+        let script = generate(&result, &db, &DataOptions::default_set(), &only).unwrap();
+        assert!(!script.sql.contains("DELETE"));
+        assert!(script.sql.contains("PRINT(N'Add row to [dbo].[Orders]')"), "{}", script.sql);
+        assert!(!script.sql.contains("[dbo].[Customers] ("));
+    }
+
+    #[test]
+    fn cycles_are_reported() {
+        let fk = |name: &str, to: &str| ForeignKey { name: name.into(), columns: vec!["R".into()], referenced_table: ObjectName::new("dbo", to), referenced_columns: vec!["Id".into()], ..Default::default() };
+        let a = table("A", vec![col("Id", "int"), col("R", "int")], vec![fk("FK_A_B", "B")]);
+        let b = table("B", vec![col("Id", "int"), col("R", "int")], vec![fk("FK_B_A", "A")]);
+        let db = Database { tables: vec![a, b], ..Default::default() };
+        let (pairs, _, _) = map_tables(&db, &db, &DataOptions::default_set(), &DataMappings::default());
+        let session = Session::create().unwrap();
+        let tables: Vec<TableResult> = pairs
+            .into_iter()
+            .enumerate()
+            .map(|(i, pair)| {
+                let path = session.table_path(i);
+                let mut w = TableWriter::create(&path, false).unwrap();
+                w.write(&StoredRow { kind: RowKind::OnlyIn1, source: vec![Value::Int(1), Value::Null], target: vec![], differs: vec![] }).unwrap();
+                TableResult {
+                    pair,
+                    counts: [0, 0, 1, 0],
+                    offsets: w.finish().unwrap(),
+                    path,
+                    error: None,
+                    by_checksum: false,
+                    repeated_keys: false,
+                    identity_current: (None, None),
+                    column_differences: vec![],
+                }
+            })
+            .collect();
+        let result = DataComparison { session, tables, only_in_1: vec![], only_in_2: vec![], ddl_triggers: vec![] };
+        let script = generate(&result, &db, &DataOptions::default_set(), &SyncSettings::new("a.b", "c.d", "d")).unwrap();
+        let mut circular: Vec<&str> = script.warnings.iter().map(|w| w.message.as_str()).filter(|m| m.starts_with("Circular")).collect();
+        circular.sort();
+        assert_eq!(circular, ["Circular dependency for the table or view [dbo].[A]", "Circular dependency for the table or view [dbo].[B]"]);
+        assert_eq!(script.sql.matches("INSERT INTO").count(), 2);
+    }
+
+    #[test]
+    fn filters() {
+        assert_eq!(strip_filter("WHERE (a = 1)"), "a = 1");
+        assert_eq!(strip_filter("(a = 1) OR (b = 2)"), "(a = 1) OR (b = 2)");
     }
 }
