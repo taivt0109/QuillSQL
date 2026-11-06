@@ -338,8 +338,8 @@ impl<'a> W<'a> {
         let functions: Vec<&Routine> = db.routines.iter().filter(|r| !is_procedure(r)).collect();
         let procedures: Vec<&Routine> = db.routines.iter().filter(|r| is_procedure(r)).collect();
         self.coll(&functions, |w, r| w.function(r));
-        self.empty_coll(); // defaults
-        self.empty_coll(); // rules
+        self.coll(&db.defaults, |w, d| w.default_or_rule(d, "DEFAULT"));
+        self.coll(&db.rules, |w, r| w.default_or_rule(r, "RULE"));
         self.users();
         self.roles();
         // Alias types before table types, as SQL Compare lists them.
@@ -359,6 +359,18 @@ impl<'a> W<'a> {
         self.bool(false); // remote data archive
         self.empty_coll(); // full-text catalogs
         self.bool(cs);
+        // DDL triggers come after the comments store: their text goes in it now.
+        let ddl_triggers: Vec<(&DdlTrigger, i32)> = db
+            .ddl_triggers
+            .iter()
+            .map(|t| {
+                let id = self.id();
+                if t.clr_method.is_none() {
+                    self.text(id, t.definition.clone(), t.encrypted);
+                }
+                (t, id)
+            })
+            .collect();
         self.comments();
         for _ in 0..2 {
             // Assembly binaries and XML schema collection contents.
@@ -381,7 +393,7 @@ impl<'a> W<'a> {
         self.empty_coll(); // partition schemes
         self.schemas();
         self.empty_coll(); // database-level trigger list
-        self.coll(&db.ddl_triggers, W::ddl_trigger);
+        self.coll(&ddl_triggers, |w, (t, id)| w.ddl_trigger(t, *id));
         for _ in 0..5 {
             // Service bindings, certificates, symmetric keys, asymmetric keys, full-text stoplists.
             self.empty_coll();
@@ -1252,27 +1264,45 @@ impl<'a> W<'a> {
         self.no_ss(2);
     }
 
-    fn ddl_trigger(&mut self, t: &DdlTrigger) {
+    fn ddl_trigger(&mut self, t: &DdlTrigger, id: i32) {
         let cs = self.cs;
-        let id = self.id();
-        self.text(id, t.definition.clone(), t.encrypted);
         self.f32(VERSION);
         self.s(&t.name);
         self.str(None);
         self.i32(id);
         self.bool(cs);
         self.bool(t.disabled);
-        self.bool(false); // CLR
-        self.bool(true); // quoted identifier
-        self.bool(true); // ansi nulls
+        self.bool(t.clr_method.is_some());
+        self.bool(t.settings.quoted_identifier);
+        self.bool(t.settings.ansi_nulls);
         self.i32(id);
-        self.empty_coll(); // events (not modelled)
-        for _ in 0..3 {
-            self.str(None);
+        self.empty_coll(); // events (codes not mapped from names)
+        let method = t.clr_method.as_deref().map(split_multipart).unwrap_or_default();
+        for i in 0..3 {
+            self.str(method.get(i).map(String::as_str));
         }
-        self.i32(0); // EXECUTE AS CALLER
+        self.execute_as(t.execute_as.as_deref());
         self.no_eprops();
         self.bool(t.encrypted);
+        self.no_ss(1);
+    }
+
+    /// A CREATE DEFAULT or CREATE RULE object; `kind` is the extended-property level-1 type.
+    fn default_or_rule(&mut self, d: &BindableObject, kind: &str) {
+        self.f32(VERSION);
+        self.s(&d.name);
+        self.s(&d.schema);
+        let id = self.id();
+        self.i32(id);
+        self.s(&d.definition);
+        let db = self.db;
+        let props: Vec<ExtendedProperty> = db
+            .extended_properties
+            .iter()
+            .filter(|p| p.class == "OBJECT" && p.schema.as_deref() == Some(d.schema.as_str()) && p.object.as_deref() == Some(d.name.as_str()))
+            .map(|p| ExtendedProperty { class: kind.into(), ..p.clone() })
+            .collect();
+        self.eprops_of(&props.iter().collect::<Vec<_>>());
         self.no_ss(1);
     }
 
