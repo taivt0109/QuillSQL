@@ -1294,7 +1294,8 @@ impl<'a> W<'a> {
                 "EXTERNAL_USER" | "EXTERNAL_GROUP" => 5,
                 _ => 1,
             };
-            self.user(&p.name, p.login.as_deref(), user_type, p.default_schema.as_deref(), true);
+            let denied = self.db.permissions.iter().any(|x| x.class == "DATABASE" && x.grantee == p.name && x.permission.eq_ignore_ascii_case("CONNECT"));
+            self.user(&p.name, p.login.as_deref(), user_type, p.default_schema.as_deref(), !p.no_connect && !denied);
         }
     }
 
