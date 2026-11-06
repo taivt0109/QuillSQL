@@ -66,18 +66,9 @@ const BINDINGS: &str = include_str!("fixtures/compare/sources_bindings.sql");
 const SHOP_DATA: &str = include_str!("fixtures/compare/shop_data.sql");
 
 /// Object types our .snp files do not carry in full yet (the objects fixture).
-const NOT_IN_SNP: [ObjectType; 17] = [
+const NOT_IN_SNP: [ObjectType; 8] = [
     ObjectType::Assembly,
-    ObjectType::Contract,
-    ObjectType::EventNotification,
-    ObjectType::MessageType,
-    ObjectType::PartitionFunction,
-    ObjectType::PartitionScheme,
-    ObjectType::Queue,
-    ObjectType::Route,
     ObjectType::SecurityPolicy,
-    ObjectType::Service,
-    ObjectType::ServiceBinding,
     ObjectType::XmlSchemaCollection,
     ObjectType::Function,
     ObjectType::Role,
@@ -317,7 +308,11 @@ fn the_other_objects_round_trip_through_snapshots() {
     let live = catalog::read_database(&server.spec("QD_sources_Objects")).unwrap();
     server.drop("QD_sources_Objects");
     let opts = Options::default_set().without(Opt::IgnoreFileGroups).with(Opt::IgnoreCertificatesAndCryptoKeys);
-    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+    let bytes = quillsql::sources::snp_write::write(&live);
+    if let Ok(p) = std::env::var("QUILL_DUMP_SNP") {
+        std::fs::write(p, &bytes).unwrap();
+    }
+    let snp = quillsql::sources::snp::read(&bytes).unwrap();
     for (x, y) in [(&snp, &live), (&live, &snp)] {
         let c = schema::compare(x, y, &opts, &Mappings::default());
         let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal && !NOT_IN_SNP.contains(&d.object_type)).collect();

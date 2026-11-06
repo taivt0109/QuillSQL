@@ -8,6 +8,7 @@ mod objects;
 pub mod parse;
 pub mod scm;
 pub mod snp;
+pub mod snp_events;
 pub mod snp_write;
 pub mod sqlproj;
 pub mod staging;
