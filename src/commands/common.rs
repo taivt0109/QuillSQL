@@ -515,30 +515,64 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 }
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
-/// `/makebackup`: a native SQL Server backup of database 2 just before deploying, with
-/// `/backuptype`, `/backupfolder`, `/backupfile` and `/backupoverwriteexisting`.
-pub fn make_backup(args: &Args, target: &crate::db::ConnectionSpec) -> Result<(), ArgError> {
-    if !args.has("makebackup") {
+/// "Back up target before deployment" from `/makebackup` or the project's backup settings
+/// (`/backup…` switches override them, as SQL Compare's command line does): the backup becomes
+/// the first batch of the script. `target` is database 2 when it is a live database.
+pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOptions>, target: Option<&crate::db::ConnectionSpec>, script: &mut crate::schema::deploy::DeploymentScript) -> Result<(), ArgError> {
+    let mut o = project.filter(|b| b.enabled).cloned().unwrap_or_default();
+    if !args.has("makebackup") && !o.enabled {
         return Ok(());
     }
-    if args.get("backupprovider").is_some_and(|p| p.eq_ignore_ascii_case("sqb")) {
-        return Err(ArgError::new(exit::UNAVAILABLE, "/backupprovider:sqb (SQL Backup) is not supported by QuillSQL; use /backupprovider:native."));
+    o.enabled = true;
+    if let Some(p) = args.get("backupprovider") {
+        o.provider = p.to_ascii_lowercase();
     }
-    for name in ["backupcompression", "backupencryption", "backuppassword", "backupnumberofthreads"] {
-        if args.has(name) {
-            console::warn(&format!("/{name} applies to SQL Backup only and is ignored for a native backup."));
+    if let Some(t) = args.get("backuptype") {
+        o.differential = t.eq_ignore_ascii_case("differential");
+    }
+    if let Some(f) = args.get("backupfolder") {
+        o.folder = f.to_string();
+    }
+    match args.get("backupfile") {
+        Some(f) => {
+            o.file = f.to_string();
+            o.name_automatically = false;
+        }
+        None => o.name_automatically = true,
+    }
+    if args.has("backupoverwriteexisting") {
+        o.overwrite = true;
+    }
+    if let Some(c) = args.get("backupcompression").and_then(|c| c.parse().ok()) {
+        o.compression_level = c;
+    }
+    if args.has("backupencryption") {
+        o.encryption = "aes256".into();
+    }
+    o.password = args.get("backuppassword").map(str::to_string);
+    if let Some(n) = args.get("backupnumberofthreads").and_then(|n| n.parse().ok()) {
+        o.thread_count = n;
+    }
+    let Some(target) = target else {
+        if args.has("makebackup") {
+            return Err(ArgError::new(exit::USAGE, "/makebackup needs database 2 to be a live database."));
+        }
+        return Ok(());
+    };
+    let caps = crate::schema::backup::capabilities(target).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
+    if o.sqb() && caps.sqb_version == 0 {
+        return Err(ArgError::new(exit::UNAVAILABLE, format!("SQL Backup is not installed on {}; use /backupprovider:native.", target.server)));
+    }
+    if !o.sqb() {
+        for name in ["backupcompression", "backupencryption", "backuppassword", "backupnumberofthreads"] {
+            if args.has(name) {
+                console::warn(&format!("/{name} applies to SQL Backup only and is ignored for a native backup."));
+            }
         }
     }
-    let o = crate::schema::backup::BackupOptions {
-        folder: args.get("backupfolder").unwrap_or_default().to_string(),
-        file: args.get("backupfile").unwrap_or_default().to_string(),
-        name_automatically: !args.has("backupfile"),
-        overwrite: args.has("backupoverwriteexisting"),
-        differential: args.get("backuptype").is_some_and(|t| t.eq_ignore_ascii_case("differential")),
-    };
-    let path = crate::schema::backup::run(target, &o, &crate::schema::backup::stamp(), &|m: &str| console::verbose(m))
-        .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
-    console::verbose(&format!("Backed up database 2 to {path}"));
+    let plan = crate::schema::backup::Plan { options: &o, database: &target.database, utc: crate::schema::backup::utc_stamp(), caps: &caps };
+    console::verbose(&format!("Backing up {} to {} before deploying", target.database, plan.file()));
+    plan.add_to(script);
     Ok(())
 }
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
