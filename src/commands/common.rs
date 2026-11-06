@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use crate::args::{ArgError, Args, Switch, exit};
+use crate::catalog::{self, Database};
 use crate::db::{Auth, ConnectionSpec};
+use crate::schema::deploy;
 
 macro_rules! source_switches {
     ($n:literal) => {
@@ -77,6 +79,34 @@ macro_rules! source_switches {
 
 pub const SOURCE1: [Switch; 9] = source_switches!("1");
 pub const SOURCE2: [Switch; 9] = source_switches!("2");
+
+/// Switches for writing and running a deployment script.
+pub const DEPLOY: [Switch; 6] = [
+    Switch { name: "scriptfile", aliases: &["sf"], takes_value: true, repeatable: false, help: "Write the deployment script to a file" },
+    Switch { name: "synchronize", aliases: &["sync"], takes_value: false, repeatable: false, help: "Deploy the differences to database 2" },
+    Switch {
+        name: "abortOnWarnings",
+        aliases: &["aow"],
+        takes_value: true,
+        repeatable: false,
+        help: "None (default), Medium or High: stop before deploying when warnings this serious exist (exit 61)",
+    },
+    Switch { name: "showWarnings", aliases: &["warn"], takes_value: false, repeatable: false, help: "Print the deployment warnings" },
+    Switch {
+        name: "transactionIsolationLevel",
+        aliases: &["til"],
+        takes_value: true,
+        repeatable: false,
+        help: "Isolation level for the deployment transaction (default SERIALIZABLE)",
+    },
+    Switch {
+        name: "syncScriptEncoding",
+        aliases: &["senc"],
+        takes_value: true,
+        repeatable: false,
+        help: "UTF8WithPreamble (default), UTF8, Unicode or ASCII",
+    },
+];
 
 pub const GENERAL: [Switch; 4] = [
     Switch { name: "help", aliases: &["?"], takes_value: false, repeatable: false, help: "Show this help" },
@@ -154,4 +184,85 @@ pub fn check_output(path: &Path, args: &Args) -> Result<(), ArgError> {
 pub fn fail(e: ArgError) -> u8 {
     eprintln!("error: {}", e.message);
     e.code
+}
+
+pub fn write_script(args: &Args, script: &deploy::DeploymentScript) -> Result<(), ArgError> {
+    let Some(path) = args.get("scriptfile") else { return Ok(()) };
+    let path = Path::new(path);
+    check_output(path, args)?;
+    let bytes = match args.get("syncScriptEncoding").unwrap_or("UTF8WithPreamble").to_ascii_lowercase().as_str() {
+        "utf8withpreamble" => [&[0xEF, 0xBB, 0xBF][..], script.sql.as_bytes()].concat(),
+        "utf8" => script.sql.as_bytes().to_vec(),
+        "unicode" => [0xFF, 0xFE].into_iter().chain(script.sql.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
+        "ascii" => script.sql.chars().map(|c| if c.is_ascii() { c as u8 } else { b'?' }).collect(),
+        other => return Err(ArgError::new(exit::INVALID_VALUE, format!("/syncScriptEncoding: unknown encoding '{other}'"))),
+    };
+    std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{}: {e}", path.display())))?;
+    if !args.has("quiet") {
+        println!("Deployment script written to {}.", path.display());
+    }
+    Ok(())
+}
+
+pub fn report_warnings(args: &Args, script: &deploy::DeploymentScript) {
+    if script.warnings.is_empty() || args.has("quiet") {
+        return;
+    }
+    if args.has("showWarnings") || args.has("verbose") {
+        for w in &script.warnings {
+            let object = if w.object.is_empty() { String::new() } else { format!("{}: ", w.object) };
+            println!("({:?}) {object}{}", w.severity, w.message);
+        }
+    } else {
+        println!("{} deployment warning(s); add /showWarnings to list them.", script.warnings.len());
+    }
+}
+
+/// `/abortOnWarnings`: High stops on High warnings, Medium on Medium or High.
+pub fn check_warnings(args: &Args, script: &deploy::DeploymentScript) -> Result<(), ArgError> {
+    let level = match args.get("abortOnWarnings").map(str::to_ascii_lowercase).as_deref() {
+        None | Some("none") => return Ok(()),
+        Some("high") => deploy::Severity::High,
+        Some("medium") | Some("true") => deploy::Severity::Medium,
+        Some(other) => return Err(ArgError::new(exit::INVALID_VALUE, format!("/abortOnWarnings: unknown level '{other}'"))),
+    };
+    if let Some(w) = script.warnings.iter().find(|w| w.severity >= level) {
+        return Err(ArgError::new(
+            exit::ABORTED_ON_WARNINGS,
+            format!("stopped because of a {:?} warning: {} {}", w.severity, w.object, w.message),
+        ));
+    }
+    Ok(())
+}
+
+/// Reads one side of the comparison.
+pub fn load(source: &Source, args: &Args) -> Result<Database, ArgError> {
+    match source {
+        Source::Live(spec) => {
+            if args.has("verbose") {
+                eprintln!("Reading {}...", spec.describe());
+            }
+            catalog::read_database(spec)
+                .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
+        }
+        Source::Snapshot(path) => load_snapshot(path),
+    }
+}
+
+pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
+    let json = serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?;
+    std::fs::write(path, json).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{}: {e}", path.display())))
+}
+
+pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {
+    let bytes = std::fs::read(path).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{}: {e}", path.display())))?;
+    let db: Database = serde_json::from_slice(&bytes)
+        .map_err(|e| ArgError::new(exit::DATA_ERROR, format!("{} is not a QuillSQL snapshot: {e}", path.display())))?;
+    if db.model_version > catalog::MODEL_VERSION {
+        return Err(ArgError::new(
+            exit::DATA_ERROR,
+            format!("{} was made by a newer QuillSQL (format {}); update quill", path.display(), db.model_version),
+        ));
+    }
+    Ok(db)
 }

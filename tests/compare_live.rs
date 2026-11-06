@@ -318,3 +318,43 @@ fn data_compare_orders_awkward_keys() {
     server.drop("QuillTest_Data1");
     server.drop("QuillTest_Data2");
 }
+
+#[test]
+fn data_deployment_converges() {
+    use quillsql::data::compare::compare;
+    use quillsql::data::mapping::DataMappings;
+    use quillsql::data::store::RowKind;
+    use quillsql::data::{DataOptions, sync};
+    use quillsql::schema::deploy;
+    let Some(server) = server() else { return };
+    let base = format!("{SHOP}\nGO\n{KEYS}");
+    server.create("QuillTest_Sync1", &format!("{base}\nGO\n{SHOP_DATA}"));
+    // The target: some rows changed, some missing, some extra (including a new parent row).
+    let target_rows = "SET IDENTITY_INSERT dbo.Customer ON;\nINSERT INTO dbo.Customer (CustomerId, Name, Email, Balance, Notes) VALUES (1, N'An Nguyen', 'an@example.com', 10, N'x'), (7, N'Chi', 'chi@example.com', 6, NULL), (9, N'Dung', NULL, 1, N'it''s here');\nSET IDENTITY_INSERT dbo.Customer OFF;\nINSERT INTO Sales.[Order] (OrderId, CustomerId, Total, Status) VALUES (1, 1, 12.5, 'N'), (3, 7, 99.99, 'S'), (4, 9, 1, 'N');\nINSERT INTO Sales.OrderLine (OrderId, LineNumber, Qty) VALUES (4, 1, 1);\nUPDATE dbo.KeyText SET V = NULL WHERE Code = N'a';\nDELETE FROM dbo.KeyMixed WHERE A = 'y';";
+    let keys_copy = "DELETE FROM dbo.KeyGuid; INSERT INTO dbo.KeyGuid (Id, V) SELECT Id, V + 1 FROM QuillTest_Sync1.dbo.KeyGuid;";
+    server.create("QuillTest_Sync2", &format!("{base}\nGO\n{keys_copy}\nGO\n{target_rows}"));
+    let (s1, s2) = (server.spec("QuillTest_Sync1"), server.spec("QuillTest_Sync2"));
+    let db1 = catalog::read_database(&s1).unwrap();
+    let db2 = catalog::read_database(&s2).unwrap();
+    let opts = DataOptions::default_set();
+    let result = compare(&s1, &s2, &db1, &db2, &opts, &DataMappings::default(), |_| true, 4, |_, _| {}).unwrap();
+    assert!(!result.identical());
+    let settings = sync::SyncSettings {
+        source: "s".into(),
+        target: "t".into(),
+        target_database: "QuillTest_Sync2".into(),
+        transaction_isolation_level: "SERIALIZABLE".into(),
+        kinds: [false, true, true, true],
+    };
+    let script = sync::generate(&result, &db2, &opts, &settings).unwrap();
+    if let Err(e) = deploy::execute(&s2, &script, |_, _| {}) {
+        panic!("{e}\n\n{}", script.sql);
+    }
+    let after = compare(&s1, &s2, &db1, &db2, &opts, &DataMappings::default(), |_| true, 4, |_, _| {}).unwrap();
+    for t in &after.tables {
+        assert!(t.identical(), "{} still differs: {:?} {:?}\n\n{}", t.pair.source, t.counts, t.error, script.sql);
+    }
+    assert!(after.tables.iter().any(|t| t.count(RowKind::Identical) >= 500));
+    server.drop("QuillTest_Sync1");
+    server.drop("QuillTest_Sync2");
+}
