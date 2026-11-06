@@ -100,6 +100,8 @@ const CONTRACTS: [(&str, &str, i32, &[Usage]); 6] = [
     ),
     (SB, "ServiceEcho", 4, &[(SB, "ServiceEcho/Echo", true, true)]),
 ];
+/// A contract's message type as written: (`[name]`, sent by initiator, sent by target).
+type MessageUsage = (String, bool, bool);
 /// System queues (dbo) with the object ids they have in every database.
 const QUEUES: [(&str, i32); 3] =
     [("QueryNotificationErrorsQueue", 1_977_058_079), ("EventNotificationErrorsQueue", 2_009_058_193), ("ServiceBrokerQueue", 2_041_058_307)];
@@ -224,6 +226,8 @@ struct W<'a> {
     kinds: HashMap<ObjectName, u8>,
     /// DML triggers by (schema, name) → their parent.
     trigger_parents: HashMap<ObjectName, ObjectName>,
+    /// Contract ids, so a contract listed in a service has the id of its own record.
+    contract_ids: HashMap<String, i32>,
 }
 
 impl std::ops::Deref for W<'_> {
@@ -278,7 +282,7 @@ impl<'a> W<'a> {
         for name in trigger_parents.keys() {
             kinds.entry(name.clone()).or_insert(OT_TRIGGER);
         }
-        W { db, b: Buf::default(), cs: db.case_sensitive(), next_id: FIRST_ID, texts: Vec::new(), encrypted: Vec::new(), kinds, trigger_parents }
+        W { db, b: Buf::default(), cs: db.case_sensitive(), next_id: FIRST_ID, texts: Vec::new(), encrypted: Vec::new(), kinds, trigger_parents, contract_ids: HashMap::new() }
     }
 
     fn id(&mut self) -> i32 {
@@ -330,7 +334,10 @@ impl<'a> W<'a> {
     fn body(&mut self) {
         let db = self.db;
         let cs = self.cs;
-        self.coll(&db.tables, |w, t| {
+        // History tables are written inside their system-versioned table.
+        let histories: HashSet<ObjectName> = db.tables.iter().filter_map(|t| t.temporal.as_ref().map(|h| h.history_table.clone())).collect();
+        let tables: Vec<&Table> = db.tables.iter().filter(|t| !histories.contains(&t.object_name())).collect();
+        self.coll(&tables, |w, t| {
             w.u8(0); // ordinary table, not a FileTable
             let id = w.id();
             w.table(&TableRec { t, object_id: id, type_table: false });
@@ -366,7 +373,7 @@ impl<'a> W<'a> {
             .map(|t| {
                 let id = self.id();
                 if t.clr_method.is_none() {
-                    self.text(id, t.definition.clone(), t.encrypted);
+                    self.text(id, module_sql(&t.definition, "CREATE", &quote(&t.name)), t.encrypted);
                 }
                 (t, id)
             })
@@ -386,16 +393,18 @@ impl<'a> W<'a> {
         self.message_types();
         self.contracts();
         self.queues();
-        self.empty_coll(); // services
-        self.route();
-        self.empty_coll(); // event notifications
-        self.empty_coll(); // partition functions
-        self.empty_coll(); // partition schemes
+        self.services();
+        self.routes();
+        let db = self.db;
+        self.coll(&db.event_notifications, W::event_notification);
+        self.coll(&db.partition_functions, W::partition_function);
+        self.coll(&db.partition_schemes, W::partition_scheme);
         self.schemas();
         self.empty_coll(); // database-level trigger list
         self.coll(&ddl_triggers, |w, (t, id)| w.ddl_trigger(t, *id));
-        for _ in 0..5 {
-            // Service bindings, certificates, symmetric keys, asymmetric keys, full-text stoplists.
+        self.coll(&db.service_bindings, W::service_binding);
+        for _ in 0..4 {
+            // Certificates, symmetric keys, asymmetric keys, full-text stoplists.
             self.empty_coll();
         }
         self.coll(&db.sequences, W::sequence);
@@ -410,11 +419,16 @@ impl<'a> W<'a> {
 
     /// Object or schema permissions on one securable.
     fn perms(&mut self, class: &str, schema: &str, object: Option<&str>) {
+        self.perms_on(class, Some(schema), object);
+    }
+
+    /// Permissions on a securable; `schema` is None for the ones without a schema.
+    fn perms_on(&mut self, class: &str, schema: Option<&str>, object: Option<&str>) {
         let db = self.db;
         let list: Vec<&Permission> = db
             .permissions
             .iter()
-            .filter(|p| p.class == class && p.schema.as_deref() == Some(schema) && p.object.as_deref() == object)
+            .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == object)
             .filter(|p| statement(&p.state).is_some())
             .collect();
         self.f32(COLL);
@@ -518,6 +532,73 @@ impl<'a> W<'a> {
     /// Parameters (none are modelled), then the id map.
     fn no_params(&mut self) {
         self.empty_coll();
+    }
+
+    /// Parameters (id, name, type), then the id map.
+    fn params(&mut self, list: &[(i32, &str, &DataType)]) {
+        let cs = self.cs;
+        self.coll_head(cs, list.len());
+        for (_, name, t) in list {
+            let ty = facets(self.db, t);
+            self.f32(VERSION);
+            self.i32(ty.sql_type);
+            self.s(name);
+            self.i32(ty.size);
+            self.i32(ty.scale);
+            self.i32(ty.precision);
+            self.s(&ty.type_name);
+            self.s(&ty.type_schema);
+            self.bool(false); // has default
+            self.s("NULL");
+            self.bool(false); // OUTPUT
+            self.bool(t.xml_document);
+            self.str(t.xml_collection.as_deref());
+            self.str(ty.udt.as_deref());
+        }
+        for (id, name, _) in list {
+            self.i32(*id);
+            self.s(name);
+        }
+    }
+
+    fn partition_function(&mut self, f: &PartitionFunction) {
+        let cs = self.cs;
+        self.f32(VERSION);
+        self.s(&f.name);
+        self.s("dbo");
+        let id = self.id();
+        self.i32(id);
+        self.bool(cs);
+        self.bool(f.range_right);
+        // SQL Compare looks the input type up as parameter 0.
+        self.params(&[(0, "", &f.data_type)]);
+        self.no_eprops();
+        self.len(f.boundaries.len());
+        for b in &f.boundaries {
+            let value = boundary_text(b);
+            self.bool(value.is_none());
+            if let Some(v) = value {
+                self.s(&v);
+            }
+        }
+        self.no_ss(1);
+    }
+
+    fn partition_scheme(&mut self, s: &PartitionScheme) {
+        self.f32(VERSION);
+        self.s(&s.name);
+        self.s("dbo");
+        let id = self.id();
+        self.i32(id);
+        self.s(&quote(&s.function));
+        self.no_eprops();
+        self.f32(COLL);
+        self.len(s.filegroups.len());
+        for fg in &s.filegroups {
+            self.f32(COLL);
+            self.s(fg);
+        }
+        self.no_ss(1);
     }
 
     fn execute_as(&mut self, who: Option<&str>) {
@@ -642,7 +723,15 @@ impl<'a> W<'a> {
         self.bool(t.graph.as_deref() == Some("NODE"));
         self.bool(t.graph.as_deref() == Some("EDGE"));
         self.no_ss(1); // change tracking
-        self.bool(false); // no history table definition
+        let db = self.db;
+        match history.and_then(|h| db.tables.iter().find(|x| x.object_name() == *h)) {
+            Some(h) => {
+                self.bool(true);
+                let id = self.id();
+                self.table(&TableRec { t: h, object_id: id, type_table: false });
+            }
+            None => self.bool(false),
+        }
         self.bool(false); // large value types out of row
         self.empty_coll(); // edge constraints
         self.i32(0); // ALTER TABLE SET script sources
@@ -1276,7 +1365,11 @@ impl<'a> W<'a> {
         self.bool(t.settings.quoted_identifier);
         self.bool(t.settings.ansi_nulls);
         self.i32(id);
-        self.empty_coll(); // events (codes not mapped from names)
+        let codes: Vec<i32> = t.events.iter().filter_map(|e| super::snp_events::code(e)).collect();
+        self.coll_head(cs, codes.len());
+        for c in codes {
+            self.i32(c);
+        }
         let method = t.clr_method.as_deref().map(split_multipart).unwrap_or_default();
         for i in 0..3 {
             self.str(method.get(i).map(String::as_str));
@@ -1294,7 +1387,8 @@ impl<'a> W<'a> {
         self.s(&d.schema);
         let id = self.id();
         self.i32(id);
-        self.s(&d.definition);
+        // SQL Compare keeps the name in the header as [schema].[name].
+        self.s(&module_sql(&d.definition, "CREATE", &qualified(&d.schema, &d.name)));
         let db = self.db;
         let props: Vec<ExtendedProperty> = db
             .extended_properties
@@ -1410,7 +1504,8 @@ impl<'a> W<'a> {
 
     fn message_types(&mut self) {
         let cs = self.cs;
-        self.coll_head(cs, MESSAGE_TYPES.len());
+        let db = self.db;
+        self.coll_head(cs, MESSAGE_TYPES.len() + db.message_types.len());
         for (i, (prefix, name, validation, contract)) in MESSAGE_TYPES.into_iter().enumerate() {
             self.f32(VERSION);
             self.s(&format!("{prefix}{name}"));
@@ -1425,34 +1520,87 @@ impl<'a> W<'a> {
             self.strs(&contracts);
             self.no_ss(2);
         }
-    }
-
-    fn contracts(&mut self) {
-        let cs = self.cs;
-        self.coll_head(cs, CONTRACTS.len());
-        for (prefix, name, id, usages) in CONTRACTS {
+        for m in &db.message_types {
             self.f32(VERSION);
-            self.s(&format!("{prefix}{name}"));
-            self.s("dbo");
+            self.s(&m.name);
+            self.str(m.owner.as_deref());
+            let id = self.id();
             self.i32(id);
-            self.no_eprops();
-            self.bool(true); // system object
             self.bool(cs);
-            self.coll_head(cs, usages.len());
-            for (p, n, initiator, target) in usages {
-                self.s(&format!("[{p}{n}]"));
-                self.bool(*initiator);
-                self.bool(*target);
-            }
-            self.no_perms();
-            self.i32(0); // services
+            self.i32(match m.validation.as_str() {
+                "WELL_FORMED_XML" | "VALID_XML" => 1,
+                "EMPTY" => 2,
+                _ => 0,
+            });
+            self.str(m.xml_collection.as_deref());
+            self.no_eprops();
+            self.perms_on("MESSAGE TYPE", None, Some(&m.name));
+            let contracts: Vec<String> =
+                db.contracts.iter().filter(|c| c.messages.iter().any(|u| u.message_type == m.name)).map(|c| quote(&c.name)).collect();
+            self.strs(&contracts);
             self.no_ss(2);
         }
     }
 
+    fn contracts(&mut self) {
+        let cs = self.cs;
+        let db = self.db;
+        self.coll_head(cs, CONTRACTS.len() + db.contracts.len());
+        for (prefix, name, _, _) in CONTRACTS {
+            self.contract(&format!("{prefix}{name}"));
+        }
+        for c in &db.contracts {
+            self.contract(&c.name);
+        }
+    }
+
+    /// A contract record: a system one, or one of the model's.
+    fn contract(&mut self, name: &str) {
+        let cs = self.cs;
+        let db = self.db;
+        let (owner, id, system, usages): (Option<&str>, i32, bool, Vec<MessageUsage>) =
+            match CONTRACTS.iter().find(|(p, n, _, _)| format!("{p}{n}") == name) {
+                Some((_, _, id, usages)) => (Some("dbo"), *id, true, usages.iter().map(|(p, n, i, t)| (format!("[{p}{n}]"), *i, *t)).collect()),
+                None => {
+                    let c = db.contracts.iter().find(|c| c.name == name);
+                    let usages = c
+                        .map(|c| c.messages.iter().map(|m| (quote(&m.message_type), m.sent_by != "TARGET", m.sent_by != "INITIATOR")).collect())
+                        .unwrap_or_default();
+                    let id = *self.contract_ids.entry(name.to_string()).or_insert_with(|| {
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        id
+                    });
+                    (c.and_then(|c| c.owner.as_deref()), id, false, usages)
+                }
+            };
+        self.f32(VERSION);
+        self.s(name);
+        self.str(owner);
+        self.i32(id);
+        self.no_eprops();
+        self.bool(system);
+        self.bool(cs);
+        self.coll_head(cs, usages.len());
+        for (m, initiator, target) in usages {
+            self.s(&m);
+            self.bool(initiator);
+            self.bool(target);
+        }
+        if system {
+            self.no_perms();
+        } else {
+            self.perms_on("CONTRACT", None, Some(name));
+        }
+        let services: Vec<String> = db.services.iter().filter(|s| s.contracts.iter().any(|c| c == name)).map(|s| quote(&s.name)).collect();
+        self.strs(&services);
+        self.no_ss(2);
+    }
+
     fn queues(&mut self) {
         let cs = self.cs;
-        self.coll_head(cs, QUEUES.len());
+        let n = QUEUES.len() + self.db.queues.len();
+        self.coll_head(cs, n);
         for (name, id) in QUEUES {
             self.f32(VERSION);
             self.s(name);
@@ -1476,11 +1624,100 @@ impl<'a> W<'a> {
             self.bool(false); // poison message handling
             self.no_ss(2);
         }
+        let db = self.db;
+        for q in &db.queues {
+            self.f32(VERSION);
+            self.s(&q.name);
+            self.s(&q.schema);
+            let id = self.id();
+            self.i32(id);
+            self.bool(false); // system object
+            self.bool(cs);
+            let a = q.activation.as_ref();
+            self.i16(a.map_or(0, |a| i16::try_from(a.max_readers).unwrap_or(i16::MAX)));
+            self.str(a.map(|a| a.procedure.as_str()));
+            self.execute_as(a.and_then(|a| a.execute_as.as_deref()));
+            self.bool(a.is_some_and(|a| a.enabled));
+            self.bool(q.enabled); // receive
+            self.bool(q.enabled); // enqueue
+            self.bool(q.retention);
+            self.str(q.filegroup.as_deref());
+            self.no_eprops();
+            self.coll(&q.event_notifications, W::event_notification);
+            let me = ObjectName::new(&q.schema, &q.name);
+            let services: Vec<String> = db.services.iter().filter(|s| s.queue == me).map(|s| quote(&s.name)).collect();
+            self.strs(&services);
+            self.str(q.owner.as_deref());
+            self.perms("OBJECT", &q.schema, Some(&q.name));
+            self.bool(q.poison_message_handling);
+            self.no_ss(2);
+        }
     }
 
-    fn route(&mut self) {
+    fn services(&mut self) {
         let cs = self.cs;
-        self.coll_head(cs, 1);
+        let db = self.db;
+        self.coll_head(cs, db.services.len());
+        for s in &db.services {
+            self.f32(VERSION);
+            self.s(&s.name);
+            self.str(s.owner.as_deref());
+            let id = self.id();
+            self.i32(id);
+            self.bool(false); // system object
+            self.bool(cs);
+            self.s(&s.queue.quoted());
+            self.coll_head(cs, s.contracts.len());
+            for c in &s.contracts {
+                self.contract(c);
+            }
+            self.no_eprops();
+            self.perms_on("SERVICE", None, Some(&s.name));
+            self.empty_coll(); // event notifications
+            self.no_ss(2);
+        }
+    }
+
+    fn event_notification(&mut self, en: &EventNotification) {
+        let cs = self.cs;
+        self.f32(VERSION);
+        self.s(&en.name);
+        self.str(None); // owner
+        let id = self.id();
+        self.i32(id);
+        self.bool(cs);
+        self.s(&en.service);
+        self.s(&en.broker_instance);
+        self.bool(en.fan_in);
+        let codes: Vec<i32> = en.events.iter().filter_map(|e| super::snp_events::code(e)).collect();
+        self.coll_head(cs, codes.len());
+        for c in codes {
+            self.i32(c);
+        }
+        self.no_eprops();
+        self.no_ss(1);
+    }
+
+    fn service_binding(&mut self, b: &ServiceBinding) {
+        let cs = self.cs;
+        self.f32(VERSION);
+        self.s(&b.name);
+        self.str(b.owner.as_deref());
+        let id = self.id();
+        self.i32(id);
+        self.bool(cs);
+        self.s(&b.remote_service);
+        self.s(&b.user);
+        self.bool(b.anonymous);
+        self.no_eprops();
+        self.perms_on("REMOTE SERVICE BINDING", None, Some(&b.name));
+        self.no_ss(2);
+    }
+
+    fn routes(&mut self) {
+        let cs = self.cs;
+        let db = self.db;
+        self.coll_head(cs, 1 + db.routes.len());
         self.f32(VERSION);
         self.s("AutoCreatedLocal");
         self.s("dbo");
@@ -1496,6 +1733,24 @@ impl<'a> W<'a> {
         self.no_eprops();
         self.no_perms();
         self.no_ss(2);
+        for r in &db.routes {
+            self.f32(VERSION);
+            self.s(&r.name);
+            self.str(r.owner.as_deref());
+            let id = self.id();
+            self.i32(id);
+            self.bool(cs);
+            self.bool(false); // system object
+            self.str(r.remote_service.as_deref());
+            self.str(r.broker_instance.as_deref());
+            self.s(&r.address);
+            self.str(r.mirror_address.as_deref());
+            self.i64(r.expires.as_deref().and_then(text_ticks).unwrap_or(0));
+            self.bool(r.expires.is_some());
+            self.no_eprops();
+            self.perms_on("ROUTE", None, Some(&r.name));
+            self.no_ss(2);
+        }
     }
 
     // --------------------------------------------------------------------------- dependencies and text
@@ -1834,6 +2089,37 @@ fn synonym_target(base: &str, database: &str) -> Option<ObjectName> {
         [db, schema, name] if db.eq_ignore_ascii_case(database) => Some(ObjectName::new(schema, name)),
         _ => None,
     }
+}
+
+/// A partition boundary literal as SQL Compare stores the value: the text of a string or date,
+/// a GUID without braces, None for NULL.
+fn boundary_text(literal: &str) -> Option<String> {
+    let l = literal.trim();
+    if l.eq_ignore_ascii_case("NULL") {
+        return None;
+    }
+    let inner = l.strip_prefix('N').unwrap_or(l);
+    Some(match inner.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')) {
+        Some(x) if x.starts_with('{') && x.ends_with('}') => x.trim_matches(['{', '}']).to_ascii_lowercase(),
+        Some(x) => x.replace("''", "'"),
+        None => l.to_string(),
+    })
+}
+
+/// `yyyy-MM-dd HH:mm:ss.fff` as a .NET `DateTime` (100 ns ticks from 0001-01-01).
+fn text_ticks(s: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| s.get(r).and_then(|x| x.parse::<i64>().ok());
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mi, ss) = (n(11..13).unwrap_or(0), n(14..16).unwrap_or(0), n(17..19).unwrap_or(0));
+    let ms = s.get(20..).map_or(Some(0), |f| format!("{f:0<3}").get(..3).and_then(|x| x.parse::<i64>().ok()))?;
+    // Day number from a civil date (H. Hinnant), from 1970-01-01.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468 + 719_162;
+    Some(((days * 86_400 + hh * 3600 + mi * 60 + ss) * 1000 + ms) * 10_000)
 }
 
 /// Splits `[a].[b].c` into its unquoted parts.

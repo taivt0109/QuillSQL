@@ -75,6 +75,13 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     c.str()?; // migrations folder
 
     s.tables = c.member(Cur::table_item)?;
+    // History tables are nested in their system-versioned table.
+    let nested: Vec<RawTable> = s.tables.iter_mut().filter_map(|t| t.history_def.take().map(|h| *h)).collect();
+    for h in nested {
+        if !s.tables.iter().any(|t| t.schema == h.schema && t.name == h.name) {
+            s.tables.push(h);
+        }
+    }
     s.functions = c.member(Cur::function)?;
     s.defaults = c.member(|c| c.default_or_rule(false))?;
     s.rules = c.member(|c| c.default_or_rule(true))?;
@@ -108,18 +115,18 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     }
     s.synonyms = c.member(Cur::synonym)?;
     c.member(Cur::xml_schema_collection)?;
-    c.member(Cur::message_type)?;
-    c.member(Cur::contract)?;
-    c.member(Cur::queue)?;
-    c.member(Cur::service)?;
-    c.member(Cur::route)?;
-    c.member(Cur::event_notification)?;
-    c.member(Cur::partition_function)?;
-    c.member(Cur::partition_scheme)?;
+    s.message_types = c.member(Cur::message_type)?;
+    s.contracts = c.member(Cur::contract)?;
+    s.queues = c.member(Cur::queue)?;
+    s.services = c.member(Cur::service)?;
+    s.routes = c.member(Cur::route)?;
+    s.event_notifications = c.member(Cur::event_notification)?;
+    s.partition_functions = c.member(Cur::partition_function)?;
+    s.partition_schemes = c.member(Cur::partition_scheme)?;
     s.schemas = c.member(Cur::schema)?;
     c.member(Cur::trigger)?; // database-level list; DML triggers live in their table or view
     s.ddl_triggers = c.member(Cur::ddl_trigger)?;
-    c.member(Cur::service_binding)?;
+    s.service_bindings = c.member(Cur::service_binding)?;
     c.member(Cur::certificate)?;
     c.member(Cur::symmetric_key)?;
     c.member(Cur::asymmetric_key)?;
@@ -160,6 +167,15 @@ struct Snap {
     defaults: Vec<BindableObject>,
     rules: Vec<BindableObject>,
     ddl_triggers: Vec<RawDdlTrigger>,
+    message_types: Vec<Raw<MessageType>>,
+    contracts: Vec<Raw<Contract>>,
+    queues: Vec<Raw<Queue>>,
+    services: Vec<Raw<Service>>,
+    routes: Vec<Raw<Route>>,
+    service_bindings: Vec<Raw<ServiceBinding>>,
+    event_notifications: Vec<EventNotification>,
+    partition_functions: Vec<PartitionFunction>,
+    partition_schemes: Vec<PartitionScheme>,
     dependencies: Vec<(u8, String, u8, String)>,
     props: Vec<RawProp>,
     /// Comments blob store: module and default text by id.
@@ -229,6 +245,8 @@ struct RawTable {
     change_tracking: u8,
     temporal_type: u8,
     history: Option<ObjectName>,
+    /// The history table's own record, nested in a system-versioned table.
+    history_def: Option<Box<RawTable>>,
     retention: Option<String>,
     is_node: bool,
     is_edge: bool,
@@ -243,6 +261,21 @@ struct RawModule {
     routine: Routine,
     text_id: i32,
     perms: Vec<RawPerm>,
+}
+
+/// An object with its permissions; `system` for the ones every database has.
+struct Raw<T> {
+    item: T,
+    perms: Vec<RawPerm>,
+    system: bool,
+}
+
+#[derive(Default)]
+struct RawParam {
+    size: i32,
+    scale: i32,
+    precision: i32,
+    type_name: String,
 }
 
 struct RawDdlTrigger {
@@ -1153,7 +1186,7 @@ impl Cur<'_> {
             self.ss()?;
         }
         if v >= 13.18 && self.bool()? {
-            self.table()?;
+            t.history_def = Some(Box::new(self.table()?));
         }
         if v >= 13.62 {
             self.bool()?;
@@ -1207,15 +1240,14 @@ impl Cur<'_> {
 // ------------------------------------------------------------------------------- programmability
 
 impl Cur<'_> {
-    fn param(&mut self) -> R<()> {
+    fn param(&mut self) -> R<RawParam> {
         let v = self.f32()?;
         self.i32()?;
         self.str()?;
+        let mut p = RawParam::default();
         if v >= 4.0 {
-            for _ in 0..3 {
-                self.i32()?;
-            }
-            self.str()?;
+            (p.size, p.scale, p.precision) = (self.i32()?, self.i32()?, self.i32()?);
+            p.type_name = self.s()?;
             if v >= 6.0 {
                 self.str()?;
             }
@@ -1231,17 +1263,17 @@ impl Cur<'_> {
         if v >= 13.63 {
             self.str()?;
         }
-        Ok(())
+        Ok(p)
     }
 
     /// Parameters, then one (id, name) pair per parameter.
-    fn params(&mut self) -> R<()> {
-        let n = self.coll(Cur::param)?.len();
-        for _ in 0..n {
+    fn params(&mut self) -> R<Vec<RawParam>> {
+        let list = self.coll(Cur::param)?;
+        for _ in 0..list.len() {
             self.i32()?;
             self.str()?;
         }
-        Ok(())
+        Ok(list)
     }
 
     fn function(&mut self) -> R<RawModule> {
@@ -1778,54 +1810,69 @@ impl Cur<'_> {
         self.two_ss(v)
     }
 
-    fn message_type(&mut self) -> R<()> {
+    fn message_type(&mut self) -> R<Raw<MessageType>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.i32()?;
-        self.str()?;
+        let mut m = MessageType { name: self.s()?, owner: self.str()?, ..Default::default() };
+        let id = self.i32()?;
+        self.bool()?; // case-sensitive
+        let validation = self.i32()?;
+        m.xml_collection = self.str()?.filter(|x| !x.is_empty()).map(|x| requote(&x));
+        m.validation = match validation {
+            1 if m.xml_collection.is_some() => "VALID_XML",
+            1 => "WELL_FORMED_XML",
+            2 => "EMPTY",
+            _ => "NONE",
+        }
+        .into();
         self.eprops()?;
-        self.perms()?;
+        let perms = self.perms()?;
         let n = self.count_or_none()?;
         for _ in 0..n {
-            self.str()?;
+            self.str()?; // contracts using it
         }
-        self.two_ss(v)
+        self.two_ss(v)?;
+        // The system message types have ids below 65536.
+        Ok(Raw { item: m, perms, system: id <= 65_535 })
     }
 
-    fn contract(&mut self) -> R<()> {
+    fn contract(&mut self) -> R<Raw<Contract>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut contract = Contract { name: self.s()?, owner: self.str()?, ..Default::default() };
         self.i32()?;
         self.eprops()?;
-        self.bool()?;
-        self.bool()?;
-        self.coll(|c| {
-            c.str()?;
-            c.bool()?;
-            c.bool()
+        let system = self.bool()?;
+        self.bool()?; // case-sensitive
+        contract.messages = self.coll(|c| {
+            let message_type = unquote(&c.s()?);
+            let sent_by = match (c.bool()?, c.bool()?) {
+                (true, true) => "ANY",
+                (true, false) => "INITIATOR",
+                _ => "TARGET",
+            };
+            Ok(ContractMessage { message_type, sent_by: sent_by.into() })
         })?;
-        self.perms()?;
+        contract.messages.sort_by(|a, b| sql_order(&a.message_type, &b.message_type));
+        let perms = self.perms()?;
         let n = self.count_or_none()?;
         for _ in 0..n {
-            self.str()?;
+            self.str()?; // services using it
         }
-        self.two_ss(v)
+        self.two_ss(v)?;
+        let system = system || contract.name == "DEFAULT" || contract.name.starts_with("http://schemas.microsoft.com/SQL/");
+        Ok(Raw { item: contract, perms, system })
     }
 
-    fn event_notification(&mut self) -> R<()> {
+    fn event_notification(&mut self) -> R<EventNotification> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut en = EventNotification { name: self.s()?, ..Default::default() };
+        self.str()?; // owner
         self.i32()?;
-        self.bool()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
-        self.coll(Cur::i32)?;
+        self.bool()?; // case-sensitive
+        en.service = self.s()?;
+        en.broker_instance = self.s()?;
+        en.fan_in = self.bool()?;
+        en.events = self.coll(Cur::i32)?.into_iter().filter_map(|e| super::snp_events::name(e).map(String::from)).collect();
+        en.events.sort();
         self.eprops()?;
         if v < 7.0 {
             self.perms()?;
@@ -1833,85 +1880,95 @@ impl Cur<'_> {
         if v >= 11.45 {
             self.ss()?;
         }
-        Ok(())
+        Ok(en)
     }
 
-    fn queue(&mut self) -> R<()> {
+    fn queue(&mut self) -> R<Raw<Queue>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut q = Queue { name: self.s()?, schema: self.s()?, ..Default::default() };
         self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        self.i16()?;
-        self.str()?;
-        if v >= 7.2 {
-            self.execute_as()?;
+        let system = self.bool()?;
+        self.bool()?; // case-sensitive
+        let max_readers = i32::from(self.i16()?);
+        let procedure = self.str()?.filter(|p| !p.is_empty());
+        let execute_as = if v >= 7.2 {
+            self.execute_as()?
         } else {
-            self.str()?;
+            let who = self.str()?;
             self.bool()?;
-        }
-        for _ in 0..4 {
-            self.bool()?;
-        }
-        self.str()?;
+            who
+        };
+        let activation = self.bool()?;
+        self.bool()?; // receive enabled
+        q.enabled = self.bool()?; // enqueue enabled
+        q.retention = self.bool()?;
+        q.filegroup = self.str()?.filter(|f| !f.is_empty());
+        q.activation = procedure.map(|procedure| QueueActivation { enabled: activation, procedure, max_readers, execute_as });
         self.eprops()?;
-        self.coll(Cur::event_notification)?;
-        self.strs()?;
+        q.event_notifications = self.coll(Cur::event_notification)?;
+        for en in &mut q.event_notifications {
+            en.queue = Some(ObjectName::new(&q.schema, &q.name));
+        }
+        q.event_notifications.sort_by(|a, b| a.name.cmp(&b.name));
+        self.strs()?; // services
         if v >= 7.0 {
-            self.str()?;
+            q.owner = self.str()?.filter(|o| !o.is_empty());
         }
-        if v >= 7.1 {
-            self.perms()?;
-        }
-        if v >= 11.2 {
-            self.bool()?;
-        }
-        self.two_ss(v)
+        let perms = if v >= 7.1 { self.perms()? } else { Vec::new() };
+        q.poison_message_handling = v < 11.2 || self.bool()?;
+        self.two_ss(v)?;
+        Ok(Raw { item: q, perms, system })
     }
 
-    fn service(&mut self) -> R<()> {
+    fn service(&mut self) -> R<Raw<Service>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut s = Service { name: self.s()?, owner: self.str()?, ..Default::default() };
         self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        self.str()?;
-        self.coll(Cur::contract)?;
+        let system = self.bool()?;
+        self.bool()?; // case-sensitive
+        s.queue = two_part(&self.s()?).unwrap_or_default();
+        s.contracts = self.coll(Cur::contract)?.into_iter().map(|c| c.item.name).collect();
+        s.contracts.sort_by(|a, b| sql_order(a, b));
         self.eprops()?;
-        self.perms()?;
+        let perms = self.perms()?;
         if v >= 4.1 {
             self.coll(Cur::event_notification)?;
         }
-        self.two_ss(v)
+        self.two_ss(v)?;
+        let system = system || s.name.starts_with("http://schemas.microsoft.com/SQL/");
+        Ok(Raw { item: s, perms, system })
     }
 
-    fn route(&mut self) -> R<()> {
+    fn route(&mut self) -> R<Raw<Route>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut r = Route { name: self.s()?, owner: self.str()?, ..Default::default() };
         self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        for _ in 0..4 {
-            self.str()?;
-        }
-        self.i64()?;
-        self.bool()?;
+        self.bool()?; // case-sensitive
+        let system = self.bool()?;
+        r.remote_service = self.str()?.filter(|x| !x.is_empty());
+        r.broker_instance = self.str()?.filter(|x| !x.is_empty());
+        r.address = self.s()?;
+        r.mirror_address = self.str()?.filter(|x| !x.is_empty());
+        let lifetime = self.i64()?;
+        r.expires = self.bool()?.then(|| ticks_text(lifetime));
         self.eprops()?;
-        self.perms()?;
-        self.two_ss(v)
+        let perms = self.perms()?;
+        self.two_ss(v)?;
+        let system = system || r.name == "AutoCreatedLocal";
+        Ok(Raw { item: r, perms, system })
     }
 
-    fn partition_function(&mut self) -> R<()> {
+    fn partition_function(&mut self) -> R<PartitionFunction> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut f = PartitionFunction { name: self.s()?, ..Default::default() };
+        self.str()?; // owner
         self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        self.params()?;
+        self.bool()?; // case-sensitive
+        f.range_right = self.bool()?;
+        // The input type is the first parameter.
+        if let Some(p) = self.params()?.first() {
+            f.data_type = system_type(&p.type_name, p.size, p.precision, p.scale);
+        }
         self.eprops()?;
         if v < 7.0 {
             self.perms()?;
@@ -1922,22 +1979,21 @@ impl Cur<'_> {
         let n = self.count()?;
         for _ in 0..n {
             let is_null = v >= 11.0 && self.bool()?;
-            if !is_null {
-                self.str()?;
-            }
+            let value = if is_null { None } else { self.str()? };
+            f.boundaries.push(boundary_literal(value.as_deref(), &f.data_type));
         }
         if v >= 11.45 {
             self.ss()?;
         }
-        Ok(())
+        Ok(f)
     }
 
-    fn partition_scheme(&mut self) -> R<()> {
+    fn partition_scheme(&mut self) -> R<PartitionScheme> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut s = PartitionScheme { name: self.s()?, ..Default::default() };
+        self.str()?; // owner
         self.i32()?;
-        self.str()?;
+        s.function = unquote(&self.s()?);
         self.eprops()?;
         if v < 7.0 {
             self.perms()?;
@@ -1946,12 +2002,12 @@ impl Cur<'_> {
         let n = self.count()?;
         for _ in 0..n {
             self.f32()?;
-            self.str()?;
+            s.filegroups.push(self.s()?);
         }
         if v >= 11.45 {
             self.ss()?;
         }
-        Ok(())
+        Ok(s)
     }
 
     fn ddl_trigger(&mut self) -> R<RawDdlTrigger> {
@@ -1964,15 +2020,13 @@ impl Cur<'_> {
         let clr = self.bool()?;
         t.settings = ModuleSettings { quoted_identifier: self.bool()?, ansi_nulls: self.bool()? };
         let text_id = self.i32()?;
-        // Event codes are not mapped to names: only CLR triggers compare them.
-        if v >= 7.0 {
-            self.coll(Cur::i32)?;
+        t.events = if v >= 7.0 {
+            self.coll(Cur::i32)?.into_iter().filter_map(|e| super::snp_events::name(e).map(String::from)).collect()
         } else {
             let n = self.count_or_none()?;
-            for _ in 0..n {
-                self.str()?;
-            }
-        }
+            self.list(n, Cur::s)?
+        };
+        t.events.sort();
         let method = [self.s()?, self.s()?, self.s()?];
         if clr {
             t.clr_method = Some(method.iter().map(|p| quote(p)).collect::<Vec<_>>().join("."));
@@ -1986,18 +2040,18 @@ impl Cur<'_> {
         Ok(RawDdlTrigger { trigger: t, text_id })
     }
 
-    fn service_binding(&mut self) -> R<()> {
+    fn service_binding(&mut self) -> R<Raw<ServiceBinding>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
+        let mut b = ServiceBinding { name: self.s()?, owner: self.str()?, ..Default::default() };
         self.i32()?;
-        self.bool()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
+        self.bool()?; // case-sensitive
+        b.remote_service = self.s()?;
+        b.user = self.s()?;
+        b.anonymous = self.bool()?;
         self.eprops()?;
-        self.perms()?;
-        self.two_ss(v)
+        let perms = self.perms()?;
+        self.two_ss(v)?;
+        Ok(Raw { item: b, perms, system: false })
     }
 
     fn stopwords(&mut self) -> R<()> {
@@ -2135,11 +2189,12 @@ impl Snap {
             ..Default::default()
         };
         let mut permissions = Vec::new();
-        let mut object_perms = |schema: &str, name: &str, perms: &[RawPerm]| {
+        // Permissions ON <class>::[schema].[name], or ON <class>::[name] for securables without a schema.
+        let mut perms_on = |class: &str, schema: Option<&str>, name: &str, perms: &[RawPerm]| {
             for p in perms {
                 if let Some(mut p) = permission(p) {
-                    p.class = "OBJECT".into();
-                    p.schema = Some(schema.into());
+                    p.class = class.into();
+                    p.schema = schema.map(String::from);
                     p.object = Some(name.into());
                     permissions.push(p);
                 }
@@ -2147,7 +2202,7 @@ impl Snap {
         };
 
         for t in std::mem::take(&mut self.tables) {
-            object_perms(&t.schema, &t.name, &t.perms);
+            perms_on("OBJECT", Some(&t.schema), &t.name, &t.perms);
             let triggers = t.triggers.into_iter().map(|tr| self.trigger(tr)).collect();
             let columns: Vec<Column> = t.columns.iter().enumerate().map(|(i, f)| column(f, i + 1)).collect();
             let mut table = Table {
@@ -2208,7 +2263,7 @@ impl Snap {
 
         for v in std::mem::take(&mut self.views) {
             let mut view = v.view;
-            object_perms(&view.schema, &view.name, &v.perms);
+            perms_on("OBJECT", Some(&view.schema), &view.name, &v.perms);
             view.encrypted |= self.is_encrypted(v.text_id);
             if !view.encrypted {
                 view.definition = self.text(v.text_id);
@@ -2221,7 +2276,7 @@ impl Snap {
 
         for m in std::mem::take(&mut self.functions).into_iter().chain(std::mem::take(&mut self.procedures)) {
             let mut r = m.routine;
-            object_perms(&r.schema, &r.name, &m.perms);
+            perms_on("OBJECT", Some(&r.schema), &r.name, &m.perms);
             if r.clr_method.is_none() {
                 r.encrypted |= self.is_encrypted(m.text_id);
                 if !r.encrypted {
@@ -2232,14 +2287,46 @@ impl Snap {
         }
 
         for (sq, perms) in std::mem::take(&mut self.sequences) {
-            object_perms(&sq.schema, &sq.name, &perms);
+            perms_on("OBJECT", Some(&sq.schema), &sq.name, &perms);
             db.sequences.push(sq);
         }
+        for m in std::mem::take(&mut self.message_types).into_iter().filter(|x| !x.system) {
+            perms_on("MESSAGE TYPE", None, &m.item.name, &m.perms);
+            db.message_types.push(m.item);
+        }
+        for c in std::mem::take(&mut self.contracts).into_iter().filter(|x| !x.system) {
+            perms_on("CONTRACT", None, &c.item.name, &c.perms);
+            db.contracts.push(c.item);
+        }
+        for s in std::mem::take(&mut self.services).into_iter().filter(|x| !x.system) {
+            perms_on("SERVICE", None, &s.item.name, &s.perms);
+            db.services.push(s.item);
+        }
+        for r in std::mem::take(&mut self.routes).into_iter().filter(|x| !x.system) {
+            perms_on("ROUTE", None, &r.item.name, &r.perms);
+            db.routes.push(r.item);
+        }
+        for b in std::mem::take(&mut self.service_bindings) {
+            perms_on("REMOTE SERVICE BINDING", None, &b.item.name, &b.perms);
+            db.service_bindings.push(b.item);
+        }
+        let mut queues = Vec::new();
+        for q in std::mem::take(&mut self.queues).into_iter().filter(|x| !x.system) {
+            queues.push((q.item.schema.clone(), q.item.name.clone(), q.perms));
+            db.queues.push(q.item);
+        }
+        for (schema, name, perms) in &queues {
+            perms_on("OBJECT", Some(schema), name, perms);
+        }
+        db.event_notifications = std::mem::take(&mut self.event_notifications);
+        db.event_notifications.sort_by(|a, b| a.name.cmp(&b.name));
+        db.partition_functions = std::mem::take(&mut self.partition_functions);
+        db.partition_schemes = std::mem::take(&mut self.partition_schemes);
         db.defaults = std::mem::take(&mut self.defaults);
         db.rules = std::mem::take(&mut self.rules);
         db.ddl_triggers = std::mem::take(&mut self.ddl_triggers).into_iter().map(|t| self.ddl_trigger(t)).collect();
         for (syn, perms) in std::mem::take(&mut self.synonyms) {
-            object_perms(&syn.schema, &syn.name, &perms);
+            perms_on("OBJECT", Some(&syn.schema), &syn.name, &perms);
             db.synonyms.push(syn);
         }
         db.types = std::mem::take(&mut self.types);
@@ -2694,7 +2781,29 @@ fn oa_date(days: f64) -> String {
         return days.to_string();
     }
     // Days from 1970-01-01 to 1899-12-30 is -25569.
-    let ms = ms as i64 - 25_569 * 86_400_000;
+    civil(ms as i64 - 25_569 * 86_400_000)
+}
+
+/// A partition boundary stored as text, as the T-SQL literal the model keeps.
+fn boundary_literal(value: Option<&str>, t: &DataType) -> String {
+    let Some(v) = value else { return "NULL".into() };
+    match t.name.as_str() {
+        "char" | "varchar" | "nchar" | "nvarchar" | "sysname" | "date" | "datetime" | "smalldatetime" | "datetime2" | "time" | "datetimeoffset" => {
+            format!("N'{}'", v.replace('\'', "''"))
+        }
+        "uniqueidentifier" => format!("'{{{}}}'", v.trim_matches(['{', '}']).to_ascii_uppercase()),
+        _ => v.to_string(),
+    }
+}
+
+/// A .NET `DateTime` (100 ns ticks from 0001-01-01) as `yyyy-MM-dd HH:mm:ss.fff`.
+fn ticks_text(ticks: i64) -> String {
+    // 0001-01-01 is 719162 days before 1970-01-01.
+    civil(ticks / 10_000 - 719_162 * 86_400_000)
+}
+
+/// Milliseconds from 1970-01-01 as `yyyy-MM-dd HH:mm:ss.fff`.
+fn civil(ms: i64) -> String {
     let (day, ms) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
     // Civil date from a day number (H. Hinnant).
     let z = day + 719_468;
