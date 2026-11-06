@@ -63,6 +63,7 @@ const SHOP: &str = include_str!("fixtures/compare/shop.sql");
 const SHOP_CHANGES: &str = include_str!("fixtures/compare/shop_changes.sql");
 const XML_SPATIAL: &str = include_str!("fixtures/compare/sources_xml_spatial.sql");
 const BINDINGS: &str = include_str!("fixtures/compare/sources_bindings.sql");
+const SHOP_DATA: &str = include_str!("fixtures/compare/shop_data.sql");
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("quill-sources-{name}-{}", std::process::id()));
@@ -111,6 +112,59 @@ fn makescripts_reads_back_identical() {
         let _ = std::fs::remove_dir_all(&inline);
         server.drop(name);
     }
+}
+
+/// `quill <command> ...` with the test server's login for the live `sides`.
+fn quill(server: &Server, command: &str, sides: &[u8], args: &[String]) -> (i32, String) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_quill"));
+    cmd.arg(command).args(args);
+    for &n in sides {
+        cmd.arg(format!("/server{n}:{}", server.host)).arg(format!("/trustServerCertificate{n}"));
+        if let Auth::Sql { user, password } = &server.auth {
+            cmd.arg(format!("/username{n}:{user}")).arg(format!("/password{n}:{password}"));
+        }
+    }
+    let out = cmd.output().unwrap();
+    (out.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn data_compare_with_a_scripts_folder() {
+    let Some(server) = server() else { return };
+    let data = format!("{SHOP}\nGO\n{SHOP_DATA}");
+    server.create("QD_sources_Data", &data);
+    let dir = temp("data");
+    let d = |s: &str| s.to_string();
+    let path = dir.to_string_lossy().to_string();
+    // A scripts folder with schema and data.
+    folder::write_all(&server.read("QD_sources_Data"), &dir, &Options::default_set()).unwrap();
+    let (code, out) = quill(&server, "data", &[1], &[d("/database1:QD_sources_Data"), format!("/makescripts:{path}")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(dir.join("Data").join("dbo.Customer_Data.sql").is_file(), "{out}");
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Data")]);
+    assert_eq!(code, 63, "{out}");
+    // Change the database, compare, and deploy the database's data to the folder.
+    let rt = db::runtime().unwrap();
+    rt.block_on(async {
+        let mut c = db::connect_async(&server.spec("QD_sources_Data")).await.unwrap();
+        db::execute(&mut c, "UPDATE dbo.Customer SET Name = N'Anh' WHERE CustomerId = 1; DELETE FROM Sales.OrderLine WHERE LineNumber = 2;").await.unwrap();
+    });
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Data")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("[dbo].[Customer]") && out.contains("[Sales].[OrderLine]"), "{out}");
+    let (code, out) = quill(&server, "data", &[1], &[d("/database1:QD_sources_Data"), format!("/scripts2:{path}"), d("/synchronize")]);
+    assert_eq!(code, 0, "{out}");
+    assert!(std::fs::read_to_string(dir.join("Data").join("dbo.Customer_Data.sql")).unwrap().contains("N'Anh'"), "{out}");
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Data")]);
+    assert_eq!(code, 63, "{out}");
+    // No temporary databases are left behind.
+    let left = rt.block_on(async {
+        let mut c = db::connect_async(&server.spec("master")).await.unwrap();
+        db::query(&mut c, "SELECT name FROM sys.databases WHERE name LIKE N'QuillScripts[_]%'").await.unwrap().len()
+    });
+    assert_eq!(left, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+    server.drop("QD_sources_Data");
 }
 
 #[test]

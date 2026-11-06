@@ -7,4 +7,5 @@ pub mod parse;
 pub mod scm;
 pub mod snp;
 pub mod sqlproj;
+pub mod staging;
 pub mod script;
