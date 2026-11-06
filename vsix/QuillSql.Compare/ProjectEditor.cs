@@ -620,7 +620,7 @@ namespace QuillSql.Compare
         private TextBox _user, _snapshot, _folder, _revision;
         private PasswordBox _password;
         private CheckBox _remember, _encrypt, _trust;
-        private StackPanel _live, _file, _scripts;
+        private StackPanel _live, _file, _scripts, _revisionField;
         private TextBlock _empty;
         private TextBlock _status;
 
@@ -638,9 +638,9 @@ namespace QuillSql.Compare
             names.Margin = new Thickness(12, 0, 0, 0);
             _type = new ComboBox { Width = 150, VerticalAlignment = VerticalAlignment.Center };
             // SQL Compare's other kinds of data source are listed but not available yet.
-            foreach (var (name, enabled) in new[] { ("Database", true), ("Snapshot", !session.IsData), ("Empty database", !session.IsData && key == "target"), ("Backup", false), ("Scripts folder", !session.IsData), ("SQL Source Control", false) })
+            foreach (var (name, enabled) in new[] { ("Database", true), ("Snapshot", !session.IsData), ("Empty database", !session.IsData && key == "target"), ("Backup", false), ("Scripts folder", !session.IsData), ("Source control", !session.IsData) })
             {
-                _type.Items.Add(new ComboBoxItem { Content = name, IsEnabled = enabled, ToolTip = enabled ? null : name == "Snapshot" || name == "Empty database" || (name == "Scripts folder" && session.IsData) ? "Not available for this side or kind of comparison" : "Not available yet" });
+                _type.Items.Add(new ComboBoxItem { Content = name, IsEnabled = enabled, ToolTip = enabled ? null : name == "Snapshot" || name == "Empty database" || ((name == "Scripts folder" || name == "Source control") && session.IsData) ? "Not available for this side or kind of comparison" : "Not available yet" });
             }
             _type.SelectionChanged += (s, e) => ShowType();
             var header = new DockPanel { Margin = new Thickness(0, 0, 0, 18) };
@@ -683,7 +683,7 @@ namespace QuillSql.Compare
             var browse = Ui.Button("Browse…", glyph: Glyph.Open, click: () =>
             {
                 var d = new OpenFileDialog { Filter = "QuillSQL snapshots (*.json)|*.json|All files|*.*" };
-                if (d.ShowDialog() == true) _snapshot.Text = d.FileName;
+                if (Dialogs.Show(d, null) == true) _snapshot.Text = d.FileName;
             });
             var fileRow = new DockPanel();
             DockPanel.SetDock(browse, Dock.Right);
@@ -703,10 +703,11 @@ namespace QuillSql.Compare
             DockPanel.SetDock(browseFolder, Dock.Right);
             folderRow.Children.Add(browseFolder);
             folderRow.Children.Add(_folder);
-            _revision = Ui.SearchBox("Latest (the folder as it is)", 0);
+            _revision = Ui.SearchBox("HEAD", 0);
             _revision.Width = double.NaN;
             _revision.ToolTip = "A source control revision of the folder: HEAD, a commit, a tag or a revision number";
-            _scripts = Ui.Column(Ui.Form(Ui.Field("Scripts folder", folderRow), Ui.Field("Source control revision (optional)", _revision)),
+            _revisionField = Ui.Form(Ui.Field("Revision", _revision));
+            _scripts = Ui.Column(Ui.Form(Ui.Field("Scripts folder (in a git, Mercurial or Subversion working copy for source control)", folderRow)), _revisionField,
                 Ui.Text("Deploying to a scripts folder rewrites the files of the objects deployed; a revision can only be compared or scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
             Children.Add(_file);
             Children.Add(_empty);
@@ -723,7 +724,11 @@ namespace QuillSql.Compare
             }
             var snapshot = _type.SelectedIndex == 1;
             var empty = _type.SelectedIndex == 2;
-            var scripts = _type.SelectedIndex == 4;
+            // Source control is a scripts folder in git, Mercurial or Subversion at a revision.
+            var control = _type.SelectedIndex == 5;
+            var scripts = _type.SelectedIndex == 4 || control;
+            _revisionField.Visibility = control ? Visibility.Visible : Visibility.Collapsed;
+            if (control && _revision.Text.Trim().Length == 0) _revision.Text = "HEAD";
             _live.Visibility = snapshot || empty || scripts ? Visibility.Collapsed : Visibility.Visible;
             _scripts.Visibility = scripts ? Visibility.Visible : Visibility.Collapsed;
             _file.Visibility = snapshot ? Visibility.Visible : Visibility.Collapsed;
@@ -733,7 +738,7 @@ namespace QuillSql.Compare
         public void Load(JsonObject side, string password)
         {
             Side = side;
-            _type.SelectedIndex = side.Str("type") == "snapshot" ? 1 : side.Str("type") == "empty" ? 2 : side.Str("type") == "scripts" ? 4 : 0;
+            _type.SelectedIndex = side.Str("type") == "snapshot" ? 1 : side.Str("type") == "empty" ? 2 : side.Str("type") == "scripts" ? (string.IsNullOrEmpty(side.Str("revision")) ? 4 : 5) : 0;
             _server.Text = side.Str("server") ?? "";
             var auth = side.Str("authentication");
             _auth.SelectedIndex = auth == "sql" ? 1 : auth == "entra" ? 2 : 0;
@@ -751,7 +756,7 @@ namespace QuillSql.Compare
 
         public void Save()
         {
-            Side["type"] = _type.SelectedIndex == 1 ? "snapshot" : _type.SelectedIndex == 2 ? "empty" : _type.SelectedIndex == 4 ? "scripts" : "database";
+            Side["type"] = _type.SelectedIndex == 1 ? "snapshot" : _type.SelectedIndex == 2 ? "empty" : _type.SelectedIndex >= 4 ? "scripts" : "database";
             Side["server"] = _server.Text.Trim();
             Side["authentication"] = _auth.SelectedIndex == 1 ? "sql" : _auth.SelectedIndex == 2 ? "entra" : "windows";
             Side["user"] = _user.Text.Trim();
@@ -759,8 +764,8 @@ namespace QuillSql.Compare
             Side["encrypt"] = _encrypt.IsChecked == true;
             Side["trustServerCertificate"] = _trust.IsChecked == true;
             Side["database"] = _database.Text.Trim();
-            Side["path"] = _type.SelectedIndex == 4 ? _folder.Text.Trim() : _snapshot.Text.Trim();
-            if (_type.SelectedIndex == 4 && _revision.Text.Trim().Length > 0) Side["revision"] = _revision.Text.Trim();
+            Side["path"] = _type.SelectedIndex >= 4 ? _folder.Text.Trim() : _snapshot.Text.Trim();
+            if (_type.SelectedIndex == 5 && _revision.Text.Trim().Length > 0) Side["revision"] = _revision.Text.Trim();
             else Side.Remove("revision");
             _session.Project[_key] = Side;
             _session.Passwords[_key] = _password.Password;

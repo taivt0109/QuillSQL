@@ -180,6 +180,24 @@ namespace QuillSql.Compare
                 card.Margin = new Thickness(0, 8, 0, 0);
                 top.Children.Add(card);
             }
+            // Problems reading scripts folders: statements the parser skipped or could not read.
+            var warnings = result.Strings("warnings");
+            if (warnings.Count > 0)
+            {
+                var text = Ui.Text(Ui.Plural(warnings.Count, "warning", "warnings") + " while reading the data sources: " + warnings[0] + (warnings.Count > 1 ? " …" : ""), wrap: TextWrapping.Wrap);
+                var show = Ui.Button("Show warnings…", () => ShowWarnings(warnings), minWidth: 120);
+                var bar = new DockPanel();
+                var icon = Ui.Icon(Glyph.Warning, 15, CompareTheme.Medium);
+                icon.Margin = new Thickness(0, 0, 10, 0);
+                DockPanel.SetDock(icon, Dock.Left);
+                DockPanel.SetDock(show, Dock.Right);
+                bar.Children.Add(icon);
+                bar.Children.Add(show);
+                bar.Children.Add(text);
+                var card = Ui.Card(bar, 10);
+                card.Margin = new Thickness(0, 8, 0, 0);
+                top.Children.Add(card);
+            }
             top.Margin = new Thickness(28, 6, 28, 10);
 
             _leftTitle = Ui.Text("Source: " + _sourceName, bold: true);
@@ -258,6 +276,29 @@ namespace QuillSql.Compare
         private readonly StackPanel _empty;
         private readonly TextBlock _emptyText;
         private readonly int _identical;
+
+        /// <summary>The parser warnings, one per line, to read and copy.</summary>
+        private void ShowWarnings(List<string> warnings)
+        {
+            var w = Ui.Dialog(_session.Host.Owner, "Parser warnings", null, 820, 520);
+            var code = Ui.Code();
+            code.Text = string.Join(Environment.NewLine, warnings);
+            var heading = Ui.Title("Parser warnings", 18);
+            var lead = Ui.Text("The scripts folders were read with these warnings; the objects concerned may be compared incompletely.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            lead.Margin = new Thickness(0, 4, 0, 12);
+            var body = new DockPanel { Margin = new Thickness(24, 20, 24, 16) };
+            var head = Ui.Column(heading, lead);
+            DockPanel.SetDock(head, Dock.Top);
+            body.Children.Add(head);
+            body.Children.Add(Ui.Card(code, 0));
+            var copy = Ui.Button("Copy", () => Clipboard.SetText(code.Text), glyph: Glyph.Copy);
+            var close = Ui.Button("Close", () => w.Close(), primary: true);
+            close.IsCancel = true;
+            var buttons = Ui.Row(copy, close);
+            buttons.HorizontalAlignment = HorizontalAlignment.Right;
+            w.Content = Ui.WithFooter(body, buttons);
+            w.ShowDialog();
+        }
 
         private static string QName(JsonObject n) => n == null ? "" : "[" + n.Str("schema") + "].[" + n.Str("name") + "]";
 

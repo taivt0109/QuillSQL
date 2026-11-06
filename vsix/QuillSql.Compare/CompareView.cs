@@ -162,13 +162,17 @@ namespace QuillSql.Compare
 
         private void ShowResultCommands(bool shown)
         {
-            _switch.Visibility = _tools.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+            _switch.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
         }
 
         /// <summary>Reports, exports and saved results.</summary>
         private void FillToolsMenu()
         {
             _toolsMenu.Items.Clear();
+            if (_session != null && !_session.IsData)
+            {
+                _toolsMenu.Items.Add(Ui.MenuItem("Create scripts folder…", async () => await CreateScriptsFolder(), Glyph.Folder));
+            }
             if (_schemaResults != null)
             {
                 _toolsMenu.Items.Add(Ui.MenuItem("Create report…", async () => await Dialogs.SchemaReport(_session, _schemaResults), Glyph.Report));
@@ -278,7 +282,7 @@ namespace QuillSql.Compare
             {
                 Filter = "Compare projects (*.qsc, *.qdc)|*.qsc;*.qdc|SQL Compare and Data Compare projects (*.scp, *.sdc)|*.scp;*.sdc|All files|*.*",
             };
-            if (d.ShowDialog(_host.Owner) == true) await Open(d.FileName);
+            if (Dialogs.Show(d, _host.Owner) == true) await Open(d.FileName);
         }
 
         private async Task Save(bool saveAs)
@@ -298,7 +302,7 @@ namespace QuillSql.Compare
                     DefaultExt = ext,
                     FileName = SuggestedName() + "." + ext,
                 };
-                if (d.ShowDialog(_host.Owner) != true) return;
+                if (Dialogs.Show(d, _host.Owner) != true) return;
                 path = d.FileName;
             }
             // SQL Compare and SQL Data Compare projects are written in their format, without passwords.
@@ -408,6 +412,28 @@ namespace QuillSql.Compare
             UpdateTitle();
         }
 
+        /// <summary>Writes the source or the target as a scripts folder in SQL Compare's layout.</summary>
+        private async Task CreateScriptsFolder()
+        {
+            _editor?.Collect();
+            var choice = Ui.Message(_host.Owner, "Create scripts folder", "Create a scripts folder with the objects of which data source?", Ui.Tone.Question, "Source", "Target", "Cancel");
+            if (choice < 0 || choice == 2) return;
+            var side = _session.WithPasswords().Obj(choice == 0 ? "source" : "target");
+            if (side == null || side.Str("type") == "empty")
+            {
+                Ui.Error(_host.Owner, "Choose a database, snapshot or scripts folder first.");
+                return;
+            }
+            var folder = Dialogs.PickFolder(_host.Owner, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare"), "Create scripts folder in");
+            if (folder == null) return;
+            if (Directory.Exists(folder) && Directory.EnumerateFileSystemEntries(folder).Any() && !Ui.Confirm(_host.Owner, "The folder " + folder + " is not empty. Write the scripts into it anyway?")) return;
+            SetBusy(true, "Creating the scripts folder…");
+            var project = _session.WithPasswords();
+            project["source"] = side;
+            var done = await Ui.Try(_host.Owner, () => _engine.RequestObject("make_scripts", new JsonObject { ["project"] = project, ["path"] = folder }, Progress));
+            SetBusy(false, done == null ? "The scripts folder was not created." : "Created the scripts folder " + folder + " (" + Ui.Plural(done.Long("files"), "file", "files") + ").");
+        }
+
         /// <summary>Shows a comparison reply as results.</summary>
         private void ShowComparison(JsonObject result)
         {
@@ -515,7 +541,7 @@ namespace QuillSql.Compare
         {
             if (_dataResults == null) return;
             var d = new SaveFileDialog { Filter = "Saved data comparison (*.qdcr)|*.qdcr", DefaultExt = "qdcr", FileName = SuggestedName() + ".qdcr" };
-            if (d.ShowDialog(_host.Owner) != true) return;
+            if (Dialogs.Show(d, _host.Owner) != true) return;
             var ok = await Ui.Try(_host.Owner, () => _engine.Request("data_session_save", new JsonObject { ["session"] = _dataResults.Session, ["path"] = d.FileName }));
             if (ok != null) _status.Text = "Saved the results to " + d.FileName;
         }
@@ -523,7 +549,7 @@ namespace QuillSql.Compare
         private async Task OpenResults()
         {
             var d = new OpenFileDialog { Filter = "Saved data comparison (*.qdcr)|*.qdcr|All files|*.*" };
-            if (d.ShowDialog(_host.Owner) != true) return;
+            if (Dialogs.Show(d, _host.Owner) != true) return;
             if (!CanClose()) return;
             var defs = await OptionDefinitions();
             SetBusy(true, "Opening " + Path.GetFileName(d.FileName) + "…");
