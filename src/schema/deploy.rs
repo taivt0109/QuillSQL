@@ -2231,6 +2231,9 @@ impl<'a> Planner<'a> {
                 self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
             }
             self.database_permissions(&s.name, &[]);
+            if s.no_connect && !s.is_role() && !self.opts.has(Opt::IgnorePermissions) {
+                self.step(Phase::Permissions, "", vec![format!("REVOKE CONNECT FROM {q}")]);
+            }
         } else if let Some(t) = t
             && s.is_none()
         {
@@ -2288,6 +2291,10 @@ impl<'a> Planner<'a> {
             }
             let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &t.name)).cloned().collect();
             self.database_permissions(&s.name, &existing);
+            if !s.is_role() && s.no_connect != t.no_connect && !self.opts.has(Opt::IgnorePermissions) {
+                let sql = if s.no_connect { format!("REVOKE CONNECT FROM {q}") } else { format!("GRANT CONNECT TO {q}") };
+                self.step(Phase::Permissions, "", vec![sql]);
+            }
         }
     }
 
