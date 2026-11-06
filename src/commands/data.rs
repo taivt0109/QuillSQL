@@ -433,6 +433,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
                 console::log("Nothing to deploy.");
             }
         } else {
+            common::make_backup(args, &spec2)?;
             let ran = deploy::execute(&spec2, script, |i, n| {
                 if verbose {
                     eprintln!("Running batch {} of {n}", i + 1);

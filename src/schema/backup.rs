@@ -25,6 +25,12 @@ pub fn automatic_name(server: &str, database: &str, differential: bool, stamp: &
     format!("{}_{}_{}_{stamp}.bak", if differential { "DIFF" } else { "FULL" }, clean(server), clean(database))
 }
 
+/// `yyyymmdd_hhmmss` in local time, for automatic names.
+pub fn stamp() -> String {
+    let n = crate::commands::console::now();
+    format!("{:04}{:02}{:02}_{:02}{:02}{:02}", n.year, n.month, n.day, n.hour, n.minute, n.second)
+}
+
 /// The statement for a backup to `path`.
 pub fn statement(database: &str, path: &str, o: &BackupOptions) -> String {
     let mut with = vec![if o.overwrite { "INIT" } else { "NOINIT" }.to_string()];

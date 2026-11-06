@@ -235,7 +235,7 @@ pub const DEPLOY: [Switch; 21] = [
         repeatable: false,
         help: "Deprecated: use /include:Identical",
     },
-    Switch { name: "makebackup", aliases: &["mb"], takes_value: false, repeatable: false, help: "Back up database 2 before deploying (not supported yet)" },
+    Switch { name: "makebackup", aliases: &["mb"], takes_value: false, repeatable: false, help: "Back up database 2 before deploying (native SQL Server backup)" },
     Switch { name: "backupprovider", aliases: &["bpr"], takes_value: true, repeatable: false, help: "native or sqb" },
     Switch { name: "backuptype", aliases: &["bt"], takes_value: true, repeatable: false, help: "full or differential" },
     Switch { name: "backupfolder", aliases: &["bd"], takes_value: true, repeatable: false, help: "Folder for the backup" },
@@ -515,9 +515,35 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 }
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
+/// `/makebackup`: a native SQL Server backup of database 2 just before deploying, with
+/// `/backuptype`, `/backupfolder`, `/backupfile` and `/backupoverwriteexisting`.
+pub fn make_backup(args: &Args, target: &crate::db::ConnectionSpec) -> Result<(), ArgError> {
+    if !args.has("makebackup") {
+        return Ok(());
+    }
+    if args.get("backupprovider").is_some_and(|p| p.eq_ignore_ascii_case("sqb")) {
+        return Err(ArgError::new(exit::UNAVAILABLE, "/backupprovider:sqb (SQL Backup) is not supported by QuillSQL; use /backupprovider:native."));
+    }
+    for name in ["backupcompression", "backupencryption", "backuppassword", "backupnumberofthreads"] {
+        if args.has(name) {
+            console::warn(&format!("/{name} applies to SQL Backup only and is ignored for a native backup."));
+        }
+    }
+    let o = crate::schema::backup::BackupOptions {
+        folder: args.get("backupfolder").unwrap_or_default().to_string(),
+        file: args.get("backupfile").unwrap_or_default().to_string(),
+        name_automatically: !args.has("backupfile"),
+        overwrite: args.has("backupoverwriteexisting"),
+        differential: args.get("backuptype").is_some_and(|t| t.eq_ignore_ascii_case("differential")),
+    };
+    let path = crate::schema::backup::run(target, &o, &crate::schema::backup::stamp(), &|m: &str| console::verbose(m))
+        .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
+    console::verbose(&format!("Backed up database 2 to {path}"));
+    Ok(())
+}
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
     let _ = command;
-    for name in ["backup1", "backup2", "sca1", "sca2", "makebackup"] {
+    for name in ["backup1", "backup2", "sca1", "sca2"] {
         if args.has(name) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }

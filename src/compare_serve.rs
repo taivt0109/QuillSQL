@@ -681,7 +681,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let backup = match request.get("backup").filter(|b| !b.is_null()) {
                 Some(b) => {
                     let o: schema::backup::BackupOptions = serde_json::from_value(b.clone()).map_err(|e| format!("'backup': {e}"))?;
-                    Some(schema::backup::run(&spec, &o, &backup_stamp(), progress)?)
+                    Some(schema::backup::run(&spec, &o, &schema::backup::stamp(), progress)?)
                 }
                 None => None,
             };
@@ -699,7 +699,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 let mut c = crate::db::connect_async(&spec).await?;
                 schema::backup::default_folder(&mut c).await
             })?;
-            Ok(json!({"folder": folder, "file": schema::backup::automatic_name(&spec.server, &spec.database, differential, &backup_stamp())}))
+            Ok(json!({"folder": folder, "file": schema::backup::automatic_name(&spec.server, &spec.database, differential, &schema::backup::stamp())}))
         }
         "close" => {
             let id = session(request)?;
@@ -709,12 +709,6 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         other => Err(format!("unknown op '{other}'")),
     }
-}
-
-/// `yyyymmdd_hhmmss` in local time, for backup file names.
-fn backup_stamp() -> String {
-    let n = crate::commands::console::now();
-    format!("{:04}{:02}{:02}_{:02}{:02}{:02}", n.year, n.month, n.day, n.hour, n.minute, n.second)
 }
 
 /// The `data_rows` kind that lists every stored row.
