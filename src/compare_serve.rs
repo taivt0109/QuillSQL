@@ -57,8 +57,12 @@ struct DataSession {
     script: Option<DeploymentScript>,
     /// Row orders built for the All rows tab and for sorting, by (table, kind, sort).
     views: Views,
-    /// Scripts-folder sides, loaded into temporary databases for the life of the session.
+    /// Scripts-folder sides loaded into temporary databases, for the life of the session.
     staged: [Option<crate::sources::staging::Staging>; 2],
+    /// Scripts-folder sides read without a server.
+    folders: [Option<crate::sources::datafolder::DataFolder>; 2],
+    /// The row kinds of the last script, for deploying to a scripts folder.
+    kinds: [bool; 4],
 }
 
 impl DataSession {
@@ -418,33 +422,57 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         "data_compare" => {
             let project: Project = field(request, "project")?;
             let opts = data_options(&project)?;
-            // A scripts folder is loaded into a temporary database on the other side's server.
+            // A scripts folder is read without a server; when its data needs one, it is loaded
+            // into a temporary database on the other side's server.
             let host = [(&project.source, 1), (&project.target, 2)].into_iter().find(|(s, _)| !s.is_scripts() && !s.is_snapshot()).map(|(s, n)| s.connection(n)).transpose()?;
             let mut staged: [Option<crate::sources::staging::Staging>; 2] = [None, None];
+            let mut folders: [Option<crate::sources::datafolder::DataFolder>; 2] = [None, None];
             for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
                 if side.is_scripts() {
-                    let host = host.as_ref().ok_or("a scripts folder needs the other side to be a live database, to load its data")?;
-                    progress(&format!("Loading the data scripts of '{}'", side.path));
+                    progress(&format!("Reading the data scripts of '{}'", side.path));
                     let revision = (!side.revision.is_empty()).then_some(side.revision.as_str());
-                    staged[k] = Some(crate::sources::staging::stage(std::path::Path::new(&side.path), revision, host)?);
+                    match crate::sources::datafolder::read(std::path::Path::new(&side.path), revision)? {
+                        Ok(f) => folders[k] = Some(f),
+                        Err(reason) => {
+                            let host = host.as_ref().ok_or_else(|| format!("{reason}; reading the folder needs the other side to be a live database"))?;
+                            progress(&format!("Loading '{}' into a temporary database", side.path));
+                            staged[k] = Some(crate::sources::staging::stage(std::path::Path::new(&side.path), revision, host)?);
+                        }
+                    }
                 }
             }
-            let spec = |k: usize, side: &SourceSpec| staged[k].as_ref().map(|s| Ok(s.spec.clone())).unwrap_or_else(|| side.connection(k as u8 + 1));
-            let (s1, s2) = (spec(0, &project.source)?, spec(1, &project.target)?);
-            progress(&format!("Reading {}", project.source.describe()));
-            let mut db1 = catalog::read_database_with(&s1, false)?;
-            progress(&format!("Reading {}", project.target.describe()));
-            let mut db2 = catalog::read_database_with(&s2, false)?;
-            for (db, s) in [(&mut db1, &staged[0]), (&mut db2, &staged[1])] {
-                if let Some(s) = s {
+            let mut dbs = Vec::new();
+            let mut specs = Vec::new();
+            for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
+                progress(&format!("Reading {}", side.describe()));
+                if let Some(f) = &folders[k] {
+                    dbs.push(f.folder.database.clone());
+                    specs.push(None);
+                    continue;
+                }
+                let spec = match &staged[k] {
+                    Some(s) => s.spec.clone(),
+                    None => side.connection(k as u8 + 1)?,
+                };
+                let mut db = catalog::read_database_with(&spec, false)?;
+                if let Some(s) = &staged[k] {
                     db.name = s.folder.database.name.clone();
                 }
+                dbs.push(db);
+                specs.push(Some(spec));
             }
+            let db2 = dbs.pop().unwrap_or_default();
+            let db1 = dbs.pop().unwrap_or_default();
+            let rows = |k: usize| match (&folders[k], &specs[k]) {
+                (Some(f), _) => crate::data::compare::RowSource::Memory(&f.memory),
+                (None, Some(spec)) => crate::data::compare::RowSource::Live(spec),
+                (None, None) => unreachable!(),
+            };
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
-            let result = crate::data::compare::compare(
-                &s1,
-                &s2,
+            let result = crate::data::compare::compare_sources(
+                rows(0),
+                rows(1),
                 &db1,
                 &db2,
                 &opts,
@@ -456,7 +484,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             state.next += 1;
             let id = state.next;
             let reply = data_session_json(id, &db1.name, &db2.name, &result);
-            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), staged });
+            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), staged, folders, kinds: [false, true, true, true] });
             Ok(reply)
         }
         // `kind` 0–3 is a row kind (`RowKind::ALL` order), 4 every stored row in comparison order;
@@ -571,6 +599,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let mut settings = crate::data::sync::SyncSettings::new(&side(&s.project.source, &s.source_name), &side(&s.project.target, &s.db2.name), &s.db2.name);
             settings.transaction_isolation_level = request.get("isolationLevel").and_then(Value::as_str).unwrap_or("SERIALIZABLE").to_ascii_uppercase();
             settings.kinds = kinds;
+            s.kinds = kinds;
             settings.tables = tables.map(|ix| ix.iter().filter_map(|&i| s.result.tables.get(i)).map(|t| t.pair.source.clone()).collect());
             settings.selections = selections(request, &s.result)?;
             settings.max_transaction_bytes = request.get("maxTransactionSizeMB").and_then(Value::as_u64).filter(|&m| m > 0).map(|m| m * 1_048_576);
@@ -598,7 +627,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let id = state.next;
             let mut reply = data_session_json(id, &source_name, &db2.name, &result);
             reply["project"] = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), staged: [None, None] });
+            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), staged: [None, None], folders: [None, None], kinds: [false, true, true, true] });
             Ok(reply)
         }
         "deploy" => {
@@ -626,6 +655,15 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             }
             // A data comparison whose target is a scripts folder: run the script on the loaded
             // copy, then write the changed tables' data scripts.
+            if let Some(s) = state.data.get_mut(&id)
+                && let Some(f) = &mut s.folders[1]
+            {
+                if s.script.is_none() {
+                    return Err("create the deployment script first".into());
+                }
+                let files = f.write_back(&s.result, s.kinds)?;
+                return Ok(json!({"batches": 0, "written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()}));
+            }
             if let Some(s) = state.data.get(&id)
                 && let Some(staged) = &s.staged[1]
             {
