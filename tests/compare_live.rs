@@ -170,7 +170,24 @@ fn compares_two_versions_of_the_shop() {
     assert_eq!(line.properties.iter().filter(|p| p.name == "Column").count(), 2);
 
     // Ignoring the differences in Customer except the column ones.
-    let opts = Options::default_set().with(Opt::IgnoreExtendedProperties).with(Opt::IgnoreChecks).with(Opt::IgnoreIndexes);
+    // Users, roles and permissions.
+    let app = c.differences.iter().find(|d| d.object_type == ObjectType::User && d.name.name == "app").unwrap();
+    let names: Vec<&str> = app.properties.iter().map(|p| p.name.as_str()).collect();
+    // IgnoreUserProperties is a default, as in SQL Compare: the default schema is not compared.
+    assert_eq!(names, ["Member of"]);
+    let all = schema::compare(&db1, &db2, &Options::default_set().without(Opt::IgnoreUserProperties), &Mappings::default());
+    let app2 = all.differences.iter().find(|d| d.object_type == ObjectType::User && d.name.name == "app").unwrap();
+    assert!(app2.properties.iter().any(|p| p.name == "Default schema"));
+    assert_eq!(find(ObjectType::Role, "Auditors").kind, DiffKind::OnlyIn2);
+    assert!(customer.properties.iter().any(|p| p.name == "Permission" && p.target.as_deref() == Some("GRANT SELECT TO app")));
+    let ignored = schema::compare(&db1, &db2, &Options::default_set().with(Opt::IgnoreUsers).with(Opt::IgnorePermissions), &Mappings::default());
+    assert!(!ignored.differences.iter().any(|d| d.object_type == ObjectType::User));
+
+    let opts = Options::default_set()
+        .with(Opt::IgnoreExtendedProperties)
+        .with(Opt::IgnoreChecks)
+        .with(Opt::IgnoreIndexes)
+        .with(Opt::IgnorePermissions);
     let c = schema::compare(&db1, &db2, &opts, &Mappings::default());
     let customer = c.differences.iter().find(|d| d.name.name == "Customer").unwrap();
     assert!(customer.properties.iter().all(|p| p.location.first().is_some_and(|f| f.name == "Column") || p.name == "Column"));

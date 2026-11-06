@@ -39,3 +39,9 @@ EXEC sp_updateextendedproperty N'MS_Description', N'Customers', N'SCHEMA', N'dbo
 GO
 EXEC sp_rename N'Sales.OrderLine.Qty', N'Quantity', N'COLUMN';
 GO
+GRANT SELECT ON dbo.Customer TO app;
+REVOKE EXECUTE ON Sales.GetOrders FROM app;
+CREATE ROLE Auditors;
+ALTER ROLE db_datareader DROP MEMBER app;
+ALTER USER app WITH DEFAULT_SCHEMA = dbo;
+GO

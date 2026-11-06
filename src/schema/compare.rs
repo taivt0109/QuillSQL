@@ -14,6 +14,8 @@ use crate::catalog::*;
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ObjectType {
     Schema,
+    Role,
+    User,
     UserDefinedType,
     Table,
     View,
@@ -25,8 +27,10 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
-    pub const ALL: [ObjectType; 9] = [
+    pub const ALL: [ObjectType; 11] = [
         ObjectType::Schema,
+        ObjectType::Role,
+        ObjectType::User,
         ObjectType::UserDefinedType,
         ObjectType::Table,
         ObjectType::View,
@@ -41,6 +45,8 @@ impl ObjectType {
     pub fn label(self) -> &'static str {
         match self {
             ObjectType::Schema => "Schema",
+            ObjectType::Role => "Role",
+            ObjectType::User => "User",
             ObjectType::UserDefinedType => "User-defined type",
             ObjectType::Table => "Table",
             ObjectType::View => "View",
@@ -159,6 +165,7 @@ impl Comparison {
 pub fn compare(db1: &Database, db2: &Database, opts: &Options, mappings: &Mappings) -> Comparison {
     let mut c = Comparer::new(db1, db2, opts, mappings);
     c.schemas();
+    c.principals();
     c.objects(ObjectType::UserDefinedType, &db1.types, &db2.types, |t| (&t.schema, &t.name), Comparer::udt);
     c.tables();
     c.objects(ObjectType::View, &db1.views, &db2.views, |v| (&v.schema, &v.name), Comparer::view);
@@ -355,6 +362,7 @@ impl<'a> Comparer<'a> {
                     d.prop("Owner", &a.owner, &b.owner);
                 }
                 c.xprops(&mut d, "SCHEMA", None, &a.name, &b.name);
+                c.permissions(&mut d, "SCHEMA", &a.name, None, &b.name, None);
                 d.out
             },
         );
@@ -437,6 +445,7 @@ impl<'a> Comparer<'a> {
             self.triggers(d, &a.triggers, &b.triggers);
         }
         self.xprops(d, "TABLE", Some(&a.schema), &a.name, &b.name);
+        self.permissions(d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         let partitioned = a.storage.partition_column.is_some() || b.storage.partition_column.is_some();
         if !o.has(Opt::IgnoreDataCompression) && !(partitioned && o.has(Opt::IgnoreFileGroups)) {
             d.prop("Data compression", compression(&a.storage), compression(&b.storage));
@@ -823,6 +832,7 @@ impl<'a> Comparer<'a> {
         }
         self.indexes(&mut d, &a.indexes, &b.indexes, false);
         self.xprops(&mut d, "VIEW", Some(&a.schema), &a.name, &b.name);
+        self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         d.out
     }
 
@@ -840,6 +850,7 @@ impl<'a> Comparer<'a> {
         self.settings(&mut d, &a.settings, &b.settings);
         let class = if is_function(a) { "FUNCTION" } else { "PROCEDURE" };
         self.xprops(&mut d, class, Some(&a.schema), &a.name, &b.name);
+        self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         d.out
     }
 
@@ -886,6 +897,7 @@ impl<'a> Comparer<'a> {
             d.opt_prop("Cache size", a.cache_size.map(|v| v.to_string()).as_deref(), b.cache_size.map(|v| v.to_string()).as_deref());
         }
         self.xprops(&mut d, "SEQUENCE", Some(&a.schema), &a.name, &b.name);
+        self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         d.out
     }
 
@@ -902,7 +914,113 @@ impl<'a> Comparer<'a> {
             d.add("Referenced object", Some(a.base_object.clone()), Some(b.base_object.clone()));
         }
         self.xprops(&mut d, "SYNONYM", Some(&a.schema), &a.name, &b.name);
+        self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         d.out
+    }
+
+    /// Users (unless IgnoreUsers) and roles; role membership is reported on the member.
+    fn principals(&mut self) {
+        let o = self.opts;
+        let keep = |p: &&Principal| p.is_role() || !o.has(Opt::IgnoreUsers);
+        let left: Vec<&Principal> = self.db1.principals.iter().filter(keep).collect();
+        let right: Vec<&Principal> = self.db2.principals.iter().filter(keep).collect();
+        let empty = String::new();
+        for (ty, role) in [(ObjectType::Role, true), (ObjectType::User, false)] {
+            let l: Vec<&Principal> = left.iter().copied().filter(|p| p.is_role() == role).collect();
+            let r: Vec<&Principal> = right.iter().copied().filter(|p| p.is_role() == role).collect();
+            self.objects(ty, &l, &r, |p| (&empty, &p.name), |c, a, b| c.principal(a, b));
+        }
+        for diff in &mut self.result.differences {
+            if matches!(diff.object_type, ObjectType::Role | ObjectType::User) {
+                diff.name.schema.clear();
+            }
+        }
+    }
+
+    fn principal(&self, a: &Principal, b: &Principal) -> Vec<PropDiff> {
+        let o = self.opts;
+        let mut d = Diffs::default();
+        d.prop("Type", &a.kind, &b.kind);
+        if !a.is_role() && !o.has(Opt::IgnoreUserProperties) {
+            // Windows logins compare without their domain.
+            let login = |p: &Principal| p.login.as_deref().map(|l| self.key(l.rsplit('\\').next().unwrap_or(l)));
+            if login(a) != login(b) {
+                d.add("Login", a.login.clone(), b.login.clone());
+            }
+            d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
+        }
+        if a.is_role() && !o.has(Opt::IgnoreOwners) && !o.has(Opt::IgnoreSchemaObjectAuthorization) {
+            d.opt_prop("Owner", a.owner.as_deref(), b.owner.as_deref());
+        }
+        let roles = |p: &Principal| {
+            let mut v: Vec<String> = p.member_of.iter().map(|r| self.key(r)).collect();
+            v.sort();
+            v
+        };
+        if roles(a) != roles(b) {
+            d.add("Member of", Some(a.member_of.join(", ")), Some(b.member_of.join(", ")));
+        }
+        // Database-level permissions belong to their grantee.
+        if !o.has(Opt::IgnorePermissions) {
+            let of = |db: &Database, name: &str| -> Vec<String> {
+                let mut v: Vec<String> =
+                    db.permissions.iter().filter(|p| p.class == "DATABASE" && self.same_name(&p.grantee, name)).map(|p| p.grant_sql()).collect();
+                v.sort();
+                v
+            };
+            let (x, y) = (of(self.db1, &a.name), of(self.db2, &b.name));
+            for g in x.iter().filter(|g| !y.iter().any(|h| self.key(h) == self.key(g))) {
+                d.add("Permission", Some(g.clone()), None);
+            }
+            for g in y.iter().filter(|g| !x.iter().any(|h| self.key(h) == self.key(g))) {
+                d.add("Permission", None, Some(g.clone()));
+            }
+        }
+        d.out
+    }
+
+    /// GRANT/DENY on one securable. With IgnoreUsers only roles' permissions count.
+    fn permissions(&self, d: &mut Diffs, class: &str, schema1: &str, name1: Option<&str>, schema2: &str, name2: Option<&str>) {
+        if self.opts.has(Opt::IgnorePermissions) {
+            return;
+        }
+        let ignore_users = self.opts.has(Opt::IgnoreUsers);
+        let of = |db: &Database, schema: &str, name: Option<&str>| -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = db
+                .permissions
+                .iter()
+                .filter(|p| {
+                    p.class == class
+                        && p.schema.as_deref().is_some_and(|s| self.same_name(s, schema))
+                        && match (name, p.object.as_deref()) {
+                            (Some(n), Some(o)) => self.same_name(n, o),
+                            (None, None) => true,
+                            _ => false,
+                        }
+                        && (!ignore_users || p.grantee == "public" || db.principals.iter().any(|x| x.is_role() && x.name == p.grantee))
+                })
+                // Compared without the securable, which may be named differently on each side.
+                .map(|p| {
+                    (
+                        self.key(&format!("{} {} {}", p.state, p.permission, p.grantee)),
+                        format!("{} {} TO {}", p.state.replace('_', " "), p.permission, p.grantee),
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let (x, y) = (of(self.db1, schema1, name1), of(self.db2, schema2, name2));
+        for (k, text) in &x {
+            if !y.iter().any(|(k2, _)| k2 == k) {
+                d.add("Permission", Some(text.clone()), None);
+            }
+        }
+        for (k, text) in &y {
+            if !x.iter().any(|(k2, _)| k2 == k) {
+                d.add("Permission", None, Some(text.clone()));
+            }
+        }
     }
 
     fn database_properties(&mut self) {

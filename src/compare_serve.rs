@@ -434,6 +434,22 @@ fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<String
         ObjectType::UserDefinedType => db.types.iter().find(|t| same(&t.schema, &t.name)).map(ddl::create_type),
         ObjectType::Sequence => db.sequences.iter().find(|s| same(&s.schema, &s.name)).map(ddl::create_sequence),
         ObjectType::Synonym => db.synonyms.iter().find(|s| same(&s.schema, &s.name)).map(ddl::create_synonym),
+        ObjectType::Role | ObjectType::User => db.principals.iter().find(|p| p.name == name.name).map(|p| {
+            let mut lines = vec![format!("-- {} {}", p.kind.to_lowercase().replace('_', " "), crate::db::quote(&p.name))];
+            if let Some(l) = &p.login {
+                lines.push(format!("-- login: {l}"));
+            }
+            if let Some(s) = &p.default_schema {
+                lines.push(format!("-- default schema: {s}"));
+            }
+            for r in &p.member_of {
+                lines.push(format!("ALTER ROLE {} ADD MEMBER {}", crate::db::quote(r), crate::db::quote(&p.name)));
+            }
+            for g in db.permissions.iter().filter(|g| g.class == "DATABASE" && g.grantee == p.name) {
+                lines.push(g.grant_sql());
+            }
+            lines.join("\n")
+        }),
         ObjectType::Schema => db
             .schemas
             .iter()

@@ -66,6 +66,8 @@ impl DeploymentScript {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Phase {
     CreateSchemas,
+    CreatePrincipals,
+    RoleMembers,
     DropExtendedProperties,
     DropForeignKeys,
     DropChecks,
@@ -89,7 +91,9 @@ enum Phase {
     Triggers,
     CreateSynonyms,
     ExtendedProperties,
+    Permissions,
     DropSchemas,
+    DropPrincipals,
 }
 
 #[derive(Debug)]
@@ -222,6 +226,7 @@ impl<'a> Planner<'a> {
             match d.object_type {
                 ObjectType::Table => self.table(d),
                 ObjectType::Schema => self.schema(d),
+                ObjectType::Role | ObjectType::User => self.principal(d),
                 _ => {}
             }
         }
@@ -237,6 +242,7 @@ impl<'a> Planner<'a> {
         }
         self.dependants();
         self.extended_properties(&selected);
+        self.permissions(&selected);
         self.sort();
     }
 
@@ -1247,6 +1253,7 @@ impl<'a> Planner<'a> {
         }
         for d in selected {
             let class = match d.object_type {
+                ObjectType::Role | ObjectType::User => continue,
                 ObjectType::Table => "TABLE",
                 ObjectType::View => "VIEW",
                 ObjectType::Function => "FUNCTION",
@@ -1293,6 +1300,165 @@ impl<'a> Planner<'a> {
                     }
                 }
             }
+        }
+    }
+
+    // ---- Users, roles and permissions ----
+
+    fn principal(&mut self, d: &Difference) {
+        let find = |db: &'a Database, n: &str| db.principals.iter().find(|p| p.name == n);
+        let tn = self.target_name(d);
+        let (s, t) = (find(self.src, &d.name.name), find(self.tgt, &tn.name));
+        let q = quote(&d.name.name);
+        if let Some(s) = s
+            && t.is_none()
+        {
+            let mut sql = Vec::new();
+            match s.kind.as_str() {
+                "DATABASE_ROLE" => {
+                    let owner = s.owner.as_deref().filter(|o| *o != "dbo").map(|o| format!(" AUTHORIZATION {}", quote(o))).unwrap_or_default();
+                    sql.push(format!("CREATE ROLE {q}{owner}"));
+                }
+                "SQL_USER" | "WINDOWS_USER" | "WINDOWS_GROUP" => {
+                    let schema = s.default_schema.as_deref().filter(|x| *x != "dbo").map(|x| format!(" WITH DEFAULT_SCHEMA = {}", quote(x))).unwrap_or_default();
+                    match &s.login {
+                        Some(login) => {
+                            self.warn(Severity::Low, q.clone(), format!("the login {login} must exist on the target server"));
+                            sql.push(format!("CREATE USER {q} FOR LOGIN {}{schema}", quote(login)));
+                        }
+                        None => sql.push(format!("CREATE USER {q} WITHOUT LOGIN{schema}")),
+                    }
+                }
+                "EXTERNAL_USER" | "EXTERNAL_GROUP" => {
+                    let schema = s.default_schema.as_deref().filter(|x| *x != "dbo").map(|x| format!(" WITH DEFAULT_SCHEMA = {}", quote(x))).unwrap_or_default();
+                    sql.push(format!("CREATE USER {q} FROM EXTERNAL PROVIDER{schema}"));
+                }
+                other => {
+                    self.warn(Severity::High, q.clone(), format!("{other} principals are not scripted yet; create it by hand"));
+                    return;
+                }
+            }
+            self.step(Phase::CreatePrincipals, format!("Creating {q}"), sql);
+            for r in &s.member_of {
+                self.step(Phase::RoleMembers, format!("Adding {q} to role {}", quote(r)), vec![format!("ALTER ROLE {} ADD MEMBER {q}", quote(r))]);
+            }
+            self.database_permissions(&s.name, &[]);
+        } else if let Some(t) = t
+            && s.is_none()
+        {
+            let tq = quote(&t.name);
+            self.warn(Severity::Low, tq.clone(), "the principal is dropped; objects it owns must be given to another owner first");
+            let mut sql: Vec<String> = Vec::new();
+            if t.is_role() {
+                for m in self.tgt.principals.iter().filter(|m| m.member_of.contains(&t.name)) {
+                    sql.push(format!("ALTER ROLE {tq} DROP MEMBER {}", quote(&m.name)));
+                }
+                sql.push(format!("DROP ROLE {tq}"));
+            } else {
+                sql.push(format!("DROP USER {tq}"));
+            }
+            self.step(Phase::DropPrincipals, format!("Dropping {tq}"), sql);
+        } else if let (Some(s), Some(t)) = (s, t) {
+            let mut sql = Vec::new();
+            if !s.is_role() && !self.opts.has(Opt::IgnoreUserProperties) {
+                let mut with = Vec::new();
+                if s.default_schema != t.default_schema
+                    && let Some(x) = &s.default_schema
+                {
+                    with.push(format!("DEFAULT_SCHEMA = {}", quote(x)));
+                }
+                if s.login != t.login
+                    && let Some(l) = &s.login
+                {
+                    with.push(format!("LOGIN = {}", quote(l)));
+                }
+                if !with.is_empty() {
+                    sql.push(format!("ALTER USER {q} WITH {}", with.join(", ")));
+                }
+            }
+            if s.is_role() && s.owner != t.owner && !self.opts.has(Opt::IgnoreOwners) {
+                sql.push(format!("ALTER AUTHORIZATION ON ROLE::{q} TO {}", quote(s.owner.as_deref().unwrap_or("dbo"))));
+            }
+            self.step(Phase::CreatePrincipals, format!("Altering {q}"), sql);
+            let added: Vec<&String> = s.member_of.iter().filter(|r| !t.member_of.iter().any(|x| self.same(x, r))).collect();
+            let removed: Vec<&String> = t.member_of.iter().filter(|r| !s.member_of.iter().any(|x| self.same(x, r))).collect();
+            for r in added {
+                self.step(Phase::RoleMembers, format!("Adding {q} to role {}", quote(r)), vec![format!("ALTER ROLE {} ADD MEMBER {q}", quote(r))]);
+            }
+            for r in removed {
+                self.step(Phase::RoleMembers, format!("Removing {q} from role {}", quote(r)), vec![format!("ALTER ROLE {} DROP MEMBER {q}", quote(r))]);
+            }
+            let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &t.name)).cloned().collect();
+            self.database_permissions(&s.name, &existing);
+        }
+    }
+
+    /// Database-level GRANT/DENY of one principal: source's minus what the target has.
+    fn database_permissions(&mut self, grantee: &str, existing: &[Permission]) {
+        if self.opts.has(Opt::IgnorePermissions) {
+            return;
+        }
+        let wanted: Vec<Permission> = self.src.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, grantee)).cloned().collect();
+        let key = |p: &Permission| self.key(&format!("{} {}", p.state, p.permission));
+        let grants: Vec<String> = wanted.iter().filter(|w| !existing.iter().any(|e| key(e) == key(w))).map(Permission::grant_sql).collect();
+        let revokes: Vec<String> = existing.iter().filter(|e| !wanted.iter().any(|w| key(w) == key(e))).map(Permission::revoke_sql).collect();
+        self.step(Phase::Permissions, "Altering permissions", revokes.into_iter().chain(grants).collect());
+    }
+
+    /// GRANT, DENY and REVOKE for the securables of the selected differences. Objects that are
+    /// created, rebuilt or re-created have no permissions yet, so all of the source's are granted
+    /// (or, with IgnorePermissions, the target's are restored).
+    fn permissions(&mut self, selected: &[&Difference]) {
+        let ignore = self.opts.has(Opt::IgnorePermissions);
+        let roles_only = self.opts.has(Opt::IgnoreUsers);
+        for d in selected {
+            let (class, object) = match d.object_type {
+                ObjectType::Table | ObjectType::View | ObjectType::Function | ObjectType::StoredProcedure | ObjectType::Sequence | ObjectType::Synonym => ("OBJECT", true),
+                ObjectType::Schema => ("SCHEMA", false),
+                _ => continue,
+            };
+            if d.kind == DiffKind::OnlyIn2 {
+                continue;
+            }
+            let tn = self.target_name(d);
+            let on = |db: &'a Database, n: &ObjectName| -> Vec<Permission> {
+                let (schema, obj) = if object { (n.schema.as_str(), Some(n.name.as_str())) } else { (n.name.as_str(), None) };
+                db.permissions
+                    .iter()
+                    .filter(|p| {
+                        p.class == class
+                            && p.schema.as_deref() == Some(schema)
+                            && p.object.as_deref() == obj
+                            && (!roles_only || p.grantee == "public" || db.principals.iter().any(|x| x.is_role() && x.name == p.grantee))
+                    })
+                    .cloned()
+                    .collect()
+            };
+            let fresh = d.kind == DiffKind::OnlyIn1 || self.recreate.contains(&d.name) || self.dropped.contains(&tn);
+            let existing = if fresh { Vec::new() } else { on(self.tgt, &tn) };
+            let wanted = if ignore {
+                if fresh && d.kind != DiffKind::OnlyIn1 { on(self.tgt, &tn) } else { continue }
+            } else {
+                on(self.src, &d.name)
+            };
+            // Statements name the object as it is called after the deployment.
+            let retarget = |p: &Permission| {
+                let mut p = p.clone();
+                if object {
+                    p.schema = Some(d.name.schema.clone());
+                    p.object = Some(d.name.name.clone());
+                } else {
+                    p.schema = Some(d.name.name.clone());
+                }
+                p
+            };
+            let key = |p: &Permission| self.key(&format!("{} {} {}", p.state, p.permission, p.grantee));
+            let revokes: Vec<String> =
+                existing.iter().filter(|e| !wanted.iter().any(|w| key(w) == key(e))).map(|e| retarget(e).revoke_sql()).collect();
+            let grants: Vec<String> =
+                wanted.iter().filter(|w| !existing.iter().any(|e| key(e) == key(w))).map(|w| retarget(w).grant_sql()).collect();
+            let label = if object { d.name.to_string() } else { quote(&d.name.name) };
+            self.step(Phase::Permissions, format!("Altering permissions on {label}"), revokes.into_iter().chain(grants).collect());
         }
     }
 
