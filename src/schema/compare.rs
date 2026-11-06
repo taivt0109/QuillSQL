@@ -1059,6 +1059,13 @@ fn strip_with_encryption(text: &str) -> String {
     text.to_string()
 }
 
+/// The differences between two columns under the options (empty when equal).
+pub(crate) fn column_differences(a: &Column, b: &Column, o: &Options, memory_optimized: bool) -> Vec<PropDiff> {
+    let mut d = Diffs::default();
+    column_props(&mut d, a, b, o, memory_optimized, false);
+    d.out
+}
+
 /// Column properties (spec §4.1). `memory_optimized` makes collation always count;
 /// `ignore_default` is used when probing for auto-mapped columns.
 fn column_props(d: &mut Diffs, a: &Column, b: &Column, o: &Options, memory_optimized: bool, ignore_default: bool) {

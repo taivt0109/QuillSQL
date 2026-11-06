@@ -6,9 +6,51 @@ use super::common::{self, Source};
 use crate::args::{self, ArgError, Args, Switch, exit};
 use crate::catalog::{self, Database};
 use crate::schema::select::Selection;
-use crate::schema::{self, DiffKind, Difference, Mappings, Options, print};
+use crate::schema::{self, DiffKind, Difference, Mappings, Options, deploy, print};
 
-const ACTIONS: [Switch; 6] = [
+const ACTIONS: [Switch; 12] = [
+    Switch {
+        name: "scriptfile",
+        aliases: &["sf"],
+        takes_value: true,
+        repeatable: false,
+        help: "Write the deployment script to a file",
+    },
+    Switch {
+        name: "synchronize",
+        aliases: &["sync"],
+        takes_value: false,
+        repeatable: false,
+        help: "Deploy the differences to database 2",
+    },
+    Switch {
+        name: "abortOnWarnings",
+        aliases: &["aow"],
+        takes_value: true,
+        repeatable: false,
+        help: "None (default), Medium or High: stop before deploying when warnings this serious exist (exit 61)",
+    },
+    Switch {
+        name: "showWarnings",
+        aliases: &["warn"],
+        takes_value: false,
+        repeatable: false,
+        help: "Print the deployment warnings",
+    },
+    Switch {
+        name: "transactionIsolationLevel",
+        aliases: &["til"],
+        takes_value: true,
+        repeatable: false,
+        help: "Isolation level for the deployment transaction (default SERIALIZABLE)",
+    },
+    Switch {
+        name: "syncScriptEncoding",
+        aliases: &["senc"],
+        takes_value: true,
+        repeatable: false,
+        help: "UTF8WithPreamble (default), UTF8, Unicode or ASCII",
+    },
     Switch {
         name: "makesnapshot",
         aliases: &["mksnap"],
@@ -149,7 +191,111 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
         return Ok(exit::IDENTICAL);
     }
+
+    if !args.has("scriptfile") && !args.has("synchronize") {
+        return Ok(exit::SUCCESS);
+    }
+    if args.has("synchronize") && !matches!(source2, Source::Live(_)) {
+        return Err(ArgError::new(exit::USAGE, "/synchronize needs database 2 to be a live database, not a snapshot"));
+    }
+    let script = build_script(args, &comparison, &db1, &db2, &options, &source1, &source2)?;
+    write_script(args, &script)?;
+    report_warnings(args, &script);
+    check_warnings(args, &script)?;
+    if let (true, Source::Live(target)) = (args.has("synchronize"), &source2) {
+        if script.is_empty() {
+            if !quiet {
+                println!("Nothing to deploy.");
+            }
+            return Ok(exit::SUCCESS);
+        }
+        let verbose = args.has("verbose");
+        let ran = deploy::execute(target, &script, |i, n| {
+            if verbose {
+                eprintln!("Running batch {} of {n}", i + 1);
+            }
+        })
+        .map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
+        if !quiet {
+            println!("Deployed {} to {} ({ran} batches).", db1.name, target.describe());
+        }
+    }
     Ok(exit::SUCCESS)
+}
+
+fn describe(source: &Source, db: &Database) -> String {
+    match source {
+        Source::Live(spec) => format!("{}.{}", spec.server, db.name),
+        Source::Snapshot(path) => format!("{} (snapshot {})", db.name, path.display()),
+    }
+}
+
+fn build_script(
+    args: &Args,
+    comparison: &schema::Comparison,
+    db1: &Database,
+    db2: &Database,
+    options: &Options,
+    source1: &Source,
+    source2: &Source,
+) -> Result<deploy::DeploymentScript, ArgError> {
+    let settings = deploy::ScriptSettings {
+        transaction_isolation_level: args.get("transactionIsolationLevel").unwrap_or("SERIALIZABLE").to_ascii_uppercase(),
+        source: describe(source1, db1),
+        target: describe(source2, db2),
+        target_database: db2.name.clone(),
+        target_major_version: if db2.server.is_azure_sql_database() { 99 } else { db2.server.major_version },
+    };
+    deploy::generate(comparison, db1, db2, options, &Mappings::default(), &settings).map_err(|e| ArgError::new(exit::INVALID_VALUE, e))
+}
+
+fn write_script(args: &Args, script: &deploy::DeploymentScript) -> Result<(), ArgError> {
+    let Some(path) = args.get("scriptfile") else { return Ok(()) };
+    let path = Path::new(path);
+    common::check_output(path, args)?;
+    let bytes = match args.get("syncScriptEncoding").unwrap_or("UTF8WithPreamble").to_ascii_lowercase().as_str() {
+        "utf8withpreamble" => [&[0xEF, 0xBB, 0xBF][..], script.sql.as_bytes()].concat(),
+        "utf8" => script.sql.as_bytes().to_vec(),
+        "unicode" => [0xFF, 0xFE].into_iter().chain(script.sql.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
+        "ascii" => script.sql.chars().map(|c| if c.is_ascii() { c as u8 } else { b'?' }).collect(),
+        other => return Err(ArgError::new(exit::INVALID_VALUE, format!("/syncScriptEncoding: unknown encoding '{other}'"))),
+    };
+    std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{}: {e}", path.display())))?;
+    if !args.has("quiet") {
+        println!("Deployment script written to {}.", path.display());
+    }
+    Ok(())
+}
+
+fn report_warnings(args: &Args, script: &deploy::DeploymentScript) {
+    if script.warnings.is_empty() || args.has("quiet") {
+        return;
+    }
+    if args.has("showWarnings") || args.has("verbose") {
+        for w in &script.warnings {
+            let object = if w.object.is_empty() { String::new() } else { format!("{}: ", w.object) };
+            println!("({:?}) {object}{}", w.severity, w.message);
+        }
+    } else {
+        println!("{} deployment warning(s); add /showWarnings to list them.", script.warnings.len());
+    }
+}
+
+/// `/abortOnWarnings`: High stops on High warnings, Medium on Medium or High.
+fn check_warnings(args: &Args, script: &deploy::DeploymentScript) -> Result<(), ArgError> {
+    let level = match args.get("abortOnWarnings").map(str::to_ascii_lowercase).as_deref() {
+        None | Some("none") => return Ok(()),
+        Some("high") => deploy::Severity::High,
+        Some("medium") | Some("true") => deploy::Severity::Medium,
+        Some(other) => return Err(ArgError::new(exit::INVALID_VALUE, format!("/abortOnWarnings: unknown level '{other}'"))),
+    };
+    if let Some(w) = script.warnings.iter().find(|w| w.severity >= level) {
+        return Err(ArgError::new(
+            exit::ABORTED_ON_WARNINGS,
+            format!("stopped because of a {:?} warning: {} {}", w.severity, w.object, w.message),
+        ));
+    }
+    Ok(())
 }
 
 /// Reads one side of the comparison.

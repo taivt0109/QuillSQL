@@ -175,3 +175,95 @@ fn compares_two_versions_of_the_shop() {
     let customer = c.differences.iter().find(|d| d.name.name == "Customer").unwrap();
     assert!(customer.properties.iter().all(|p| p.location.first().is_some_and(|f| f.name == "Column") || p.name == "Column"));
 }
+
+/// Deploys `from` onto `to` and checks that a new comparison finds nothing left to do.
+fn converge(server: &Server, from_db: &str, to_db: &str, opts: &quillsql::schema::Options) -> quillsql::schema::deploy::DeploymentScript {
+    use quillsql::schema::{self, Mappings, deploy};
+    let db1 = catalog::read_database(&server.spec(from_db)).unwrap();
+    let db2 = catalog::read_database(&server.spec(to_db)).unwrap();
+    let c = schema::compare(&db1, &db2, opts, &Mappings::default());
+    let settings = deploy::ScriptSettings {
+        transaction_isolation_level: "SERIALIZABLE".into(),
+        source: from_db.into(),
+        target: to_db.into(),
+        target_database: to_db.into(),
+        target_major_version: db2.server.major_version,
+    };
+    let script = deploy::generate(&c, &db1, &db2, opts, &Mappings::default(), &settings).unwrap();
+    if let Err(e) = deploy::execute(&server.spec(to_db), &script, |_, _| {}) {
+        panic!("{e}\n\n{}", script.sql);
+    }
+    let after = catalog::read_database(&server.spec(to_db)).unwrap();
+    let c = schema::compare(&db1, &after, opts, &Mappings::default());
+    let left: Vec<_> = c.differences.iter().filter(|d| d.kind != schema::DiffKind::Equal).collect();
+    assert!(left.is_empty(), "still different after deployment: {left:#?}\n\n{}", script.sql);
+    script
+}
+
+#[test]
+fn deployment_converges_both_ways() {
+    use quillsql::schema::Options;
+    let Some(server) = server() else { return };
+    let changed = format!("{SHOP}\nGO\n{SHOP_CHANGES}");
+    // Old → new.
+    server.create("QuillTest_Dep1", SHOP);
+    server.create("QuillTest_Dep2", &changed);
+    let script = converge(&server, "QuillTest_Dep2", "QuillTest_Dep1", &Options::default_set());
+    assert!(script.sql.contains("EXEC sp_rename"), "Qty is renamed, not dropped:\n{}", script.sql);
+    // New → old.
+    server.create("QuillTest_Dep1", SHOP);
+    server.create("QuillTest_Dep2", &changed);
+    converge(&server, "QuillTest_Dep1", "QuillTest_Dep2", &Options::default_set());
+    // From an empty database: everything is created in dependency order.
+    server.create("QuillTest_Dep1", "SELECT 1");
+    converge(&server, "QuillTest_Dep2", "QuillTest_Dep1", &Options::default_set());
+    // And everything dropped again.
+    server.create("QuillTest_Dep1", "SELECT 1");
+    converge(&server, "QuillTest_Dep1", "QuillTest_Dep2", &Options::default_set());
+    server.drop("QuillTest_Dep1");
+    server.drop("QuillTest_Dep2");
+}
+
+const SHOP_DATA: &str = include_str!("fixtures/compare/shop_data.sql");
+
+#[test]
+fn rebuild_keeps_data() {
+    use quillsql::schema::Options;
+    let Some(server) = server() else { return };
+    // Source: identity seed changes (rebuild), a NOT NULL column with a default is added, and
+    // a column under a schema-bound view changes type (the view is dropped and re-created).
+    let source = SHOP
+        .replace("CustomerId int IDENTITY(1, 1)", "CustomerId int IDENTITY(100, 1)")
+        .replace("    CONSTRAINT UQ_Customer_Email", "    Country nchar(2) NOT NULL CONSTRAINT DF_Customer_Country DEFAULT (N'VN'),\n    CONSTRAINT UQ_Customer_Email")
+        .replace("Total money NOT NULL", "Total decimal(19, 4) NOT NULL");
+    server.create("QuillTest_Reb1", &source);
+    server.create("QuillTest_Reb2", &format!("{SHOP}\nGO\n{SHOP_DATA}"));
+    let script = converge(&server, "QuillTest_Reb1", "QuillTest_Reb2", &Options::default_set());
+    assert!(script.sql.contains("INSERT INTO [dbo].[QS_Rebuild_Customer]"), "{}", script.sql);
+    assert!(script.sql.contains("DROP VIEW [Sales].[CustomerTotals]"), "{}", script.sql);
+
+    let rt = quillsql::db::runtime().unwrap();
+    let (ids, countries, totals, ident) = rt.block_on(async {
+        let mut c = quillsql::db::connect_async(&server.spec("QuillTest_Reb2")).await.unwrap();
+        let ids = quillsql::db::query(&mut c, "SELECT STRING_AGG(CAST(CustomerId AS varchar(10)), ',') WITHIN GROUP (ORDER BY CustomerId) FROM dbo.Customer").await.unwrap();
+        let countries = quillsql::db::query(&mut c, "SELECT COUNT(*) FROM dbo.Customer WHERE Country = N'VN'").await.unwrap();
+        let totals = quillsql::db::query(&mut c, "SELECT CAST(SUM(Total) AS varchar(20)) FROM Sales.[Order]").await.unwrap();
+        let ident = quillsql::db::query(&mut c, "SELECT CAST(IDENT_CURRENT('dbo.Customer') AS int)").await.unwrap();
+        (
+            ids[0].get::<&str, _>(0).unwrap().to_string(),
+            ids_count(&countries),
+            totals[0].get::<&str, _>(0).unwrap().to_string(),
+            ident[0].get::<i32, _>(0).unwrap(),
+        )
+    });
+    server.drop("QuillTest_Reb1");
+    server.drop("QuillTest_Reb2");
+    assert_eq!(ids, "1,2,7");
+    assert_eq!(countries, 3);
+    assert_eq!(totals, "115.4900");
+    assert_eq!(ident, 7, "the identity continues where the old table left off");
+}
+
+fn ids_count(rows: &[tiberius::Row]) -> i32 {
+    rows[0].get::<i32, _>(0).unwrap()
+}
