@@ -1251,7 +1251,7 @@ impl<'a> Comparer<'a> {
                                 p.schema.as_deref().is_some_and(|x| self.same_name(x, s))
                                     && p.object.as_deref().is_some_and(|o| self.same_name(o, name))
                             }
-                            _ => false,
+                            (_, None) => p.schema.is_none() && p.object.as_deref().is_some_and(|o| self.same_name(o, name)),
                         }
                 })
                 .collect::<Vec<_>>()

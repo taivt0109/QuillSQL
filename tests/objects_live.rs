@@ -80,6 +80,9 @@ fn changed() -> String {
         .replace("HISTORY_RETENTION_PERIOD = 6 MONTHS", "HISTORY_RETENTION_PERIOD = 1 YEAR")
         .replace("Name nvarchar(50) NULL,\n    ValidFrom", "Name nvarchar(80) NULL,\n    ValidFrom")
         .replace("GRANT SELECT (Qty) ON", "GRANT SELECT (Yr) ON")
+        .replace("N'CLR helpers', 'ASSEMBLY'", "N'CLR', 'ASSEMBLY'")
+        .replace("N'Queue', 'SCHEMA'", "N'The queue', 'SCHEMA'")
+        .replace("EXEC sp_addextendedproperty N'MS_Description', N'Route', 'ROUTE', N'QuillRoute';\n", "")
 }
 
 fn options() -> Options {

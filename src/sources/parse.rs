@@ -2353,6 +2353,11 @@ impl Builder {
                             p.minor_name = Some(n2);
                         }
                     }
+                    // Database-wide objects: assemblies, Service Broker objects, DDL triggers…
+                    (Some(t0), None) if t0 != "USER" && t0 != "FILEGROUP" && t0 != "PLAN GUIDE" => {
+                        p.class = t0.to_string();
+                        p.object = n0;
+                    }
                     _ => return c.fail(MessageKind::IgnoredStatement),
                 }
                 let same = |x: &ExtendedProperty| {

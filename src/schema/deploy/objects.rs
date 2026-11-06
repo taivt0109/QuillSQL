@@ -26,6 +26,26 @@ pub(super) struct State {
     pub(super) inline_key: HashSet<ObjectName>,
 }
 
+/// The class of an object's extended properties (sp_addextendedproperty's level 0 or 1 type).
+pub(super) fn xprop_class(t: ObjectType) -> Option<&'static str> {
+    Some(match t {
+        ObjectType::Assembly => "ASSEMBLY",
+        ObjectType::XmlSchemaCollection => "XML SCHEMA COLLECTION",
+        ObjectType::Default => "DEFAULT",
+        ObjectType::Rule => "RULE",
+        ObjectType::DdlTrigger => "TRIGGER",
+        ObjectType::PartitionFunction => "PARTITION FUNCTION",
+        ObjectType::PartitionScheme => "PARTITION SCHEME",
+        ObjectType::MessageType => "MESSAGE TYPE",
+        ObjectType::Contract => "CONTRACT",
+        ObjectType::Queue => "QUEUE",
+        ObjectType::Service => "SERVICE",
+        ObjectType::Route => "ROUTE",
+        ObjectType::ServiceBinding => "REMOTE SERVICE BINDING",
+        _ => return None,
+    })
+}
+
 /// The class keyword in GRANT … ON <class>:: for database-wide securables.
 pub(super) fn securable_class(t: ObjectType) -> Option<&'static str> {
     Some(match t {
@@ -332,6 +352,7 @@ impl<'a> Planner<'a> {
             self.ranked_step(Phase::DropBindables, usize::from(!rule), format!("Dropping {plural}"), vec![sql], true);
         }
         if let Some(s) = s {
+            self.recreate.insert(d.name.clone());
             let sql = self.ex.object(&d.name, code, Check::Create, &ddl_objects::create_bindable(s));
             self.push(Step { rank: usize::from(rule), group: true, settings: Some(ModuleSettings::default()), ..Step::new(Phase::CreateBindables, format!("Creating {plural}"), vec![sql]) });
         }
@@ -362,6 +383,9 @@ impl<'a> Planner<'a> {
                     self.group(Phase::DropDdlTriggers, "Dropping DDL triggers", vec![sql]);
                 }
                 let create = t.is_none() || rebuild;
+                if create {
+                    self.recreate.insert(ObjectName::new("", &s.name));
+                }
                 let mut statements = vec![if create {
                     self.ex.ddl_trigger(&s.name, Check::Create, &ddl_objects::ddl_trigger(s, "CREATE"))
                 } else {
@@ -391,6 +415,7 @@ impl<'a> Planner<'a> {
         let t = named(&tgt.partition_functions, &self.target_name(d).name, |f| &f.name);
         let test = |n: &str| format!("sys.partition_functions WHERE name = {}", ddl::sql_string(n));
         let create = |p: &mut Self, s: &PartitionFunction| {
+            p.recreate.insert(ObjectName::new("", &s.name));
             let sql = p.ex.listed(&test(&s.name), Check::Create, &ddl_objects::create_partition_function(s));
             p.ranked_step(Phase::Partitioning, 2, "Creating partition functions", vec![sql], true);
         };
@@ -484,6 +509,7 @@ impl<'a> Planner<'a> {
     }
 
     fn create_partition_scheme(&mut self, s: &PartitionScheme) {
+        self.recreate.insert(ObjectName::new("", &s.name));
         for fg in s.filegroups.iter().filter(|f| !f.eq_ignore_ascii_case("PRIMARY")) {
             self.object_filegroups.insert(fg.clone());
         }
@@ -1345,7 +1371,7 @@ impl<'a> Planner<'a> {
     /// The source's permissions on an object re-created only because something it uses is
     /// (selected objects get theirs with the other permissions).
     fn regrant(&mut self, ty: ObjectType, name: &ObjectName) {
-        if self.cmp.differences.iter().any(|d| d.object_type == ty && d.selected && d.kind != DiffKind::Equal && d.name == *name) || self.opts.has(Opt::IgnorePermissions) {
+        if self.cmp.differences.iter().any(|d| d.object_type == ty && d.selected && d.kind != DiffKind::Equal && d.name == *name) {
             return;
         }
         let (class, schema, object) = match securable_class(ty) {
@@ -1356,11 +1382,18 @@ impl<'a> Planner<'a> {
             .src
             .permissions
             .iter()
-            .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == Some(object))
+            .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == Some(object) && !self.opts.has(Opt::IgnorePermissions))
             .map(Permission::grant_sql)
             .collect();
         let label = if schema.is_some() { name.to_string() } else { format!("{class}:: {}", quote(object)) };
         self.step(Phase::Permissions, format!("Altering permissions on {label}"), grants);
+        if let Some(xclass) = xprop_class(ty).filter(|_| !self.opts.has(Opt::IgnoreExtendedProperties)) {
+            let props: Vec<&ExtendedProperty> =
+                self.src.extended_properties.iter().filter(|p| p.class == xclass && p.schema.as_deref() == schema && p.object.as_deref() == Some(object)).collect();
+            for p in props {
+                self.add_xprop(p, &ddl::xprop_levels(p, |s| s.to_string()));
+            }
+        }
     }
 
     /// A Service Broker object that is not deployed itself but uses one that is re-created.
