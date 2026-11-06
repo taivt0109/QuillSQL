@@ -107,6 +107,11 @@ namespace QuillSql.Compare
         public bool ViewReport { get; set; } = true;
         /// <summary>The folder My projects last looked in.</summary>
         public string ProjectsFolder { get; set; }
+        /// <summary>Application options: the deployment script's transaction isolation level.</summary>
+        public string IsolationLevel { get; set; } = "SERIALIZABLE";
+        /// <summary>Data deployments: split the transaction into batches of this many MB.</summary>
+        public bool SplitTransactions { get; set; }
+        public int MaxTransactionSizeMB { get; set; } = 10;
 
         public static CompareSettings Load()
         {
@@ -123,6 +128,9 @@ namespace QuillSql.Compare
                     s.ShowMyProjects = o.Bool("showMyProjects");
                     if (o.ContainsKey("viewReport")) s.ViewReport = o.Bool("viewReport");
                     s.ProjectsFolder = o.Str("projectsFolder");
+                    if (o.Str("isolationLevel") != null) s.IsolationLevel = o.Str("isolationLevel");
+                    s.SplitTransactions = o.Bool("splitTransactions");
+                    if (o.Long("maxTransactionSizeMB") > 0) s.MaxTransactionSizeMB = (int)o.Long("maxTransactionSizeMB");
                 }
             }
             catch (Exception ex) when (ex is IOException || ex is FormatException || ex is UnauthorizedAccessException)
@@ -143,6 +151,9 @@ namespace QuillSql.Compare
                     ["reopenLast"] = ReopenLast,
                     ["showMyProjects"] = ShowMyProjects,
                     ["viewReport"] = ViewReport,
+                    ["isolationLevel"] = IsolationLevel,
+                    ["splitTransactions"] = SplitTransactions,
+                    ["maxTransactionSizeMB"] = MaxTransactionSizeMB,
                 };
                 if (MySchemaDefaults != null) o["mySchemaDefaults"] = MySchemaDefaults;
                 if (MyDataDefaults != null) o["myDataDefaults"] = MyDataDefaults;
