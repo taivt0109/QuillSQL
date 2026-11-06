@@ -210,7 +210,13 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let side: SourceSpec = field(request, "source")?;
             let path: String = field(request, "path")?;
             let db = load_side(&side, 1, true, progress)?;
-            std::fs::write(&path, serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?).map_err(|e| format!("{path}: {e}"))?;
+            // SQL Compare's format, or QuillSQL's JSON model for a .json path.
+            let bytes = if path.to_ascii_lowercase().ends_with(".json") {
+                serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?
+            } else {
+                crate::sources::snp_write::write(&db)
+            };
+            std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"tables": db.tables.len()}))
         }
         // Writes a side as a scripts folder: the project's source with its options, or a source.
