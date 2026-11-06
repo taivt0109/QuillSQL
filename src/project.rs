@@ -57,6 +57,9 @@ pub struct SourceSpec {
     pub trust_server_certificate: bool,
     /// Snapshot file for `type = snapshot`, folder for `type = scripts`.
     pub path: String,
+    /// `type = scripts`: the source-control revision of the folder to read (HEAD for the latest).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub revision: String,
     /// Run time only: never written to the file.
     #[serde(skip_serializing)]
     pub password: Option<String>,

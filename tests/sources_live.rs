@@ -62,6 +62,7 @@ impl Server {
 const SHOP: &str = include_str!("fixtures/compare/shop.sql");
 const SHOP_CHANGES: &str = include_str!("fixtures/compare/shop_changes.sql");
 const XML_SPATIAL: &str = include_str!("fixtures/compare/sources_xml_spatial.sql");
+const BINDINGS: &str = include_str!("fixtures/compare/sources_bindings.sql");
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("quill-sources-{name}-{}", std::process::id()));
@@ -79,7 +80,7 @@ fn assert_identical(a: &Database, b: &Database, opts: &Options, what: &str) {
 fn makescripts_reads_back_identical() {
     let Some(server) = server() else { return };
     let changed = format!("{SHOP}\nGO\n{SHOP_CHANGES}");
-    for (name, script) in [("QD_sources_RT1", SHOP), ("QD_sources_RT2", changed.as_str()), ("QD_sources_RT3", XML_SPATIAL)] {
+    for (name, script) in [("QD_sources_RT1", SHOP), ("QD_sources_RT2", changed.as_str()), ("QD_sources_RT3", XML_SPATIAL), ("QD_sources_RT4", BINDINGS)] {
         server.create(name, script);
         let live = server.read(name);
         let dir = temp(name);
@@ -89,6 +90,9 @@ fn makescripts_reads_back_identical() {
         assert!(f.messages.is_empty(), "{:?}", f.messages);
         assert_identical(&f.database, &live, &opts, name);
         assert_identical(&live, &f.database, &opts.clone().without(Opt::IgnoreWhiteSpace), name);
+        // DDL triggers are not compared; they still come back.
+        let ddl = |d: &Database| d.ddl_triggers.iter().map(|t| (t.name.clone(), t.disabled)).collect::<Vec<_>>();
+        assert_eq!(ddl(&f.database), ddl(&live), "{name}");
         // Writing what was read gives the same files.
         let again = temp(&format!("{name}-again"));
         folder::write_all(&f.database, &again, &opts).unwrap();

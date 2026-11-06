@@ -15,7 +15,8 @@
 //! - `snapshot` {source, path} writes a schema snapshot.
 //!
 //! A side is a live database, a snapshot (QuillSQL JSON or SQL Compare `.snp`), or a scripts
-//! folder (`type: "scripts"`, `path`). Deploying to a scripts folder rewrites its files.
+//! folder (`type: "scripts"`, `path`, optional source-control `revision`). Deploying to a
+//! scripts folder rewrites its files; `make_scripts` {project | source, path} writes one.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -107,8 +108,19 @@ fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -
 /// A side and, for a scripts folder, what its parser skipped.
 fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<(Database, Vec<String>), String> {
     if side.is_scripts() {
+        let checkout = match side.revision.as_str() {
+            "" => None,
+            r => {
+                progress(&format!("Getting revision {r} of '{}'", side.path));
+                Some(crate::sources::scm::checkout(&side.path, r)?)
+            }
+        };
         progress(&format!("Reading database scripts from '{}'", side.path));
-        let f = crate::sources::folder::read(std::path::Path::new(&side.path))?;
+        let dir = checkout.as_ref().map(|c| c.dir.clone()).unwrap_or_else(|| std::path::PathBuf::from(&side.path));
+        let mut f = crate::sources::folder::read(&dir)?;
+        if checkout.is_some() {
+            f.database.name = std::path::Path::new(&side.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(f.database.name);
+        }
         let warnings = f.warnings.iter().cloned().chain(f.messages.iter().map(|m| m.text())).collect();
         return Ok((f.database, warnings));
     }
@@ -188,6 +200,18 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let db = load_side(&side, 1, true, progress)?;
             std::fs::write(&path, serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?).map_err(|e| format!("{path}: {e}"))?;
             Ok(json!({"tables": db.tables.len()}))
+        }
+        // Writes a side as a scripts folder: the project's source with its options, or a source.
+        "make_scripts" => {
+            let path: String = field(request, "path")?;
+            let (side, opts) = match field::<Project>(request, "project") {
+                Ok(p) => (p.source.clone(), schema_options(&p)?),
+                Err(_) => (field::<SourceSpec>(request, "source")?, Options::default_set()),
+            };
+            let db = load_side(&side, 1, opts.has(Opt::DecryptPost2kEncryptedObjects), progress)?;
+            progress(&format!("Writing the scripts folder '{path}'"));
+            let files = crate::sources::folder::write_all(&db, std::path::Path::new(&path), &opts)?;
+            Ok(json!({"files": files}))
         }
         "schema_compare" => {
             let project: Project = field(request, "project")?;
@@ -410,6 +434,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             {
                 if s.script.is_none() {
                     return Err("create the deployment script first".into());
+                }
+                if !s.project.target.revision.is_empty() {
+                    return Err("the target is a source control revision; deploy to the scripts folder itself".into());
                 }
                 let opts = schema_options(&s.project)?;
                 let mut comparison = s.comparison.clone();
@@ -687,6 +714,41 @@ mod tests {
         assert!(base.join("b").join("Tables").join("dbo.U.sql").is_file());
         let again = handle(&mut state, &json!({"op": "schema_compare", "project": p}), &none).unwrap();
         assert!(again["differences"].as_array().unwrap().iter().all(|x| x["kind"] == "Equal"), "{again}");
+        let sql = handle(&mut state, &json!({"op": "schema_object_sql", "session": again["session"], "index": 1}), &none).unwrap();
+        assert!(sql["source"].as_str().unwrap().contains("[dbo].[U]"), "{sql}");
+
+        // make_scripts from a project's source and from a plain source.
+        let made = base.join("made").to_string_lossy().to_string();
+        let r = handle(&mut state, &json!({"op": "make_scripts", "project": p, "path": made}), &none).unwrap();
+        assert_eq!(r["files"], 2);
+        assert!(base.join("made").join("QuillDatabaseInfo.xml").is_file());
+        let made2 = base.join("made2").to_string_lossy().to_string();
+        let src = serde_json::to_value(side("b")).unwrap();
+        handle(&mut state, &json!({"op": "make_scripts", "source": src, "path": made2}), &none).unwrap();
+        assert!(base.join("made2").join("Tables").join("dbo.U.sql").is_file());
+
+        // A revision of a folder in git.
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&base).args(args).output().is_ok_and(|o| o.status.success());
+        if git(&["init", "-q"]) {
+            git(&["config", "user.email", "t@example.com"]);
+            git(&["config", "user.name", "t"]);
+            git(&["add", "a"]);
+            git(&["commit", "-q", "-m", "a"]);
+            write("a", "Tables/dbo.V.sql", "CREATE TABLE [dbo].[V]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\n");
+            let mut at_head = project.clone();
+            at_head.source.revision = "HEAD".into();
+            at_head.target = side("a");
+            let c = handle(&mut state, &json!({"op": "schema_compare", "project": at_head}), &none).unwrap();
+            let only2: Vec<&Value> = c["differences"].as_array().unwrap().iter().filter(|x| x["kind"] == "OnlyIn2").collect();
+            assert_eq!(only2.len(), 1, "{c}");
+            assert_eq!(c["sourceName"], "a");
+            let mut to_revision = at_head.clone();
+            std::mem::swap(&mut to_revision.source, &mut to_revision.target);
+            let c = handle(&mut state, &json!({"op": "schema_compare", "project": to_revision}), &none).unwrap();
+            let id = c["session"].as_u64().unwrap();
+            handle(&mut state, &json!({"op": "schema_script", "session": id, "selected": [0, 1, 2]}), &none).unwrap();
+            assert!(handle(&mut state, &json!({"op": "deploy", "session": id}), &none).is_err());
+        }
         std::fs::remove_dir_all(base).ok();
     }
 }
