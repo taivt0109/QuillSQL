@@ -486,8 +486,8 @@ fn script_json(script: &DeploymentScript) -> Value {
     })
 }
 
-/// The SQL of one object, for the side-by-side view.
-fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<String> {
+/// The SQL of one object, for the side-by-side view and the comparison reports.
+pub fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<String> {
     let same = |s: &str, n: &str| s == name.schema && n == name.name;
     match ty {
         ObjectType::Table => db.tables.iter().find(|t| same(&t.schema, &t.name)).map(|t| {
