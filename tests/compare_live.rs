@@ -345,6 +345,7 @@ fn data_deployment_converges() {
         target_database: "QuillTest_Sync2".into(),
         transaction_isolation_level: "SERIALIZABLE".into(),
         kinds: [false, true, true, true],
+        tables: None,
     };
     let script = sync::generate(&result, &db2, &opts, &settings).unwrap();
     if let Err(e) = deploy::execute(&s2, &script, |_, _| {}) {

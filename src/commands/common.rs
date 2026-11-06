@@ -108,8 +108,15 @@ pub const DEPLOY: [Switch; 6] = [
     },
 ];
 
-pub const GENERAL: [Switch; 4] = [
+pub const GENERAL: [Switch; 5] = [
     Switch { name: "help", aliases: &["?"], takes_value: false, repeatable: false, help: "Show this help" },
+    Switch {
+        name: "project",
+        aliases: &["pr"],
+        takes_value: true,
+        repeatable: false,
+        help: "A .qsc/.qdc project (or a SQL Compare .scp / Data Compare .sdc); switches override its settings",
+    },
     Switch { name: "quiet", aliases: &["q"], takes_value: false, repeatable: false, help: "Print errors only" },
     Switch { name: "verbose", aliases: &["v"], takes_value: false, repeatable: false, help: "Print every difference" },
     Switch { name: "force", aliases: &["f"], takes_value: false, repeatable: false, help: "Overwrite output files" },
@@ -121,9 +128,34 @@ pub enum Source {
     Snapshot(std::path::PathBuf),
 }
 
+/// The project named by `/project`, if any.
+pub fn project(args: &Args) -> Result<Option<crate::project::Project>, ArgError> {
+    args.get("project")
+        .map(|p| crate::project::Project::load(Path::new(p)).map_err(|e| ArgError::new(exit::DATA_ERROR, e)))
+        .transpose()
+}
+
 /// Reads `/serverN`, `/databaseN`... into a source, or `None` when no database N was given.
+/// Without them, side N of the `/project` is used.
 pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
     let key = |name: &str| format!("{name}{n}");
+    let given = ["snapshot", "connection", "database", "server"].iter().any(|k| args.has(&key(k)));
+    if !given && let Some(p) = project(args)? {
+        let mut side = if n == 1 { p.source } else { p.target };
+        if side.is_snapshot() {
+            return Ok(Some(Source::Snapshot(side.path.into())));
+        }
+        if side.server.is_empty() && side.database.is_empty() {
+            return Ok(None);
+        }
+        side.password = args.get(&key("password")).map(str::to_string);
+        if let Some(u) = args.get(&key("username")) {
+            side.user = u.to_string();
+            side.authentication = crate::project::Authentication::Sql;
+        }
+        let spec = side.connection(n).map_err(|e| ArgError::new(exit::UNSATISFIED_ARGUMENT, e))?;
+        return Ok(Some(Source::Live(spec)));
+    }
     if let Some(path) = args.get(&key("snapshot")) {
         return Ok(Some(Source::Snapshot(path.into())));
     }

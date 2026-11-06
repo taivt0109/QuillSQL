@@ -219,6 +219,13 @@ fn main() -> ExitCode {
     let command: Option<fn(&[String]) -> u8> = match argv.get(1).map(String::as_str) {
         Some("schema") => Some(quillsql::commands::schema::run),
         Some("data") => Some(quillsql::commands::data::run),
+        Some("compare-serve") => Some(|_: &[String]| match quillsql::compare_serve::run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                quillsql::args::exit::GENERAL_ERROR
+            }
+        }),
         _ => None,
     };
     if let Some(command) = command {
