@@ -322,3 +322,46 @@ fn memory_optimized_tables_are_rebuilt_through_a_copy() {
     server.drop(a);
     server.drop(b);
 }
+
+const SECRET_PROC: &str = "CREATE PROCEDURE dbo.Secret @n int\nWITH ENCRYPTION\nAS\n-- A comment long enough to take the text past one RC4 key block: 0123456789 abcdefghijklmnopqrstuvwxyz ÀÉÎÕÜ ăđơư 漢字.\nSELECT @n * 2 AS twice, N'it''s' AS quote, REPLICATE(N'x', 10) AS pad;";
+
+#[test]
+fn encrypted_modules_without_the_admin_connection() {
+    let Some(server) = server() else { return };
+    let db = "QD_schemadeploy_Enc3";
+    server.create(db, SECRET_PROC);
+    // The dedicated administrator connection isn't reachable here: the reader carries on and the
+    // procedure stays encrypted.
+    let started = std::time::Instant::now();
+    let model = catalog::read_database(&server.spec(db)).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(model.routines.iter().any(|r| r.name == "Secret" && r.encrypted && r.definition.is_empty()));
+    assert!(!catalog::read_database_with(&server.spec(db), false).unwrap().routines[0].definition.contains("SELECT"));
+    server.drop(db);
+}
+
+/// Reads the encrypted image over the DAC inside the Docker container (where it is local) and
+/// decrypts it. Runs when QUILL_TEST_DOCKER_CONTAINER names the container.
+#[test]
+fn decrypts_images_read_over_the_admin_connection() {
+    let Some(server) = server() else { return };
+    let Ok(container) = std::env::var("QUILL_TEST_DOCKER_CONTAINER") else { return };
+    let db = "QD_schemadeploy_Enc4";
+    server.create(db, SECRET_PROC);
+    let password = std::env::var("QUILL_TEST_PASSWORD").unwrap_or_default();
+    let sql = "SET NOCOUNT ON; SELECT CONVERT(varchar(36), r.family_guid) + ' ' + CAST(v.objid AS varchar(12)) + ' ' + CAST(v.subobjid AS varchar(6)) + ' ' + CONVERT(varchar(max), v.imageval, 2) \
+               FROM sys.sysobjvalues AS v JOIN sys.database_recovery_status AS r ON r.database_id = DB_ID() WHERE v.valclass = 1 AND v.objid = OBJECT_ID('dbo.Secret')";
+    let out = std::process::Command::new("docker")
+        .args(["exec", &container, "/opt/mssql-tools18/bin/sqlcmd", "-S", "admin:localhost", "-U", "sa", "-P", &password, "-C", "-d", db, "-y", "0", "-Q", sql])
+        .output()
+        .unwrap();
+    server.drop(db);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let line = stdout.lines().map(str::trim).find(|l| l.split(' ').count() == 4 && l.len() > 60).unwrap_or_default().to_string();
+    let parts: Vec<&str> = line.split(' ').collect();
+    assert_eq!(parts.len(), 4, "{line}\n{}", String::from_utf8_lossy(&out.stderr));
+    let cipher: Vec<u8> = (0..parts[3].len()).step_by(2).map(|i| u8::from_str_radix(&parts[3][i..i + 2], 16).unwrap()).collect();
+    let text = catalog::decrypt::decrypt(parts[0], parts[1].parse().unwrap(), parts[2].parse().unwrap(), &cipher).unwrap();
+    // The batch was sent with the line break the script splitter keeps.
+    assert_eq!(text.trim_end(), SECRET_PROC);
+}

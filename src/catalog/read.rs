@@ -9,12 +9,23 @@ use tiberius::{ColumnData, Row};
 use super::model::*;
 use crate::db::{self, Connection, ConnectionSpec};
 
-/// Reads the database named in `spec`.
+/// Reads the database named in `spec`, decrypting encrypted modules where the server allows it
+/// (DecryptPost2kEncryptedObjects, on by default).
 pub fn read_database(spec: &ConnectionSpec) -> Result<Database, String> {
+    read_database_with(spec, true)
+}
+
+/// Reads the database named in `spec`; `decrypt` recovers the text of encrypted modules over
+/// the dedicated administrator connection when it can be reached.
+pub fn read_database_with(spec: &ConnectionSpec, decrypt: bool) -> Result<Database, String> {
     let rt = db::runtime()?;
     rt.block_on(async {
         let mut conn = db::connect_async(spec).await?;
-        read(&mut conn).await
+        let mut model = read(&mut conn).await?;
+        if decrypt {
+            super::decrypt::decrypt_modules(&mut conn, spec, &mut model).await?;
+        }
+        Ok(model)
     })
 }
 
