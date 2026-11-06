@@ -205,9 +205,9 @@ fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
 }
 
 fn execute(args: &Args) -> Result<u8, ArgError> {
+    let project = common::project_of(args, crate::project::ProjectKind::Data)?;
     let spec1 = live(common::source(args, 1)?.ok_or_else(|| ArgError::new(exit::USAGE, "give database 1: /server1 and /database1"))?, 1)?;
     let spec2 = live(common::source(args, 2)?.ok_or_else(|| ArgError::new(exit::USAGE, "give database 2: /server2 and /database2"))?, 2)?;
-    let project = common::project(args)?;
     // As in SQL Data Compare, /options add to the project's options.
     let mut options = match &project {
         Some(p) => DataOptions::parse(&p.options.join(",")).map_err(|e| ArgError::new(exit::DATA_ERROR, e))?,
@@ -314,7 +314,8 @@ fn summary(result: &DataComparison, rules: &Rules, db1: &str, db2: &str) -> Stri
     use std::fmt::Write;
     let mut out = String::new();
     let width = result.tables.iter().map(|t| t.pair.source.to_string().chars().count()).max().unwrap_or(4).clamp(4, 60);
-    let _ = writeln!(out, "{:<6} {:<width$} {:>10} {:>10} {:>10} {:>10}", "Type", "Name", "Different", &format!("{db1} only")[..format!("{db1} only").len().min(10)], &format!("{db2} only")[..format!("{db2} only").len().min(10)], "Identical");
+    let _ = writeln!(out, "Rows only in 1 are in {db1}; rows only in 2 are in {db2}.");
+    let _ = writeln!(out, "{:<6} {:<width$} {:>10} {:>10} {:>10} {:>10}", "Type", "Name", "Different", "Only in 1", "Only in 2", "Identical");
     for t in &result.tables {
         let n = |k: RowKind| t.count(k);
         let status = if let Some(e) = &t.error {
