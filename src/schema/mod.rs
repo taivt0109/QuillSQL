@@ -1,5 +1,6 @@
 //! Schema compare: options, text comparison and the object-by-object comparison.
 
+pub mod backup;
 pub mod cast;
 pub mod compare;
 pub mod ddl;

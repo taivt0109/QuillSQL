@@ -677,8 +677,29 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 return Err("the target is an empty database; only a script can be created".into());
             }
             let spec = target.connection(2)?;
+            // Back up target before deployment: {backup: {folder, file, nameAutomatically, overwrite, differential}}.
+            let backup = match request.get("backup").filter(|b| !b.is_null()) {
+                Some(b) => {
+                    let o: schema::backup::BackupOptions = serde_json::from_value(b.clone()).map_err(|e| format!("'backup': {e}"))?;
+                    Some(schema::backup::run(&spec, &o, &backup_stamp(), progress)?)
+                }
+                None => None,
+            };
             let ran = deploy::execute(&spec, &script, |i, n| progress(&format!("Running batch {} of {n}", i + 1)))?;
-            Ok(json!({"batches": ran}))
+            Ok(json!({"batches": ran, "backup": backup}))
+        }
+        // What the backup page starts with: the instance's backup folder and the automatic name.
+        "backup_defaults" => {
+            let id = session(request)?;
+            let target = state.schema.get(&id).map(|s| s.project.target.clone()).or_else(|| state.data.get(&id).map(|s| s.project.target.clone())).ok_or("the comparison is no longer open")?;
+            let spec = target.connection(2)?;
+            let differential = request.get("differential").and_then(Value::as_bool).unwrap_or(false);
+            let rt = crate::db::runtime()?;
+            let folder = rt.block_on(async {
+                let mut c = crate::db::connect_async(&spec).await?;
+                schema::backup::default_folder(&mut c).await
+            })?;
+            Ok(json!({"folder": folder, "file": schema::backup::automatic_name(&spec.server, &spec.database, differential, &backup_stamp())}))
         }
         "close" => {
             let id = session(request)?;
@@ -688,6 +709,12 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         }
         other => Err(format!("unknown op '{other}'")),
     }
+}
+
+/// `yyyymmdd_hhmmss` in local time, for backup file names.
+fn backup_stamp() -> String {
+    let n = crate::commands::console::now();
+    format!("{:04}{:02}{:02}_{:02}{:02}{:02}", n.year, n.month, n.day, n.hour, n.minute, n.second)
 }
 
 /// The `data_rows` kind that lists every stored row.
