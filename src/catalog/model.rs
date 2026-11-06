@@ -30,6 +30,22 @@ pub struct Database {
     pub permissions: Vec<Permission>,
     /// Object-to-object references: views and modules to what they use, FKs, triggers, synonyms.
     pub dependencies: Vec<Dependency>,
+    /// Database-level DDL triggers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ddl_triggers: Vec<DdlTrigger>,
+}
+
+/// A trigger ON DATABASE.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DdlTrigger {
+    pub name: String,
+    /// The CREATE TRIGGER text; empty when encrypted.
+    pub definition: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub encrypted: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 impl Database {
@@ -215,6 +231,12 @@ pub struct Column {
     /// Dynamic data masking function, e.g. `default()`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub masking_function: Option<String>,
+    /// Default object bound with sp_bindefault: `[schema].[name]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_default: Option<String>,
+    /// Rule bound with sp_bindrule: `[schema].[name]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_rule: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,6 +321,89 @@ pub struct Index {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket_count: Option<i64>,
     pub storage: Storage,
+    /// Set for XML indexes (kind `Xml`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xml: Option<XmlIndex>,
+    /// Set for spatial indexes (kind `Spatial`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spatial: Option<SpatialIndex>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum XmlIndexKind {
+    #[default]
+    Primary,
+    Secondary,
+    Selective,
+    SecondarySelective,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct XmlIndex {
+    pub kind: XmlIndexKind,
+    /// Secondary indexes: VALUE, PATH or PROPERTY.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_type: Option<String>,
+    /// The primary (or selective) XML index a secondary index is built on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using_index: Option<String>,
+    /// Secondary selective indexes: the path of the selective index they cover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using_path: Option<String>,
+    /// Selective indexes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<SelectivePath>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<XmlNamespace>,
+}
+
+/// One promoted path of a selective XML index.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SelectivePath {
+    pub id: i32,
+    pub name: String,
+    pub path: String,
+    /// `AS SQL <type>` rather than `AS XQUERY`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sql: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xquery_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<i32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub node_hint: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub singleton: bool,
+    /// SQL paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<DataType>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct XmlNamespace {
+    /// `None` for the DEFAULT namespace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    pub uri: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SpatialIndex {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub geography: bool,
+    /// GEOMETRY_GRID, GEOGRAPHY_GRID, GEOMETRY_AUTO_GRID or GEOGRAPHY_AUTO_GRID.
+    pub tessellation: String,
+    /// xmin, ymin, xmax, ymax as written in DDL (geometry only).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bounding_box: Vec<String>,
+    /// LOW / MEDIUM / HIGH for levels 1 to 4.
+    pub grids: Vec<String>,
+    pub cells_per_object: i32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
