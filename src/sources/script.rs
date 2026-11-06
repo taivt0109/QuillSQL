@@ -542,6 +542,16 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
             out.batch(&format!("ALTER TABLE {name} NOCHECK CONSTRAINT {}", quote(n)));
         }
     }
+    // Defaults and rules bound with sp_bindefault / sp_bindrule.
+    for c in &t.columns {
+        let column = literal(&format!("{name}.{}", quote(&c.name)));
+        if let Some(d) = &c.bound_default {
+            out.batch(&format!("EXEC sp_bindefault {}, {column}", literal(d)));
+        }
+        if let Some(r) = &c.bound_rule {
+            out.batch(&format!("EXEC sp_bindrule {}, {column}", literal(r)));
+        }
+    }
     if let Some(ct) = &t.change_tracking {
         out.batch(&format!(
             "ALTER TABLE {name} ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = {})",
@@ -738,6 +748,17 @@ pub fn user(db: &Database, p: &Principal, o: &Options) -> String {
     }
     out.batch(&s);
     database_permissions(&mut out, db, &p.name, o);
+    out.s
+}
+
+/// A database DDL trigger: its text, then `DISABLE TRIGGER … ON DATABASE` when disabled.
+pub fn ddl_trigger(t: &DdlTrigger) -> String {
+    let mut out = Out::default();
+    out.set_options(&ModuleSettings::default());
+    out.module(&module_sql(&t.definition, "CREATE", &quote(&t.name)));
+    if t.disabled {
+        out.batch(&format!("DISABLE TRIGGER {} ON DATABASE", quote(&t.name)));
+    }
     out.s
 }
 

@@ -66,8 +66,15 @@ impl Message {
     }
 }
 
+/// What a scripts-folder file holds: a compared object, or a database DDL trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FileKind {
+    Object(ObjectType),
+    DdlTrigger,
+}
+
 /// Identifies a top-level object for [`Origins`].
-pub type ObjectKey = (ObjectType, String, String);
+pub type ObjectKey = (FileKind, String, String);
 
 /// The file each object's CREATE statement came from.
 pub type Origins = HashMap<ObjectKey, PathBuf>;
@@ -736,7 +743,11 @@ impl Builder {
     }
 
     fn origin(&mut self, ty: ObjectType, schema: &str, name: &str) {
-        self.origins.entry((ty, schema.to_string(), name.to_string())).or_insert_with(|| self.file.clone());
+        self.origin_of(FileKind::Object(ty), schema, name);
+    }
+
+    fn origin_of(&mut self, kind: FileKind, schema: &str, name: &str) {
+        self.origins.entry((kind, schema.to_string(), name.to_string())).or_insert_with(|| self.file.clone());
     }
 
     fn table_index(&self, n: &ObjectName) -> Option<usize> {
@@ -2087,6 +2098,7 @@ impl Builder {
                         encrypted,
                         disabled: false,
                     });
+                    self.origin_of(FileKind::DdlTrigger, "", &name.name);
                     return Ok(());
                 }
                 let on = c.object(&self.schema_default())?;
@@ -2340,7 +2352,27 @@ impl Builder {
                 }
                 Ok(())
             }
-            "sp_bindrule" | "sp_bindefault" | "sp_addtype" => c.fail(MessageKind::IgnoredStatement),
+            "sp_bindefault" | "sp_bindrule" => {
+                let rule = proc == "sp_bindrule";
+                let (Some(what), Some(target)) = (arg(if rule { "@rulename" } else { "@defname" }, 0), arg("@objname", 1)) else {
+                    return c.syntax();
+                };
+                let what = Cur::new(&what).object(&self.schema_default()).map(|n| n.quoted()).unwrap_or(what);
+                let parts = Cur::new(&target).multipart().unwrap_or_default();
+                // Bindings to alias types are not modelled.
+                let [.., schema, table, column] = parts.as_slice() else { return c.fail(MessageKind::IgnoredStatement) };
+                let Some(t) = self.table_index(&ObjectName::new(schema, table)) else { return c.fail(MessageKind::ReferenceNotFound) };
+                let Some(col) = self.db.tables[t].columns.iter_mut().find(|x| x.name.eq_ignore_ascii_case(column)) else {
+                    return c.fail(MessageKind::ReferenceNotFound);
+                };
+                if rule {
+                    col.bound_rule = Some(what);
+                } else {
+                    col.bound_default = Some(what);
+                }
+                Ok(())
+            }
+            "sp_addtype" => c.fail(MessageKind::IgnoredStatement),
             _ => c.fail(MessageKind::IgnoredStatement),
         }
     }
@@ -2823,7 +2855,7 @@ EXEC sp_addextendedproperty N'MS_Description', N'People', 'SCHEMA', N'dbo', 'TAB
         assert_eq!(t.text_filegroup.as_deref(), Some("PRIMARY"));
         assert_eq!(r.database.permissions[0].state, "DENY");
         assert_eq!(r.database.extended_properties[0].minor_name.as_deref(), Some("Name"));
-        assert_eq!(r.origins.get(&(ObjectType::Table, "dbo".into(), "Customer".into())).unwrap(), Path::new("Tables/dbo.Customer.sql"));
+        assert_eq!(r.origins.get(&(FileKind::Object(ObjectType::Table), "dbo".into(), "Customer".into())).unwrap(), Path::new("Tables/dbo.Customer.sql"));
     }
 
     #[test]
@@ -2858,6 +2890,10 @@ GO
 ")]);
         assert!(d.messages.is_empty(), "{:?}", d.messages);
         assert!(d.database.ddl_triggers[0].disabled && d.database.ddl_triggers[0].definition.starts_with("CREATE TRIGGER"));
+        let b = read(&[("b.sql", "CREATE TABLE [dbo].[T] ([a] [int] NULL)\r\nGO\r\nEXEC sp_bindefault N'[dbo].[D]', N'[dbo].[T].[a]'\r\nGO\r\nEXEC sp_bindrule N'dbo.R', N'dbo.T.a'\r\nGO\r\n")]);
+        assert!(b.messages.is_empty(), "{:?}", b.messages);
+        let col = &b.database.tables[0].columns[0];
+        assert_eq!((col.bound_default.as_deref(), col.bound_rule.as_deref()), (Some("[dbo].[D]"), Some("[dbo].[R]")));
         let r = read(&[(
             "p.sql",
             "SET QUOTED_IDENTIFIER OFF\nGO\nSET ANSI_NULLS ON\nGO\nCREATE PROCEDURE [Sales].[GetOrders] @CustomerId int\nWITH EXECUTE AS OWNER\nAS\nSELECT * FROM Sales.[Order];\n\nGO\n\

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use super::parse::{self, Defaults, Message, ObjectKey, Origins};
+use super::parse::{self, Defaults, FileKind, Message, ObjectKey, Origins};
 use super::script;
 use crate::catalog::*;
 use crate::schema::{DiffKind, Difference, ObjectType, Options};
@@ -62,7 +62,8 @@ const PREFIXES: [(&str, &str); 41] = [
     ("ExternalTable", "Tables\\External Tables"),
 ];
 
-fn prefix_key(ty: ObjectType) -> &'static str {
+fn prefix_key(kind: FileKind) -> &'static str {
+    let FileKind::Object(ty) = kind else { return "DdlTrigger" };
     match ty {
         ObjectType::Schema => "Schema",
         ObjectType::Role => "Role",
@@ -510,7 +511,7 @@ const FIXED_ROLES: [&str; 9] =
 pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(ObjectKey, String)> {
     let fg = info.default_filegroup.as_str();
     let mut out: Vec<(ObjectKey, String)> = Vec::new();
-    let key = |ty, s: &str, n: &str| (ty, s.to_string(), n.to_string());
+    let key = |ty, s: &str, n: &str| (FileKind::Object(ty), s.to_string(), n.to_string());
     for s in db.schemas.iter().filter(|s| s.name != "dbo") {
         out.push((key(ObjectType::Schema, "", &s.name), script::schema(db, s, o)));
     }
@@ -552,6 +553,9 @@ pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(Obj
         for p in db.extended_properties.iter().filter(|p| p.class == "DATABASE") {
             out.push((key(ObjectType::ExtendedProperty, "", &p.name), script::database_property(p)));
         }
+    }
+    for t in db.ddl_triggers.iter().filter(|t| !t.definition.is_empty()) {
+        out.push(((FileKind::DdlTrigger, String::new(), t.name.clone()), script::ddl_trigger(t)));
     }
     out
 }
@@ -821,11 +825,13 @@ mod tests {
     #[test]
     fn file_names() {
         let info = FolderInfo::default();
-        let p = default_path(&info, &(ObjectType::StoredProcedure, "Sales".into(), "Get/Orders?".into()));
+        let p = default_path(&info, &(FileKind::Object(ObjectType::StoredProcedure), "Sales".into(), "Get/Orders?".into()));
+        assert_eq!(default_path(&info, &(FileKind::DdlTrigger, String::new(), "Audit".into())), Path::new("Database Triggers").join("Audit.sql"));
         assert_eq!(p, Path::new("Stored Procedures").join("Sales.Get_Orders_.sql"));
         assert_eq!(sanitize("CON"), "CON_");
         assert_eq!(file_stem("", "x."), "x_");
-        let keys = vec![(ObjectType::Table, "a".into(), "b.c".into()), (ObjectType::Table, "a.b".into(), "c".into())];
+        let table = FileKind::Object(ObjectType::Table);
+        let keys = vec![(table, "a".into(), "b.c".into()), (table, "a.b".into(), "c".into())];
         let paths = assign_paths(&keys, &info, &HashMap::new());
         assert_ne!(paths[&keys[0]], paths[&keys[1]]);
         assert!(paths[&keys[1]].to_string_lossy().ends_with("a.b.c1.sql"));

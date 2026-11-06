@@ -704,7 +704,8 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
             return Ok(Some(Source::Snapshot(side.path.into())));
         }
         if side.is_scripts() {
-            return Ok(Some(Source::Scripts { path: side.path.into(), revision: None }));
+            let revision = (!side.revision.is_empty()).then(|| side.revision.clone());
+            return Ok(Some(Source::Scripts { path: side.path.into(), revision }));
         }
         if side.server.is_empty() && side.database.is_empty() {
             return Ok(None);
