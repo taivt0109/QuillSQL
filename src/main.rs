@@ -230,12 +230,12 @@ fn main() -> ExitCode {
     };
     if let Some(command) = command {
         let rest = argv[2..].to_vec();
-        let code = std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(move || command(&rest))
-            .ok()
-            .and_then(|h| h.join().ok())
-            .unwrap_or(quillsql::args::exit::GENERAL_ERROR);
+        let code = match std::thread::Builder::new().stack_size(64 << 20).spawn(move || command(&rest)) {
+            Ok(h) => h.join(),
+            Err(_) => Ok(quillsql::args::exit::GENERAL_ERROR),
+        };
+        // A panic (its message is already printed) ends with SQL Compare's "unhandled" code.
+        let Ok(code) = code else { std::process::exit(quillsql::args::exit::UNHANDLED) };
         return ExitCode::from(code);
     }
     let cli = Cli::parse();
