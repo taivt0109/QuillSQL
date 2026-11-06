@@ -459,3 +459,120 @@ pub fn strong_dependencies(owner: &str, list: &str) -> Warning {
         format!("The following objects that reference, or are referenced by, the objects you want to deploy aren't included in the deployment:\r\n\r\n{list}\r\n\r\nIf you don't include these referenced objects, the deployment script may fail or produce unexpected results."),
     )
 }
+
+/// Warnings of the objects beyond tables and modules.
+pub mod objects {
+    use super::*;
+
+    /// `kind` as in the message: message type, contract, queue, service, route, event
+    /// notification, service binding, security policy...
+    pub fn unsupported(kind: &str, x: &str) -> Warning {
+        w(Severity::High, x, format!("The {kind} {x} is not supported in the target database version."))
+    }
+
+    pub fn polybase_unsupported(what: &str, x: &str) -> Warning {
+        w(Severity::High, x, format!("PolyBase external {what} are not supported in database versions older than SQL Server 2016."))
+    }
+
+    pub fn polybase_platform(x: &str) -> Warning {
+        w(
+            Severity::High,
+            x,
+            "The PolyBase syntax for on-premises SQL Server is different to that for an Azure SQL Database, and will not be compatible.".into(),
+        )
+    }
+
+    pub fn missing_credential(x: &str, credential: &str) -> Warning {
+        w(
+            Severity::High,
+            x,
+            format!("The target database does not have the required database scoped credential {credential}. The deployment will fail unless this is present."),
+        )
+    }
+
+    /// `what`: external file formats, external data sources or external tables.
+    pub fn polybase_isolation(what: &str, level: &str) -> Warning {
+        w(
+            Severity::High,
+            "",
+            format!("SQL Server only supports creating {what} in transactions when the transaction isolation level is READ UNCOMMITTED or READ COMMITTED.\r\n\r\nThe deployment uses {level}."),
+        )
+    }
+
+    pub fn cannot_be_recreated(kind: &str, x: &str) -> Warning {
+        w(Severity::High, x, format!("The {kind} {x} cannot be recreated. The script may fail."))
+    }
+
+    pub fn symmetric_key_contents(x: &str) -> Warning {
+        w(
+            Severity::Medium,
+            x,
+            format!("The contents of symmetric keys cannot be compared. QuillSQL Compare will only compare the owner and the permissions if required for {x}."),
+        )
+    }
+
+    pub fn application_role_password(r: &str) -> Warning {
+        w(Severity::Low, r, format!("The application role {r} will be created with a default password of 'p@ssw0rd'"))
+    }
+
+    pub fn non_local_route(r: &str) -> Warning {
+        w(Severity::High, r, format!("The route {r} contains a non-local address which is not supported in Microsoft Azure managed instances."))
+    }
+
+    pub fn statistics_sample(t: &str, s: &str) -> Warning {
+        w(
+            Severity::Low,
+            t,
+            format!("Creating statistics [{s}] on {t}. When deploying statistics, the SAMPLE option isn\u{2019}t supported. If you're deploying statistics that use SAMPLE, you'll need to manually modify the deployment script for those objects."),
+        )
+    }
+
+    pub fn edge_constraint_unsupported(t: &str, e: &str) -> Warning {
+        w(Severity::High, t, format!("The edge constraint {e} on table {t} is not supported in the target database version."))
+    }
+
+    pub fn xml_collection_rebuild(x: &str, column: &str, t: &str) -> Warning {
+        w(
+            Severity::Low,
+            x,
+            format!("The XML schema collection {x} needs to be rebuilt. It will be unbound from the {column} column of the {t} table. After the rebuild the XML schema collection will be rebound to the table. The data in the table will be preserved."),
+        )
+    }
+
+    pub fn clr_type_unbind(ty: &str) -> Warning {
+        w(
+            Severity::High,
+            ty,
+            format!("The CLR type {ty} needs to be unbound from dependent tables, but this is not possible without data loss. If the tables in question are not selected explicitly the script may fail."),
+        )
+    }
+
+    pub fn fulltext_in_transaction() -> Warning {
+        w(
+            Severity::High,
+            "",
+            "Full-text indexes can't be deployed in transactions, so QuillSQL Compare will deploy changes to full-text indexes after transactions are complete. If other objects rely on changes to full-text indexes (using CONTAINS, FULLTEXT, CONTAINSTABLE or FREETEXTTABLE), the script may fail.\r\n\r\nWe recommend you select the 'Do not use transactions in deployment scripts' project option when deploying full-text indexes.".into(),
+        )
+    }
+
+    pub fn label_without_name(column: &str, information_type: bool) -> Warning {
+        let (what, missing) = if information_type { ("information type id", "information type") } else { ("label id", "label") };
+        w(
+            Severity::Medium,
+            column,
+            format!("The sensitivity classification on column {column} contains a {what} without a corresponding {missing}. This deployment will add a {missing} with the same value as the {what}."),
+        )
+    }
+
+    pub fn partitioning_in_use(x: &str, users: &str) -> Warning {
+        w(
+            Severity::High,
+            x,
+            format!("{x} has to be dropped and created again, but {users} still use it. Rebuild those tables and indexes on another filegroup first, or the script will fail."),
+        )
+    }
+
+    pub fn retention_shortened(t: &str) -> Warning {
+        w(Severity::High, t, format!("This deployment shortens the history retention period for table {t}. This may cause a loss of history data for this table."))
+    }
+}

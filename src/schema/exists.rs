@@ -272,6 +272,22 @@ impl Checks {
         guard(format!("{} (SELECT 1 FROM sys.change_tracking_tables WHERE object_id = {})", check.exists(), object_id(table, "U")), sql)
     }
 
+    /// Objects found through a catalog view: `from_where` is `sys.x WHERE …`.
+    pub fn listed(&self, from_where: &str, check: Check, sql: &str) -> String {
+        if !self.objects {
+            return sql.to_string();
+        }
+        guard(format!("{} (SELECT 1 FROM {from_where})", check.exists()), sql)
+    }
+
+    /// Objects with an id function: `CERT_ID(N'c') IS NULL`.
+    pub fn id(&self, function: &str, name: &str, check: Check, sql: &str) -> String {
+        if !self.objects {
+            return sql.to_string();
+        }
+        guard(format!("{function}({}) {}", sql_string(name), check.is_null()), sql)
+    }
+
     /// DDL triggers.
     pub fn ddl_trigger(&self, name: &str, check: Check, sql: &str) -> String {
         if !self.objects {

@@ -14,12 +14,15 @@ use serde::{Deserialize, Serialize};
 use super::cast::{self, Cast};
 use super::compare::{Comparison, DiffKind, Difference, Mappings, ObjectType, column_differences};
 use super::ddl::{self, Host, Render, type_sql};
+use super::ddl_objects;
 use super::exists::{Check, Checks};
 use super::features::{Feature, Features};
 use super::options::{Opt, Options};
 use super::warnings as warn;
 use crate::catalog::*;
 use crate::db::{literal, quote};
+
+mod objects;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Severity {
@@ -70,11 +73,20 @@ impl DeploymentScript {
 /// runs before the transaction and the last after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Phase {
+    /// Certificates and keys: created and altered before anything can use them.
+    PreCrypto,
+    /// Full-text work, which can't run in a transaction (ranked inside).
+    PreFullText,
     PreTransaction,
     DisableDdlTriggers,
     CreatePrincipals,
     RoleMembers,
+    /// External tables, data sources and file formats (ranked in that order).
+    DropExternal,
+    DropSensitivity,
     CreateSchemas,
+    /// External file formats, then data sources.
+    CreateExternalFormats,
     DisableChangeTracking,
     DropExtendedProperties,
     DropForeignKeys,
@@ -87,25 +99,67 @@ enum Phase {
     DropIndexes,
     DropTriggers,
     UnbindColumns,
-    /// Views, functions, procedures and tables, dependants first.
+    /// Alias types taken off the columns that use them while the type is re-created.
+    UnbindTypes,
+    DropDdlTriggers,
+    /// Views, functions, procedures, tables, Service Broker objects and security policies,
+    /// dependants first.
     DropObjects,
     DropSequences,
+    /// Rules, then defaults (CREATE RULE / CREATE DEFAULT objects).
+    DropBindables,
     DropTypes,
+    DropAssemblies,
+    DropCryptoKeys,
+    /// Partition schemes and functions: drops, creates and alters (ranked).
+    Partitioning,
+    /// Defaults, then rules.
+    CreateBindables,
+    DropRoutes,
+    /// Assembly creates, then alters.
+    CreateAssemblies,
     DropSynonyms,
+    /// Typed xml columns taken off a collection that is re-created.
+    UnbindXml,
+    /// Drops, then creates.
+    XmlSchemaCollections,
     CreateTypes,
+    RebindTypes,
     CreateSequences,
-    /// Tables (with their indexes), views, functions, procedures and synonyms, dependencies first.
+    CreateExternalTables,
+    /// Tables (with their indexes), views, functions, procedures, synonyms, Service Broker
+    /// objects and security policies, dependencies first.
     CreateObjects,
+    /// SET (SYSTEM_VERSIONING = ON …) once the table has its primary key again.
+    Versioning,
     BindColumns,
     CreateChecks,
     CreateForeignKeys,
     CreateDefaults,
+    RebindXml,
     Triggers,
+    DdlTriggers,
+    /// Alters, then creates.
+    Routes,
     ExtendedProperties,
     Permissions,
     DropSchemas,
     EnableDdlTriggers,
+    AddSensitivity,
+    /// Full-text indexes are created after the transaction.
+    PostFullText,
     PostTransaction,
+    DropCertificates,
+}
+
+impl Phase {
+    fn before_transaction(self) -> bool {
+        self <= Phase::PreTransaction
+    }
+
+    fn after_transaction(self) -> bool {
+        self >= Phase::PostFullText
+    }
 }
 
 #[derive(Debug)]
@@ -191,6 +245,7 @@ struct Planner<'a> {
     selective_xml: bool,
     table_filegroups: BTreeSet<String>,
     object_filegroups: BTreeSet<String>,
+    objects: objects::State,
 }
 
 impl<'a> Planner<'a> {
@@ -243,6 +298,7 @@ impl<'a> Planner<'a> {
             selective_xml: false,
             table_filegroups: BTreeSet::new(),
             object_filegroups: BTreeSet::new(),
+            objects: objects::State::default(),
         }
     }
 
@@ -290,18 +346,18 @@ impl<'a> Planner<'a> {
         let mut chosen: Vec<&Difference> = self.cmp.differences.iter().filter(|d| d.selected && d.kind != DiffKind::Equal).collect();
         if self.opts.has(Opt::IncludeDependencies) {
             // Objects that selected creates and alters need, and that differ, come along.
-            let mut names: HashSet<ObjectName> = chosen.iter().map(|d| d.name.clone()).collect();
-            let mut queue: Vec<ObjectName> = chosen.iter().filter(|d| d.kind != DiffKind::OnlyIn2).map(|d| d.name.clone()).collect();
+            let mut names: HashSet<ObjectName> = chosen.iter().map(|d| d.key()).collect();
+            let mut queue: Vec<ObjectName> = chosen.iter().filter(|d| d.kind != DiffKind::OnlyIn2).map(|d| d.key()).collect();
             while let Some(n) = queue.pop() {
                 for dep in self.src_deps.iter().filter(|d| d.from == n) {
                     if names.contains(&dep.to) {
                         continue;
                     }
                     if let Some(d) = self.cmp.differences.iter().find(|d| {
-                        d.name == dep.to && matches!(d.kind, DiffKind::OnlyIn1 | DiffKind::Different)
+                        d.key() == dep.to && matches!(d.kind, DiffKind::OnlyIn1 | DiffKind::Different)
                     }) {
-                        names.insert(d.name.clone());
-                        queue.push(d.name.clone());
+                        names.insert(d.key());
+                        queue.push(d.key());
                         chosen.push(d);
                     }
                 }
@@ -332,9 +388,10 @@ impl<'a> Planner<'a> {
                 ObjectType::Sequence => self.sequence(d),
                 ObjectType::Synonym => self.synonym(d),
                 ObjectType::ExtendedProperty => self.database_property(d),
-                _ => {}
+                _ => self.more_object(d),
             }
         }
+        self.finish_objects();
         self.dependants(&selected);
         self.extended_properties(&selected);
         self.permissions(&selected);
@@ -428,19 +485,9 @@ impl<'a> Planner<'a> {
         let tn = self.target_name(d);
         let t = self.tgt.types.iter().find(|t| t.schema == tn.schema && t.name == tn.name);
         if let Some(t) = t {
-            let users: Vec<String> = self
-                .tgt
-                .tables
-                .iter()
-                .filter(|tab| tab.columns.iter().any(|c| c.data_type.schema.as_deref() == Some(&t.schema) && c.data_type.name == t.name))
-                .map(|tab| tab.object_name().to_string())
-                .collect();
-            if !users.is_empty() {
-                self.warn(Warning {
-                    severity: Severity::High,
-                    object: tn.to_string(),
-                    message: format!("type {tn} is used by {}; drop and re-create those columns' tables first, or the script will fail", users.join(", ")),
-                });
+            // Columns that use the type go over to its base type while it is re-created.
+            if t.kind == UserTypeKind::Alias {
+                self.unbind_type(t, s);
             }
             if s.is_none() {
                 self.warn(warn::type_drop(&tn.to_string()));
@@ -616,7 +663,7 @@ impl<'a> Planner<'a> {
         let tn = self.target_name(d);
         let source = self.source_module(&d.name);
         let target = self.target_module(&tn);
-        let kind_changed = matches!((&source, &target), (Some(Module::Routine(a)), Some(Module::Routine(b))) if function_class(a) != function_class(b));
+        let kind_changed = matches!((&source, &target), (Some(Module::Routine(a)), Some(Module::Routine(b))) if function_class(a) != function_class(b) || a.clr_method.is_some() != b.clr_method.is_some());
         if kind_changed {
             self.warn(warn::function_type_change(&d.name.to_string()));
         }
@@ -637,8 +684,10 @@ impl<'a> Planner<'a> {
                 } else {
                     self.native_module(&d.name, s);
                     let verb = if self.opts.has(Opt::CreateOrAlterInsteadOfAlter) && self.has(Feature::CreateOrAlter) { "CREATE OR ALTER" } else { "ALTER" };
-                    let text = self.encryption(s.definition(), t.encrypted());
-                    let sql = ddl::module_sql(&text, verb, &d.name.quoted());
+                    let sql = match s {
+                        Module::Routine(r) if r.clr_method.is_some() => ddl_objects::clr_routine(r, verb),
+                        _ => ddl::module_sql(&self.encryption(s.definition(), t.encrypted()), verb, &d.name.quoted()),
+                    };
                     let sql = self.module_statement(&d.name, s, Check::Alter, &sql);
                     self.module_step(Phase::CreateObjects, format!("Altering {}", d.name), vec![sql], s.settings());
                     // ALTER VIEW removes the view's indexes.
@@ -669,19 +718,14 @@ impl<'a> Planner<'a> {
             self.nondecryptable(name, m);
             return;
         }
-        if m.is_clr() {
-            self.warn(Warning {
-                severity: Severity::High,
-                object: name.to_string(),
-                message: "CLR modules are not scripted yet; deploy the assembly and module by hand".into(),
-            });
-            return;
-        }
         self.native_module(name, m);
         self.recreate.insert(name.clone());
         let verb = if self.opts.has(Opt::CreateOrAlterInsteadOfAlter) && self.has(Feature::CreateOrAlter) { "CREATE OR ALTER" } else { "CREATE" };
-        let text = self.encryption(m.definition(), false);
-        let sql = self.module_statement(name, m, Check::Create, &ddl::module_sql(&text, verb, &name.quoted()));
+        let sql = match m {
+            Module::Routine(r) if r.clr_method.is_some() => ddl_objects::clr_routine(r, verb),
+            _ => ddl::module_sql(&self.encryption(m.definition(), false), verb, &name.quoted()),
+        };
+        let sql = self.module_statement(name, m, Check::Create, &sql);
         self.module_step(Phase::CreateObjects, format!("Creating {name}"), vec![sql], m.settings());
         if let Module::View(v) = m {
             self.view_indexes(name, v);
@@ -710,13 +754,16 @@ impl<'a> Planner<'a> {
 
     fn create_trigger(&mut self, parent: &ObjectName, tr: &Trigger) {
         let name = ObjectName::new(&parent.schema, &tr.name);
-        if tr.encrypted || tr.definition.is_empty() {
-            self.warn(warn::nondecryptable("trigger", &name.to_string()));
-            return;
-        }
-        let text = self.trigger_text(&name, &tr.definition, false);
-        let code = "TR";
-        let mut statements = vec![self.ex.module(&name, code, Check::Create, &ddl::module_sql(&text, "CREATE", &name.quoted()))];
+        let mut statements = if tr.clr_method.is_some() {
+            vec![self.ex.module(&name, "TA", Check::Create, &ddl_objects::clr_trigger(&name, parent, tr, "CREATE"))]
+        } else {
+            if tr.encrypted || tr.definition.is_empty() {
+                self.warn(warn::nondecryptable("trigger", &name.to_string()));
+                return;
+            }
+            let text = self.trigger_text(&name, &tr.definition, false);
+            vec![self.ex.module(&name, "TR", Check::Create, &ddl::module_sql(&text, "CREATE", &name.quoted()))]
+        };
         if tr.disabled {
             statements.push(format!("DISABLE TRIGGER {name} ON {parent}"));
         }
@@ -738,6 +785,10 @@ impl<'a> Planner<'a> {
             let deps: Vec<ObjectName> = self.tgt_deps.iter().filter(|d| d.strong && d.to == n).map(|d| d.from.clone()).collect();
             for dep in deps {
                 if !seen.insert(dep.clone()) {
+                    continue;
+                }
+                if self.object_dependant(&dep) {
+                    queue.push(dep.clone());
                     continue;
                 }
                 let Some(t) = self.target_module(&dep) else { continue };
@@ -809,20 +860,29 @@ impl<'a> Planner<'a> {
 
     fn create_table(&mut self, s: &'a Table) {
         let name = s.object_name();
-        if s.temporal.is_some() {
+        // A system-versioned table comes with its history table, created first.
+        let mut statements = Vec::new();
+        if let Some(temporal) = &s.temporal {
             if !self.has(Feature::Temporal) {
                 self.warn(warn::target::temporal(&name.to_string()));
             } else {
-                self.warn(Warning {
-                    severity: Severity::High,
-                    object: name.to_string(),
-                    message: "system-versioned tables are created without versioning by this version of QuillSQL".into(),
-                });
+                self.retention_warning(s);
+                if let Some(h) = self.src.table(&temporal.history_table.schema, &temporal.history_table.name) {
+                    statements.push(ddl::create_table_with(h, None, false, &self.r));
+                    for ix in &h.indexes {
+                        statements.extend(ddl::create_index_with(&h.object_name().quoted(), ix, &self.r, &Host::of_table(h)));
+                    }
+                }
             }
         }
         self.table_feature_warnings(s);
         self.recreate.insert(name.clone());
-        let mut statements = vec![self.ex.object(&name, "U", Check::Create, &ddl::create_table_with(s, None, false, &self.r))];
+        // A system-versioned table needs its primary key in the CREATE TABLE.
+        let inline_key = s.temporal.is_some() && self.has(Feature::Temporal);
+        if inline_key {
+            self.objects.inline_key.insert(name.clone());
+        }
+        statements.push(self.ex.object(&name, "U", Check::Create, &ddl::create_table_with(s, None, inline_key, &self.r)));
         if s.lock_escalation != "TABLE" && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&name.quoted(), &s.lock_escalation));
         }
@@ -833,13 +893,15 @@ impl<'a> Planner<'a> {
         self.module_step(Phase::CreateObjects, format!("Creating {name}"), statements, &ModuleSettings::default());
         self.table_children(s);
         self.bind_columns(s, None, true);
+        self.table_parts(s, None);
     }
 
     /// Indexes, checks, foreign keys and triggers of a new or rebuilt table.
     fn table_children(&mut self, s: &'a Table) {
         let name = s.object_name();
         if !s.memory_optimized {
-            self.create_indexes(&name, &Host::of_table(s), s.indexes.iter().collect());
+            let inline_key = self.objects.inline_key.contains(&name);
+            self.create_indexes(&name, &Host::of_table(s), s.indexes.iter().filter(|i| !(inline_key && i.primary_key)).collect());
         }
         for ck in &s.check_constraints {
             self.add_check(&name, ck);
@@ -1084,7 +1146,7 @@ impl<'a> Planner<'a> {
         let modified: Vec<&str> = pairs
             .iter()
             .filter_map(|(a, b)| match (a, b) {
-                (Some(a), Some(b)) if !column_differences(a, b, o, false).is_empty() => Some(b.name.as_str()),
+                (Some(a), Some(b)) if !material_differences(a, b, o).is_empty() => Some(b.name.as_str()),
                 _ => None,
             })
             .collect();
@@ -1113,7 +1175,7 @@ impl<'a> Planner<'a> {
             if a.name != b.name && a.column_set && b.column_set {
                 return Some(vec![warn::rebuild::column_set(&name, &a.name)]);
             }
-            if column_differences(a, b, o, false).is_empty() {
+            if material_differences(a, b, o).is_empty() {
                 continue;
             }
             if a.filestream || b.filestream {
@@ -1189,27 +1251,15 @@ impl<'a> Planner<'a> {
 
     fn alter_table(&mut self, s: &'a Table, t: &'a Table) {
         let pairs = self.column_pairs(s, t);
-        if s.temporal.is_some() != t.temporal.is_some() {
-            self.warn(Warning {
-                severity: Severity::High,
-                object: t.object_name().to_string(),
-                message: "turning system versioning on or off is not scripted by this version of QuillSQL; the table is left as it is".into(),
-            });
-            return;
-        }
         if let Some(why) = self.rebuild_reason(s, t, &pairs) {
-            if t.temporal.is_some() {
-                self.warn(Warning {
-                    severity: Severity::High,
-                    object: t.object_name().to_string(),
-                    message: "the table needs a rebuild, which this version of QuillSQL does not script for system-versioned tables".into(),
-                });
-                return;
-            }
             for w in why {
                 self.warn(w);
             }
-            self.rebuild_table(s, t, &pairs);
+            if s.temporal.is_some() || t.temporal.is_some() {
+                self.rebuild_temporal(s, t, &pairs);
+            } else {
+                self.rebuild_table(s, t, &pairs);
+            }
             return;
         }
         self.alter_in_place(s, t, &pairs);
@@ -1247,6 +1297,11 @@ impl<'a> Planner<'a> {
         for fk in &t.foreign_keys {
             if fk.columns.iter().any(|c| self.same(c, col)) {
                 self.drop_foreign_key(t, fk);
+            }
+        }
+        for st in &t.statistics {
+            if st.columns.iter().any(|c| self.same(c, col)) || st.filter.as_deref().is_some_and(mentions) {
+                self.drop_statistics(t, st);
             }
         }
         let tgt = self.tgt;
@@ -1380,7 +1435,7 @@ impl<'a> Planner<'a> {
                 renames.push(self.ex.rename_column(&name, &b.name, &a.name, &sql));
                 disturbed = true;
             }
-            let diffs = column_differences(a, b, o, false);
+            let diffs = material_differences(a, b, o);
             if diffs.is_empty() {
                 continue;
             }
@@ -1466,9 +1521,19 @@ impl<'a> Planner<'a> {
                 vec![format!("ALTER TABLE {table} DROP\r\n{}", cols.iter().map(|c| format!("COLUMN {}", quote(&c.name))).collect::<Vec<_>>().join(",\r\n"))]
             }
         };
+        // Period columns of a table that becomes system-versioned are added with their PERIOD.
+        let period = match (&s.temporal, &t.temporal) {
+            (Some(x), None) if adds.iter().any(|c| c.generated_always.is_some()) => Some(format!("PERIOD FOR SYSTEM_TIME ({}, {})", quote(&x.period_start), quote(&x.period_end))),
+            _ => None,
+        };
         let add_list = |p: &Self, cols: &[&Column]| -> Vec<String> {
             if cols.is_empty() {
                 Vec::new()
+            } else if let Some(period) = period.as_ref().filter(|_| cols.iter().any(|c| c.generated_always.is_some())) {
+                let mut defs: Vec<String> = cols.iter().map(|c| ddl::column_definition_with(c, true, &p.r, t.memory_optimized)).collect();
+                defs.push(period.clone());
+                let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+                vec![p.ex.columns(&name, &names, Check::Create, &format!("ALTER TABLE {table} ADD\r\n{}", defs.join(",\r\n")))]
             } else if p.ex.enabled() {
                 cols.iter()
                     .map(|c| {
@@ -1481,6 +1546,8 @@ impl<'a> Planner<'a> {
                 vec![format!("ALTER TABLE {table} ADD\r\n{}", defs.join(",\r\n"))]
             }
         };
+        let (versioning_off, period_change) = self.versioning_change(s, t, &drops);
+        statements.extend(period_change.0);
         statements.extend(drop_list(self, &computed_drops));
         statements.extend(add_list(self, &adds));
         statements.extend(drop_list(self, &drops));
@@ -1488,6 +1555,7 @@ impl<'a> Planner<'a> {
         statements.extend(alters);
         let computed: Vec<&Column> = computed_adds.iter().chain(recompute.iter()).copied().collect();
         statements.extend(add_list(self, &computed));
+        statements.extend(period_change.1);
         // Table options.
         if !o.has(Opt::IgnoreDataCompression) && s.storage.compression != t.storage.compression {
             let c = s.storage.compression.first().map(|p| p.compression.as_str()).unwrap_or("NONE");
@@ -1504,6 +1572,8 @@ impl<'a> Planner<'a> {
         self.sub_objects(s, t);
         self.change_tracking(s, t);
         self.bind_columns(s, Some(&rebind), true);
+        self.table_parts(s, Some(t));
+        self.versioning_on(s, t, versioning_off);
     }
 
     /// Change tracking of a table altered in place. It needs the primary key, so a key that is
@@ -1695,12 +1765,18 @@ impl<'a> Planner<'a> {
                 match t.triggers.iter().find(|b| self.same(&b.name, &a.name)) {
                     None => self.create_trigger(&name, a),
                     Some(b) => {
-                        let same_text = super::text::compare(&a.definition, &b.definition, super::text::TextKind::Module, &o.clone().with(Opt::IgnoreOwners)).is_none();
+                        let same_text = super::text::compare(&a.definition, &b.definition, super::text::TextKind::Module, &o.clone().with(Opt::IgnoreOwners)).is_none()
+                            && a.clr_method == b.clr_method
+                            && (a.clr_method.is_none() || (a.events == b.events && a.execute_as == b.execute_as));
                         let trig = ObjectName::new(&name.schema, &a.name);
                         let mut statements = Vec::new();
                         if !same_text {
-                            let text = self.trigger_text(&trig, &a.definition, b.encrypted);
-                            statements.push(ddl::module_sql(&text, "ALTER", &trig.quoted()));
+                            if a.clr_method.is_some() {
+                                statements.push(ddl_objects::clr_trigger(&trig, &name, a, "ALTER"));
+                            } else {
+                                let text = self.trigger_text(&trig, &a.definition, b.encrypted);
+                                statements.push(ddl::module_sql(&text, "ALTER", &trig.quoted()));
+                            }
                         }
                         if a.disabled != b.disabled || !same_text {
                             statements.push(format!("{} TRIGGER {trig} ON {table}", if a.disabled { "DISABLE" } else { "ENABLE" }));
@@ -1836,6 +1912,11 @@ impl<'a> Planner<'a> {
         let mut temp_table = s.clone();
         temp_table.indexes.clear();
         temp_table.temporal = None;
+        // The period comes back once the copy is renamed.
+        for c in temp_table.columns.iter_mut() {
+            c.generated_always = None;
+            c.hidden = false;
+        }
         // The disk-based copy's defaults get temporary names while the real ones are taken.
         // (column, temporary name, real default)
         let mut temp_defaults: Vec<(String, String, DefaultConstraint)> = Vec::new();
@@ -1974,6 +2055,12 @@ impl<'a> Planner<'a> {
                 statements.push(ddl::drop_constraint(&name.quoted(), temp));
                 statements.push(ddl::add_default(&name.quoted(), column, real));
             }
+            if let Some(x) = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal)) {
+                statements.push(format!("ALTER TABLE {} ADD PERIOD FOR SYSTEM_TIME ({}, {})", name.quoted(), quote(&x.period_start), quote(&x.period_end)));
+                for c in s.columns.iter().filter(|c| c.hidden) {
+                    statements.push(format!("ALTER TABLE {} ALTER COLUMN {} ADD HIDDEN", name.quoted(), quote(&c.name)));
+                }
+            }
         }
         if s.lock_escalation != "TABLE" && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&name.quoted(), &s.lock_escalation));
@@ -1987,6 +2074,7 @@ impl<'a> Planner<'a> {
         self.module_step(Phase::CreateObjects, format!("Rebuilding {name}"), statements, &ModuleSettings::default());
         self.table_children(s);
         self.bind_columns(s, None, false);
+        self.table_parts(s, None);
     }
 
     // ---- Extended properties ----
@@ -1998,6 +2086,20 @@ impl<'a> Planner<'a> {
         for d in selected {
             let class = match d.object_type {
                 ObjectType::Role | ObjectType::User => continue,
+                t if !matches!(
+                    t,
+                    ObjectType::Table
+                        | ObjectType::View
+                        | ObjectType::Function
+                        | ObjectType::StoredProcedure
+                        | ObjectType::Sequence
+                        | ObjectType::Synonym
+                        | ObjectType::UserDefinedType
+                        | ObjectType::Schema
+                ) =>
+                {
+                    continue
+                }
                 ObjectType::Table => "TABLE",
                 ObjectType::View => "VIEW",
                 ObjectType::Function => "FUNCTION",
@@ -2006,7 +2108,7 @@ impl<'a> Planner<'a> {
                 ObjectType::Synonym => "SYNONYM",
                 ObjectType::UserDefinedType => "TYPE",
                 ObjectType::Schema => "SCHEMA",
-                ObjectType::ExtendedProperty => continue,
+                _ => continue,
             };
             let tn = self.target_name(d);
             let of = |db: &'a Database, n: &ObjectName| -> Vec<&'a ExtendedProperty> {
@@ -2073,6 +2175,8 @@ impl<'a> Planner<'a> {
                 create(" WITHOUT LOGIN".into())
             }
             ("EXTERNAL_USER" | "EXTERNAL_GROUP", _) => create(" FROM EXTERNAL PROVIDER".into()),
+            ("CERTIFICATE_MAPPED_USER", _) => create(format!(" FOR CERTIFICATE {}", quote(s.certificate.as_deref().unwrap_or("UNKNOWN")))),
+            ("ASYMMETRIC_KEY_MAPPED_USER", _) => create(format!(" FOR ASYMMETRIC KEY {}", quote(s.asymmetric_key.as_deref().unwrap_or("UNKNOWN")))),
             _ => return None,
         })
     }
@@ -2105,6 +2209,13 @@ impl<'a> Planner<'a> {
                     let sql = self.ex.principal(&s.name, true, Check::Create, &format!("CREATE ROLE {q}{owner}"));
                     self.step(Phase::CreatePrincipals, format!("Creating role {}", s.name), vec![sql]);
                 }
+                "APPLICATION_ROLE" => {
+                    // The password can't be read; SQL Compare's placeholder is used.
+                    self.warn(super::warnings::objects::application_role_password(&q));
+                    let schema = s.default_schema.as_deref().map(|x| format!(", DEFAULT_SCHEMA = {}", quote(x))).unwrap_or_default();
+                    let sql = self.ex.principal(&s.name, true, Check::Create, &format!("CREATE APPLICATION ROLE {q} WITH PASSWORD = 'p@ssw0rd'{schema}"));
+                    self.step(Phase::CreatePrincipals, format!("Creating role {}", s.name), vec![sql]);
+                }
                 _ => match self.create_user_sql(s) {
                     Some(sql) => self.step(Phase::CreatePrincipals, "", vec![sql]),
                     None => {
@@ -2127,7 +2238,8 @@ impl<'a> Planner<'a> {
                     let sql = self.member_sql(&t.name, &m.name, false);
                     self.group(Phase::RoleMembers, format!("Altering members of role {}", t.name), vec![sql]);
                 }
-                let sql = self.ex.principal(&t.name, true, Check::Drop, &format!("DROP ROLE {tq}"));
+                let what = if t.kind == "APPLICATION_ROLE" { "APPLICATION ROLE" } else { "ROLE" };
+                let sql = self.ex.principal(&t.name, true, Check::Drop, &format!("DROP {what} {tq}"));
                 self.push(Step { group: true, rank: 0, ..Step::new(Phase::PostTransaction, "Dropping roles", vec![sql]) });
             } else {
                 self.warn(warn::user_drop(&t.name));
@@ -2152,7 +2264,13 @@ impl<'a> Planner<'a> {
                     sql.push(format!("ALTER USER {q} WITH {}", with.join(", ")));
                 }
             }
-            if s.is_role() && s.owner != t.owner && !self.opts.has(Opt::IgnoreOwners) {
+            if s.kind == "APPLICATION_ROLE"
+                && s.default_schema != t.default_schema
+                && let Some(x) = &s.default_schema
+            {
+                sql.push(format!("ALTER APPLICATION ROLE {q}\r\nWITH DEFAULT_SCHEMA = {}", quote(x)));
+            }
+            if s.kind == "DATABASE_ROLE" && s.owner != t.owner && !self.opts.has(Opt::IgnoreOwners) {
                 sql.push(format!("ALTER AUTHORIZATION ON ROLE::{q} TO {}", quote(s.owner.as_deref().unwrap_or("dbo"))));
             }
             self.step(Phase::CreatePrincipals, "", sql);
@@ -2191,21 +2309,39 @@ impl<'a> Planner<'a> {
         let roles_only = self.opts.has(Opt::IgnoreUsers);
         for d in selected {
             let (class, object) = match d.object_type {
-                ObjectType::Table | ObjectType::View | ObjectType::Function | ObjectType::StoredProcedure | ObjectType::Sequence | ObjectType::Synonym => ("OBJECT", true),
+                ObjectType::Table
+                | ObjectType::View
+                | ObjectType::Function
+                | ObjectType::StoredProcedure
+                | ObjectType::Sequence
+                | ObjectType::Synonym
+                | ObjectType::Queue
+                | ObjectType::SecurityPolicy
+                | ObjectType::ExternalTable => ("OBJECT", true),
                 ObjectType::Schema => ("SCHEMA", false),
-                _ => continue,
+                ObjectType::XmlSchemaCollection => ("XML SCHEMA COLLECTION", true),
+                ObjectType::UserDefinedType => ("TYPE", true),
+                t => match objects::securable_class(t) {
+                    Some(class) => (class, false),
+                    None => continue,
+                },
             };
+            let scoped = d.object_type.schema_scoped() || class == "SCHEMA";
             if d.kind == DiffKind::OnlyIn2 {
                 continue;
             }
             let tn = self.target_name(d);
             let on = |db: &'a Database, n: &ObjectName| -> Vec<Permission> {
-                let (schema, obj) = if object { (n.schema.as_str(), Some(n.name.as_str())) } else { (n.name.as_str(), None) };
+                let (schema, obj) = match (object, scoped) {
+                    (true, _) => (Some(n.schema.as_str()), Some(n.name.as_str())),
+                    (false, true) => (Some(n.name.as_str()), None),
+                    (false, false) => (None, Some(n.name.as_str())),
+                };
                 db.permissions
                     .iter()
                     .filter(|p| {
                         p.class == class
-                            && p.schema.as_deref() == Some(schema)
+                            && p.schema.as_deref() == schema
                             && p.object.as_deref() == obj
                             && (!roles_only || p.grantee == "public" || db.principals.iter().any(|x| x.is_role() && x.name == p.grantee))
                     })
@@ -2221,16 +2357,23 @@ impl<'a> Planner<'a> {
             };
             // Statements name the object as it is called after the deployment, SQL Compare's
             // way: `ON [s].[o]` for objects (with a space where a class prefix would go).
-            let securable = if object { format!(" {}", d.name.quoted()) } else { format!("SCHEMA:: {}", quote(&d.name.name)) };
-            let key = |p: &Permission| self.key(&format!("{} {} {}", p.state, p.permission, p.grantee));
+            let securable = match (class, object) {
+                ("OBJECT", _) => format!(" {}", d.name.quoted()),
+                ("SCHEMA", _) => format!("SCHEMA:: {}", quote(&d.name.name)),
+                (class, true) => format!("{class}:: {}", d.name.quoted()),
+                (class, false) => format!("{class}:: {}", quote(&d.name.name)),
+            };
+            let key = |p: &Permission| self.key(&format!("{} {} {}", p.state, p.action(), p.grantee));
+            // Column permissions name the column and leave the class prefix out.
+            let on = |p: &Permission| if p.column.is_some() { d.name.quoted() } else { securable.clone() };
             let revokes = existing.iter().filter(|e| !wanted.iter().any(|w| key(w) == key(e))).map(|e| {
                 let cascade = if e.state == "GRANT_WITH_GRANT_OPTION" { " CASCADE" } else { "" };
-                format!("REVOKE {} ON {securable} TO {}{cascade}", e.permission, quote(&e.grantee))
+                format!("REVOKE {} ON {} TO {}{cascade}", e.action(), on(e), quote(&e.grantee))
             });
             let grants = wanted.iter().filter(|w| !existing.iter().any(|e| key(e) == key(w))).map(|w| match w.state.as_str() {
-                "DENY" => format!("DENY {} ON {securable} TO {}", w.permission, quote(&w.grantee)),
-                "GRANT_WITH_GRANT_OPTION" => format!("GRANT {} ON {securable} TO {} WITH GRANT OPTION", w.permission, quote(&w.grantee)),
-                _ => format!("GRANT {} ON {securable} TO {}", w.permission, quote(&w.grantee)),
+                "DENY" => format!("DENY {} ON {} TO {}", w.action(), on(w), quote(&w.grantee)),
+                "GRANT_WITH_GRANT_OPTION" => format!("GRANT {} ON {} TO {} WITH GRANT OPTION", w.action(), on(w), quote(&w.grantee)),
+                _ => format!("GRANT {} ON {} TO {}", w.action(), on(w), quote(&w.grantee)),
             });
             let statements: Vec<String> = revokes.chain(grants).collect();
             self.step(Phase::Permissions, format!("Altering permissions on {securable}"), statements);
@@ -2305,13 +2448,13 @@ impl<'a> Planner<'a> {
         }
         let empty = self.steps.is_empty();
         let mut steps = self.steps.iter().peekable();
-        while let Some(step) = steps.next_if(|s| s.phase == Phase::PreTransaction) {
+        while let Some(step) = steps.next_if(|s| s.phase.before_transaction()) {
             w.step(step, ignore_set);
         }
         if transactions {
             w.batch("BEGIN TRANSACTION".into());
         }
-        while let Some(step) = steps.next_if(|s| s.phase != Phase::PostTransaction) {
+        while let Some(step) = steps.next_if(|s| !s.phase.after_transaction()) {
             w.step(step, ignore_set);
         }
         if transactions {
@@ -2376,10 +2519,6 @@ impl<'a> Module<'a> {
         }
     }
 
-    fn is_clr(&self) -> bool {
-        matches!(self, Module::Routine(r) if r.clr_method.is_some())
-    }
-
     /// As SQL Compare's messages call it.
     fn kind_name(&self) -> &'static str {
         match self {
@@ -2388,6 +2527,12 @@ impl<'a> Module<'a> {
             Module::Routine(_) => "function",
         }
     }
+}
+
+/// Column differences an ALTER COLUMN or a rebuild has to deal with: the period of a
+/// system-versioned table and sensitivity labels are deployed on their own.
+fn material_differences(a: &Column, b: &Column, o: &Options) -> Vec<super::compare::PropDiff> {
+    column_differences(a, b, o, false).into_iter().filter(|d| d.name != "GENERATED ALWAYS" && d.name != "Hidden").collect()
 }
 
 fn is_clustered(ix: &Index) -> bool {
