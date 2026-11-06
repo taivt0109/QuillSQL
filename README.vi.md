@@ -331,7 +331,8 @@ Cửa sổ có đủ 4 tab như SQL Compare: **Data sources**, **Table mapping**
 option của SQL Compare / Data Compare, có QuillSQL defaults, My defaults và Save as my defaults).
 Kết quả cho thấy những gì khác nhau; với schema, SQL của hai bên đặt cạnh nhau theo từng dòng.
 **Deploy** cho xem script và cảnh báo (mất dữ liệu, cắt chuỗi, NOT NULL...) rồi chạy trong một
-transaction, hoặc mở script trong cửa sổ query.
+transaction, hoặc mở script trong cửa sổ query. QuillSQL Compare theo chế độ sáng/tối và màu nhấn của
+Windows (nền Mica trên Windows 11); trong SSMS thì theo theme màu của SSMS.
 
 Project lưu thành file JSON `.qsc` (schema) và `.qdc` (dữ liệu), để trong Git được. Password
 không bao giờ được ghi vào file: "Remember credentials" lưu trong Windows Credential Manager.

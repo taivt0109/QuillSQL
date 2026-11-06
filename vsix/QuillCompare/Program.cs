@@ -13,6 +13,8 @@ namespace QuillCompare
         public static int Main(string[] args)
         {
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+            CompareTheme.UseWindows(translucent: true);
+            app.Resources.MergedDictionaries.Add(CompareTheme.Resources);
             var engine = new Engine(Engine.FindQuill());
             var window = new MainWindow(engine, args.FirstOrDefault(a => File.Exists(a)));
             app.Exit += (s, e) => engine.Dispose();
@@ -29,7 +31,10 @@ namespace QuillCompare
             Title = "QuillSQL Compare";
             Width = 1280;
             Height = 820;
+            MinWidth = 900;
+            MinHeight = 600;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            Backdrop.Apply(this);
             Icon = new System.Windows.Media.Imaging.BitmapImage(new Uri("pack://application:,,,/quillsql-32.png"));
             _view = new CompareView(engine, this);
             _view.TitleChanged += t => Title = t;

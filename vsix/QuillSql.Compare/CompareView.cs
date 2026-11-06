@@ -80,10 +80,12 @@ namespace QuillSql.Compare
         private SchemaResults _schemaResults;
         private DataResults _dataResults;
         private readonly ContentControl _content = new ContentControl();
-        private readonly TextBlock _title = Ui.Text("", 15, bold: true);
+        private readonly TextBlock _title = Ui.Title("");
+        private readonly TextBlock _sourceName = Ui.Text(""), _targetName = Ui.Text("");
         private readonly TextBlock _status = Ui.Text("", brush: CompareTheme.Muted);
+        private readonly ProgressBar _busy = new ProgressBar { IsIndeterminate = true, Visibility = Visibility.Hidden, Margin = new Thickness(0) };
         private readonly Button _compare, _deploy, _edit, _cancel;
-        private readonly ComboBox _recent = new ComboBox { Width = 220, Margin = new Thickness(4, 0, 0, 0), ToolTip = "Recent projects" };
+        private readonly ContextMenu _openMenu = new ContextMenu();
         private JsonObject _optionDefs;
         private bool _dirty;
 
@@ -94,57 +96,86 @@ namespace QuillSql.Compare
         {
             _engine = engine;
             _host = host;
-            Background = CompareTheme.Background;
-            TextElement.SetForeground(this, CompareTheme.Foreground);
+            CompareTheme.Attach(this);
+            SetResourceReference(BackgroundProperty, "Q.Bg");
+            SetResourceReference(TextElement.ForegroundProperty, "Q.Text");
 
-            _compare = Ui.Button("Compare", async () => await Compare(), primary: true);
-            _deploy = Ui.Button("Deploy…", async () => await Deploy());
-            _edit = Ui.Button("Edit project", ShowEditor);
-            _cancel = Ui.Button("Stop", () => { _engine.Cancel(); SetBusy(false, "Stopped."); });
+            _compare = Ui.Button("Compare", async () => await Compare(), primary: true, minWidth: 110, glyph: Glyph.Play);
+            _deploy = Ui.Button("Deploy…", async () => await Deploy(), minWidth: 100, glyph: Glyph.Upload);
+            _edit = Ui.Command(Glyph.Edit, "Edit project", ShowEditor);
+            _cancel = Ui.Button("Stop", () => { _engine.Cancel(); SetBusy(false, "Stopped."); }, minWidth: 90, glyph: Glyph.Stop);
             _cancel.Visibility = Visibility.Collapsed;
+
             var newMenu = new ContextMenu();
-            newMenu.Items.Add(MenuItem("New schema comparison", () => New(false)));
-            newMenu.Items.Add(MenuItem("New data comparison", () => New(true)));
-            var newButton = Ui.Button("New ▾", () => { });
-            newButton.ContextMenu = newMenu;
-            newButton.Click += (s, e) => { newMenu.PlacementTarget = newButton; newMenu.IsOpen = true; };
-            _recent.SelectionChanged += async (s, e) =>
-            {
-                if (_recent.SelectedItem is string path && File.Exists(path))
-                {
-                    _recent.SelectedIndex = -1;
-                    await Open(path);
-                }
-            };
-            var toolbar = Ui.Row(
-                newButton,
-                Ui.Button("Open…", async () => await OpenDialog()),
-                Ui.Button("Save", async () => await Save(false)),
-                Ui.Button("Save as…", async () => await Save(true)),
-                _recent,
-                new Border { Width = 16 },
-                _edit, _compare, _deploy, _cancel);
-            var header = new DockPanel { Margin = new Thickness(8, 6, 8, 6) };
-            DockPanel.SetDock(toolbar, Dock.Right);
-            header.Children.Add(toolbar);
-            header.Children.Add(Ui.Column(_title, _status));
-            var headerBorder = new Border { Child = header, Background = CompareTheme.Panel, BorderBrush = CompareTheme.Border, BorderThickness = new Thickness(0, 0, 0, 1) };
-            SetDock(headerBorder, Dock.Top);
-            Children.Add(headerBorder);
+            newMenu.Items.Add(Ui.MenuItem("Schema comparison", () => New(false), Glyph.List));
+            newMenu.Items.Add(Ui.MenuItem("Data comparison", () => New(true), Glyph.Document));
+            _openMenu.Opened += (s, e) => FillOpenMenu();
+            var commands = Ui.Row(
+                Ui.MenuButton(Glyph.Add, "New", newMenu),
+                Ui.MenuButton(Glyph.Open, "Open", _openMenu),
+                Ui.Command(Glyph.Save, "Save", async () => await Save(false), "Save the project (Ctrl+S)"),
+                Ui.Command(Glyph.SaveAs, "Save as", async () => await Save(true)),
+                Separator(),
+                _edit);
+            var actions = Ui.Row(_cancel, _deploy, _compare);
+            var bar = new DockPanel { Margin = new Thickness(10, 8, 16, 0) };
+            DockPanel.SetDock(actions, Dock.Right);
+            bar.Children.Add(actions);
+            bar.Children.Add(commands);
+
+            // The page header: what is compared with what.
+            var arrow = Ui.Icon(Glyph.Forward, 12, CompareTheme.Muted);
+            arrow.Margin = new Thickness(10, 1, 10, 0);
+            _sourceName.Foreground = _targetName.Foreground = CompareTheme.Muted;
+            var sides = Ui.Row(Ui.Icon(Glyph.Server, 13, CompareTheme.Muted), new Border { Width = 6 }, _sourceName, arrow, Ui.Icon(Glyph.Server, 13, CompareTheme.Muted), new Border { Width = 6 }, _targetName);
+            _status.HorizontalAlignment = HorizontalAlignment.Right;
+            _status.TextTrimming = TextTrimming.CharacterEllipsis;
+            var subtitle = new DockPanel();
+            DockPanel.SetDock(sides, Dock.Left);
+            subtitle.Children.Add(sides);
+            subtitle.Children.Add(_status);
+            var header = Ui.Column(_title, subtitle);
+            header.Margin = new Thickness(28, 14, 28, 6);
+
+            var top = Ui.Column(bar, header, _busy);
+            SetDock(top, Dock.Top);
+            Children.Add(top);
             Children.Add(_content);
-            RefreshRecent();
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await Save(false)), System.Windows.Input.Key.S, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await OpenDialog()), System.Windows.Input.Key.O, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await Compare()), System.Windows.Input.Key.F5, System.Windows.Input.ModifierKeys.None));
         }
 
-        private static MenuItem MenuItem(string text, Action click)
+        private static UIElement Separator()
         {
-            var m = new MenuItem { Header = text };
-            m.Click += (s, e) => click();
-            return m;
+            var line = new Border { Width = 1, Height = 20, Margin = new Thickness(8, 0, 8, 0) };
+            line.SetResourceReference(Border.BackgroundProperty, "Q.Divider");
+            return line;
         }
 
-        private void RefreshRecent()
+        private sealed class Relay : System.Windows.Input.ICommand
         {
-            _recent.ItemsSource = CompareSettings.Load().Recent.Where(File.Exists).ToList();
+            private readonly Action _run;
+            public Relay(Action run) => _run = run;
+            public event EventHandler CanExecuteChanged { add { } remove { } }
+            public bool CanExecute(object parameter) => true;
+            public void Execute(object parameter) => _run();
+        }
+
+        /// <summary>Open…, then the recent projects.</summary>
+        private void FillOpenMenu()
+        {
+            _openMenu.Items.Clear();
+            _openMenu.Items.Add(Ui.MenuItem("Open project…", async () => await OpenDialog(), Glyph.Open, "Ctrl+O"));
+            var recent = CompareSettings.Load().Recent.Where(File.Exists).Take(10).ToList();
+            if (recent.Count == 0) return;
+            _openMenu.Items.Add(new Separator());
+            foreach (var path in recent)
+            {
+                var item = Ui.MenuItem(Path.GetFileName(path), async () => await Open(path), path.EndsWith(".qdc", StringComparison.OrdinalIgnoreCase) ? Glyph.Document : Glyph.List);
+                item.ToolTip = path;
+                _openMenu.Items.Add(item);
+            }
         }
 
         private async Task<JsonObject> OptionDefinitions()
@@ -196,7 +227,6 @@ namespace QuillSql.Compare
             var imported = path.EndsWith(".scp", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".sdc", StringComparison.OrdinalIgnoreCase);
             _session = new CompareSession(_engine, _host, project) { OptionDefinitions = defs, FilePath = imported ? null : path };
             if (!imported) CompareSettings.Load().AddRecent(path);
-            RefreshRecent();
             _dirty = imported;
             ShowEditor();
             if (imported) _status.Text = "Imported from " + Path.GetFileName(path) + ". Passwords are not imported; save as a QuillSQL project.";
@@ -234,7 +264,6 @@ namespace QuillSql.Compare
             _session.FilePath = path;
             _dirty = false;
             CompareSettings.Load().AddRecent(path);
-            RefreshRecent();
             UpdateTitle();
             _status.Text = "Saved " + path;
         }
@@ -258,7 +287,9 @@ namespace QuillSql.Compare
             }
             var kind = _session.IsData ? "Data compare" : "Schema compare";
             var file = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : "New project";
-            _title.Text = kind + ": " + side("source") + "  →  " + side("target");
+            _title.Text = (_session.FilePath != null ? Path.GetFileNameWithoutExtension(_session.FilePath) : kind) + (_dirty ? " •" : "");
+            _sourceName.Text = side("source");
+            _targetName.Text = side("target");
             TitleChanged?.Invoke((_dirty ? "*" : "") + file + " - QuillSQL " + kind);
         }
 
@@ -268,7 +299,7 @@ namespace QuillSql.Compare
             _editor = new ProjectEditor(_session, async () => await Compare(), () => { if (_schemaResults != null || _dataResults != null) ShowResults(); });
             _content.Content = _editor;
             _deploy.IsEnabled = false;
-            _edit.IsEnabled = false;
+            _edit.Visibility = Visibility.Collapsed;
             UpdateTitle();
         }
 
@@ -276,7 +307,7 @@ namespace QuillSql.Compare
         {
             _content.Content = (UIElement)_schemaResults ?? _dataResults;
             _deploy.IsEnabled = true;
-            _edit.IsEnabled = true;
+            _edit.Visibility = Visibility.Visible;
         }
 
         private void SetBusy(bool busy, string text)
@@ -285,6 +316,7 @@ namespace QuillSql.Compare
             _compare.IsEnabled = !busy;
             _deploy.IsEnabled = !busy && (_schemaResults != null || _dataResults != null);
             _cancel.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+            _busy.Visibility = busy ? Visibility.Visible : Visibility.Hidden;
             Cursor = busy ? System.Windows.Input.Cursors.AppStarting : null;
         }
 
@@ -393,54 +425,87 @@ namespace QuillSql.Compare
             var choice = Choice.None;
             var sql = _script.Str("sql") ?? "";
             var warnings = _script.List("warnings").OfType<JsonObject>().ToList();
+            var high = warnings.Count(w => w.Str("severity") == "High");
             var tabs = new TabControl();
             var code = Ui.Code();
             code.Text = sql.Length == 0 ? "-- Nothing to deploy." : sql;
-            tabs.Items.Add(new TabItem { Header = "Deployment script", Content = code });
-            var list = new ListBox();
+            tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Code, "Deployment script"), Content = code });
+            var list = new StackPanel { Margin = new Thickness(16, 12, 16, 12) };
             foreach (var w in warnings)
             {
                 var sev = w.Str("severity");
-                var item = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(2, 4, 2, 4) };
-                item.Inlines.Add(new System.Windows.Documents.Run(sev + "  ") { FontWeight = FontWeights.SemiBold, Foreground = sev == "High" ? CompareTheme.High : sev == "Medium" ? CompareTheme.Medium : CompareTheme.Muted });
-                item.Inlines.Add(new System.Windows.Documents.Run((string.IsNullOrEmpty(w.Str("object")) ? "" : w.Str("object") + ": ") + w.Str("message")));
-                list.Items.Add(item);
+                var brush = sev == "High" ? CompareTheme.High : sev == "Medium" ? CompareTheme.Medium : CompareTheme.Muted;
+                var icon = Ui.Icon(sev == "Low" ? Glyph.Info : Glyph.Warning, 15, brush);
+                icon.VerticalAlignment = VerticalAlignment.Top;
+                icon.Margin = new Thickness(0, 2, 12, 0);
+                var text = new TextBlock { TextWrapping = TextWrapping.Wrap };
+                text.Inlines.Add(new Run((string.IsNullOrEmpty(w.Str("object")) ? sev : w.Str("object"))) { FontWeight = FontWeights.SemiBold });
+                text.Inlines.Add(new LineBreak());
+                text.Inlines.Add(new Run(w.Str("message")) { Foreground = CompareTheme.Muted });
+                var item = new DockPanel { Margin = new Thickness(0, 0, 0, 14) };
+                DockPanel.SetDock(icon, Dock.Left);
+                item.Children.Add(icon);
+                item.Children.Add(text);
+                list.Children.Add(item);
             }
-            var warningTab = new TabItem { Header = "Warnings (" + warnings.Count + ")", Content = list };
+            if (warnings.Count == 0) list.Children.Add(Ui.Text("No warnings.", brush: CompareTheme.Muted));
+            var warningTab = new TabItem
+            {
+                Header = Ui.IconText(Glyph.Warning, "Warnings (" + warnings.Count + ")"),
+                Content = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
+            };
             tabs.Items.Add(warningTab);
-            if (warnings.Any(w => w.Str("severity") == "High")) tabs.SelectedItem = warningTab;
+            if (high > 0) tabs.SelectedItem = warningTab;
 
-            var window = Ui.Dialog(_host.Owner, "Deploy", null, 980, 680);
-            var heading = Ui.Text(_target == null ? "The target is a snapshot: the script can be saved or opened, not run." : "Review the changes to " + _target + ".", 14, bold: true);
-            heading.Margin = new Thickness(0, 0, 0, 8);
+            var window = Ui.Dialog(_host.Owner, "Deploy", null, 1000, 700);
+            var heading = Ui.Title(_target == null ? "Deployment script" : "Deploy to " + _target);
+            var lead = Ui.Text(
+                _target == null
+                    ? "The target is a snapshot: the script can be saved or opened, not run."
+                    : "Review the script and its warnings. It runs in one transaction and is rolled back if any statement fails.",
+                brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            lead.Margin = new Thickness(0, 4, 0, 14);
+            var top = Ui.Column(heading, lead);
+            if (high > 0)
+            {
+                var alert = Ui.Row(Ui.Icon(Glyph.Warning, 14, CompareTheme.High), new Border { Width = 8 },
+                    Ui.Text(Ui.Plural(high, "high-severity warning", "high-severity warnings") + ": data may be lost.", brush: CompareTheme.High));
+                alert.Margin = new Thickness(0, 0, 0, 12);
+                top.Children.Add(alert);
+            }
+            var card = Ui.Card(tabs, 0);
+            var body = new DockPanel { Margin = new Thickness(24, 20, 24, 20) };
+            DockPanel.SetDock(top, Dock.Top);
+            body.Children.Add(top);
+            body.Children.Add(card);
+
             var deploy = Ui.Button("Deploy now", () =>
             {
-                var high = warnings.Count(w => w.Str("severity") == "High");
                 var message = "Run this script on " + _target + " now?" + (high > 0 ? "\n\nThere are " + high + " high-severity warnings: data may be lost." : "");
                 if (Ui.Confirm(window, message))
                 {
                     choice = Choice.Deploy;
                     window.Close();
                 }
-            }, primary: true, minWidth: 110);
+            }, primary: true, minWidth: 120, glyph: Glyph.Upload);
             deploy.IsEnabled = _target != null && sql.Length > 0;
-            var open = Ui.Button("Open in editor", () => { _host.OpenScript(sql, "Deployment script"); window.Close(); }, minWidth: 110);
+            var open = Ui.Button("Open in editor", () => { _host.OpenScript(sql, "Deployment script"); window.Close(); }, minWidth: 110, glyph: Glyph.Edit);
             var save = Ui.Button("Save script…", () =>
             {
                 var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = "deploy.sql" };
                 if (d.ShowDialog(window) == true) File.WriteAllText(d.FileName, sql, new System.Text.UTF8Encoding(true));
-            }, minWidth: 100);
-            var copy = Ui.Button("Copy", () => Clipboard.SetText(sql));
+            }, minWidth: 100, glyph: Glyph.Save);
+            var copy = Ui.Button("Copy", () => Clipboard.SetText(sql), glyph: Glyph.Copy);
             var close = Ui.Button("Close", () => window.Close());
-            var buttons = Ui.Row(copy, save, open, deploy, close);
-            buttons.HorizontalAlignment = HorizontalAlignment.Right;
-            var root = new DockPanel { Margin = new Thickness(12) };
-            DockPanel.SetDock(heading, Dock.Top);
-            DockPanel.SetDock(buttons, Dock.Bottom);
-            root.Children.Add(heading);
-            root.Children.Add(buttons);
-            root.Children.Add(tabs);
-            window.Content = root;
+            close.IsCancel = true;
+            var left = Ui.Row(copy, save, open);
+            left.Margin = new Thickness(-8, 0, 0, 0);
+            var right = Ui.Row(deploy, close);
+            var buttons = new DockPanel();
+            DockPanel.SetDock(right, Dock.Right);
+            buttons.Children.Add(right);
+            buttons.Children.Add(left);
+            window.Content = Ui.WithFooter(body, buttons);
             window.ShowDialog();
             return choice;
         }

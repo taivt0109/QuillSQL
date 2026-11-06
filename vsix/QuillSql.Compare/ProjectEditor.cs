@@ -30,29 +30,55 @@ namespace QuillSql.Compare
             _session = session;
             _project = session.Project;
             _data = session.IsData;
-            Background = CompareTheme.Background;
 
             var buttons = Ui.Row(
-                Ui.Button("Compare now", () => { Collect(); compareNow(); }, primary: true, minWidth: 110),
-                Ui.Button("Cancel", cancel));
+                Ui.Button("Compare now", () => { Collect(); compareNow(); }, primary: true, minWidth: 130, glyph: Glyph.Play),
+                Ui.Button("Cancel", cancel, minWidth: 100));
             buttons.HorizontalAlignment = HorizontalAlignment.Right;
-            buttons.Margin = new Thickness(8);
-            SetDock(buttons, Dock.Bottom);
-            Children.Add(buttons);
+            buttons.Margin = new Thickness(0);
+            var footer = new Border { Child = buttons, Padding = new Thickness(24, 12, 24, 12), BorderThickness = new Thickness(0, 1, 0, 0) };
+            footer.SetResourceReference(Border.BackgroundProperty, "Q.Layer");
+            footer.SetResourceReference(Border.BorderBrushProperty, "Q.Divider");
+            SetDock(footer, Dock.Bottom);
+            Children.Add(footer);
 
-            var tabs = new TabControl { Margin = new Thickness(8, 8, 8, 0) };
-            tabs.Items.Add(new TabItem { Header = "Data sources", Content = DataSources() });
+            var tabs = new TabControl { Style = CompareTheme.Style("Q.NavTabs"), Margin = new Thickness(4, 0, 0, 0) };
+            tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Connect, "Data sources", 12), Content = DataSources() });
             if (_data)
             {
-                tabs.Items.Add(new TabItem { Header = "Tables & views", Content = TablesAndViews() });
+                tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.List, "Tables & views", 12), Content = TablesAndViews() });
             }
             else
             {
-                tabs.Items.Add(new TabItem { Header = "Table mapping", Content = TableMapping() });
+                tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.List, "Table mapping", 12), Content = TableMapping() });
             }
-            tabs.Items.Add(new TabItem { Header = "Owner mapping", Content = OwnerMapping() });
-            tabs.Items.Add(new TabItem { Header = "Options", Content = Options() });
+            tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.People, "Owner mapping", 12), Content = OwnerMapping() });
+            tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Settings, "Options", 12), Content = Options() });
             Children.Add(tabs);
+        }
+
+        /// <summary>A section page: a title, a line of help, then the content.</summary>
+        private static DockPanel Page(string title, string help, UIElement content, UIElement actions = null)
+        {
+            var head = new DockPanel { Margin = new Thickness(0, 0, 0, 14) };
+            if (actions != null)
+            {
+                DockPanel.SetDock(actions, Dock.Right);
+                head.Children.Add(actions);
+            }
+            var text = Ui.Column(Ui.Title(title, 18));
+            if (help != null)
+            {
+                var h = Ui.Text(help, wrap: TextWrapping.Wrap, brush: CompareTheme.Muted);
+                h.Margin = new Thickness(0, 4, 0, 0);
+                text.Children.Add(h);
+            }
+            head.Children.Add(text);
+            var page = new DockPanel { Margin = new Thickness(24, 20, 24, 20) };
+            DockPanel.SetDock(head, Dock.Top);
+            page.Children.Add(head);
+            page.Children.Add(content);
+            return page;
         }
 
         // ---- Data sources ----
@@ -61,28 +87,31 @@ namespace QuillSql.Compare
         {
             _source = new SourceEditor(_session, "source", "Source");
             _target = new SourceEditor(_session, "target", "Target");
-            var grid = new Grid { Margin = new Thickness(8) };
+            var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var middle = Ui.Column(
-                SmallButton("→", "Copy connection settings right", () => Copy(_source, _target)),
-                SmallButton("⇄", "Switch source and target", Switch),
-                SmallButton("←", "Copy connection settings left", () => Copy(_target, _source)));
+                SmallButton(Glyph.Forward, "Copy the connection settings to the target", () => Copy(_source, _target)),
+                SmallButton(Glyph.Switch, "Switch source and target", Switch),
+                SmallButton(Glyph.Back, "Copy the connection settings to the source", () => Copy(_target, _source)));
             middle.VerticalAlignment = VerticalAlignment.Center;
-            middle.Margin = new Thickness(10, 0, 10, 0);
+            middle.Margin = new Thickness(8, 0, 8, 0);
+            var source = Ui.Card(_source, 20);
+            var target = Ui.Card(_target, 20);
             Grid.SetColumn(middle, 1);
-            Grid.SetColumn(_target, 2);
-            grid.Children.Add(_source);
+            Grid.SetColumn(target, 2);
+            grid.Children.Add(source);
             grid.Children.Add(middle);
-            grid.Children.Add(_target);
-            return new ScrollViewer { Content = grid, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            grid.Children.Add(target);
+            var page = Page("Data sources", "The source is what the target should become: deployment changes the target.", grid);
+            return new ScrollViewer { Content = page, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         }
 
-        private static Button SmallButton(string text, string tip, Action click)
+        private static Button SmallButton(string glyph, string tip, Action click)
         {
-            var b = new Button { Content = text, ToolTip = tip, Width = 36, Height = 30, Margin = new Thickness(0, 4, 0, 4), FontSize = 15 };
-            b.Click += (s, e) => click();
+            var b = Ui.IconButton(glyph, tip, click, subtle: false);
+            b.Margin = new Thickness(0, 4, 0, 4);
             return b;
         }
 
@@ -138,11 +167,8 @@ namespace QuillSql.Compare
                 var cols = t.List("columns").OfType<List<object>>().Select(p => p.Count == 2 ? p[0] + "=" + p[1] : "");
                 _tableMappings.Add(new TableMappingRow { Source = QName(t.Obj("source")), Target = QName(t.Obj("target")), Columns = string.Join(", ", cols) });
             }
-            var help = Ui.Text(
-                "Tables are paired by schema and name. Map a table to a differently named one here; columns pair by name, and similar columns are paired automatically unless that option is off. Write column pairs as old=new, separated by commas.",
-                wrap: TextWrapping.Wrap,
-                brush: CompareTheme.Muted);
-            return MappingGrid(help, _tableMappings, new[] { ("Table in source", "Source", 220.0), ("Table in target", "Target", 220.0), ("Column pairs", "Columns", 300.0) },
+            const string help = "Tables are paired by schema and name. Map a table to a differently named one here; columns pair by name, and similar columns are paired automatically unless that option is off. Write column pairs as old=new, separated by commas.";
+            return MappingGrid("Table mapping", help, _tableMappings, new[] { ("Table in source", "Source", 220.0), ("Table in target", "Target", 220.0), ("Column pairs", "Columns", 300.0) },
                 () => _tableMappings.Add(new TableMappingRow { Source = "[dbo].[]", Target = "[dbo].[]" }));
         }
 
@@ -153,38 +179,27 @@ namespace QuillSql.Compare
             {
                 if (pair.Count == 2) _ownerMappings.Add(new OwnerMappingRow { Source = pair[0] as string, Target = pair[1] as string });
             }
-            var help = Ui.Text(
-                "Objects are paired with objects of the same schema. Map a schema of the source to a different schema of the target here.",
-                wrap: TextWrapping.Wrap,
-                brush: CompareTheme.Muted);
-            return MappingGrid(help, _ownerMappings, new[] { ("Schema in source", "Source", 220.0), ("Schema in target", "Target", 220.0) },
+            const string help = "Objects are paired with objects of the same schema. Map a schema of the source to a different schema of the target here.";
+            return MappingGrid("Owner mapping", help, _ownerMappings, new[] { ("Schema in source", "Source", 220.0), ("Schema in target", "Target", 220.0) },
                 () => _ownerMappings.Add(new OwnerMappingRow { Source = "dbo", Target = "dbo" }));
         }
 
-        private static UIElement MappingGrid<T>(UIElement help, ObservableCollection<T> rows, (string, string, double)[] columns, Action add)
+        private static UIElement MappingGrid<T>(string title, string help, ObservableCollection<T> rows, (string, string, double)[] columns, Action add)
         {
             var grid = new DataGrid
             {
                 ItemsSource = rows,
                 AutoGenerateColumns = false,
                 CanUserAddRows = false,
-                HeadersVisibility = DataGridHeadersVisibility.Column,
-                Margin = new Thickness(0, 8, 0, 8),
             };
             foreach (var (header, path, width) in columns)
             {
                 grid.Columns.Add(new DataGridTextColumn { Header = header, Binding = new Binding(path) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = width });
             }
             var buttons = Ui.Row(
-                Ui.Button("Add", add),
-                Ui.Button("Remove", () => { if (grid.SelectedItem is T item) rows.Remove(item); }));
-            var panel = new DockPanel { Margin = new Thickness(8) };
-            DockPanel.SetDock(help, Dock.Top);
-            DockPanel.SetDock(buttons, Dock.Bottom);
-            panel.Children.Add(help);
-            panel.Children.Add(buttons);
-            panel.Children.Add(grid);
-            return panel;
+                Ui.Button("Add", add, glyph: Glyph.Add),
+                Ui.Button("Remove", () => { if (grid.SelectedItem is T item) rows.Remove(item); }, glyph: Glyph.Delete));
+            return Page(title, help, grid, buttons);
         }
 
         // ---- Tables & views (data) ----
@@ -206,15 +221,14 @@ namespace QuillSql.Compare
         private UIElement TablesAndViews()
         {
             _dataStatus = Ui.Text("Load the tables to choose which are compared, their keys and filters.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            _dataStatus.Margin = new Thickness(0, 0, 0, 10);
             var grid = new DataGrid
             {
                 ItemsSource = _dataTables,
                 AutoGenerateColumns = false,
                 CanUserAddRows = false,
-                HeadersVisibility = DataGridHeadersVisibility.Column,
-                Margin = new Thickness(0, 8, 0, 8),
             };
-            grid.Columns.Add(new DataGridCheckBoxColumn { Header = "Compare", Binding = new Binding("Include") { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = 70 });
+            grid.Columns.Add(Ui.CheckColumn("Compare", "Include", 76));
             grid.Columns.Add(new DataGridTextColumn { Header = "Source", Binding = new Binding("Source"), IsReadOnly = true, Width = 200 });
             grid.Columns.Add(new DataGridTextColumn { Header = "Target", Binding = new Binding("Target"), IsReadOnly = true, Width = 200 });
             var key = new DataGridComboBoxColumn
@@ -234,18 +248,14 @@ namespace QuillSql.Compare
             grid.Columns.Add(new DataGridTextColumn { Header = "Columns left out", Binding = new Binding("ExcludedColumns"), Width = 160 });
             grid.Columns.Add(new DataGridTextColumn { Header = "Problem", Binding = new Binding("Problem"), IsReadOnly = true, Width = 260 });
 
-            var all = Ui.Button("Compare all", () => { foreach (var r in _dataTables) r.Include = true; grid.Items.Refresh(); });
-            var none = Ui.Button("Compare none", () => { foreach (var r in _dataTables) r.Include = false; grid.Items.Refresh(); });
-            var load = Ui.Button("Load tables", async () => await LoadTables(), primary: true, minWidth: 100);
-            var top = new DockPanel();
-            var bar = Ui.Row(load, all, none);
-            DockPanel.SetDock(bar, Dock.Right);
-            top.Children.Add(bar);
-            top.Children.Add(_dataStatus);
-            var panel = new DockPanel { Margin = new Thickness(8) };
-            DockPanel.SetDock(top, Dock.Top);
-            panel.Children.Add(top);
-            panel.Children.Add(grid);
+            var all = Ui.Button("All", () => { foreach (var r in _dataTables) r.Include = true; grid.Items.Refresh(); }, minWidth: 60);
+            var none = Ui.Button("None", () => { foreach (var r in _dataTables) r.Include = false; grid.Items.Refresh(); }, minWidth: 60);
+            var load = Ui.Button("Load tables", async () => await LoadTables(), primary: true, minWidth: 110, glyph: Glyph.Refresh);
+            var content = new DockPanel();
+            DockPanel.SetDock(_dataStatus, Dock.Top);
+            content.Children.Add(_dataStatus);
+            content.Children.Add(grid);
+            var panel = Page("Tables & views", "Choose the tables to compare, the key that pairs their rows, and filters.", content, Ui.Row(load, all, none));
             // Rows the project already describes are shown before the tables are loaded.
             var mappings = _project.Obj("dataMappings") ?? new JsonObject();
             foreach (var t in mappings.List("tables").OfType<JsonObject>())
@@ -317,17 +327,18 @@ namespace QuillSql.Compare
         {
             var defs = _session.OptionDefinitions.List(_data ? "data" : "schema").OfType<JsonObject>().ToList();
             var current = new HashSet<string>(_project.Strings("options"), StringComparer.OrdinalIgnoreCase);
-            var list = new StackPanel { Margin = new Thickness(4) };
-            var find = new TextBox { Width = 260, Margin = new Thickness(8, 0, 0, 0) };
+            var list = new StackPanel { Margin = new Thickness(0, 0, 12, 0) };
+            var find = Ui.SearchBox("Find an option", 280);
             var count = Ui.Text("", brush: CompareTheme.Muted);
+            count.Margin = new Thickness(12, 0, 0, 0);
             _optionHelp = Ui.Text("Point at an option to see what it does.", wrap: TextWrapping.Wrap, brush: CompareTheme.Muted);
 
             var groups = defs.Select(d => d.Str("group")).Where(g => g != "Hidden").Distinct().ToList();
             var headers = new Dictionary<string, TextBlock>();
             foreach (var group in groups)
             {
-                var header = Ui.Text(group, 14, bold: true);
-                header.Margin = new Thickness(0, 10, 0, 4);
+                var header = Ui.Text(group, 15, bold: true);
+                header.Margin = new Thickness(0, list.Children.Count == 0 ? 0 : 18, 0, 6);
                 headers[group] = header;
                 list.Children.Add(header);
                 foreach (var d in defs.Where(x => x.Str("group") == group))
@@ -338,7 +349,7 @@ namespace QuillSql.Compare
                     {
                         Content = d.Str("label"),
                         IsChecked = negated ? !current.Contains(name) : current.Contains(name),
-                        Margin = new Thickness(12, 2, 0, 2),
+                        Margin = new Thickness(0, 1, 0, 1),
                         Tag = d,
                     };
                     box.Checked += (s, e) => OptionChanged(defs, d, true);
@@ -371,9 +382,16 @@ namespace QuillSql.Compare
                     var mine = _data ? CompareSettings.Load().MyDataDefaults : CompareSettings.Load().MySchemaDefaults;
                     SetAll(defs, mine ?? defs.Where(d => d.Bool("default")).Select(d => d.Str("name")));
                 }));
-            var top = Ui.Row(Ui.Text("Find:"), find, new Border { Width = 12 }, count);
-            var side = new Border { BorderBrush = CompareTheme.Border, BorderThickness = new Thickness(1, 0, 0, 0), Padding = new Thickness(12), Width = 280, Child = _optionHelp };
-            var layout = new DockPanel { Margin = new Thickness(8) };
+            var top = Ui.Row(find, count);
+            top.Margin = new Thickness(0, 0, 0, 12);
+            var helpTitle = Ui.Row(Ui.Icon(Glyph.Info, 14, CompareTheme.Accent), new Border { Width = 8 }, Ui.Text("About this option", bold: true));
+            helpTitle.Margin = new Thickness(0, 0, 0, 8);
+            var side = Ui.Card(Ui.Column(helpTitle, _optionHelp));
+            side.Width = 300;
+            side.VerticalAlignment = VerticalAlignment.Top;
+            side.Margin = new Thickness(12, 0, 0, 0);
+            buttons.Margin = new Thickness(-8, 12, 0, 0);
+            var layout = new DockPanel();
             DockPanel.SetDock(top, Dock.Top);
             DockPanel.SetDock(buttons, Dock.Bottom);
             DockPanel.SetDock(side, Dock.Right);
@@ -381,7 +399,7 @@ namespace QuillSql.Compare
             layout.Children.Add(buttons);
             layout.Children.Add(side);
             layout.Children.Add(new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-            return layout;
+            return Page("Options", "What counts as a difference, and how the deployment script is written.", layout);
         }
 
         private static string Help(JsonObject d)
@@ -552,13 +570,20 @@ namespace QuillSql.Compare
         {
             _session = session;
             _key = key;
-            Margin = new Thickness(4);
-            var header = Ui.Text(title, 18, bold: true);
-            header.Margin = new Thickness(0, 0, 0, 8);
-            Children.Add(header);
-            _type = new ComboBox { ItemsSource = new[] { "Database", "Snapshot" }, Width = 160, HorizontalAlignment = HorizontalAlignment.Left };
+            var badge = new Border { Width = 36, Height = 36, CornerRadius = new CornerRadius(8), Child = Ui.Icon(Glyph.Server, 17, CompareTheme.AccentText) };
+            ((TextBlock)badge.Child).HorizontalAlignment = HorizontalAlignment.Center;
+            badge.SetResourceReference(Border.BackgroundProperty, "Q.Accent");
+            var names = Ui.Column(Ui.Title(title, 17), Ui.Text(key == "source" ? "Database 1" : "Database 2", 12, brush: CompareTheme.Muted));
+            names.Margin = new Thickness(12, 0, 0, 0);
+            _type = new ComboBox { ItemsSource = new[] { "Database", "Snapshot" }, Width = 130, VerticalAlignment = VerticalAlignment.Center };
             _type.SelectionChanged += (s, e) => ShowType();
-            Children.Add(_type);
+            var header = new DockPanel { Margin = new Thickness(0, 0, 0, 18) };
+            DockPanel.SetDock(badge, Dock.Left);
+            DockPanel.SetDock(_type, Dock.Right);
+            header.Children.Add(badge);
+            header.Children.Add(_type);
+            header.Children.Add(names);
+            Children.Add(header);
 
             _server = new ComboBox { IsEditable = true, ItemsSource = CompareSettings.Load().RecentServers };
             _auth = new ComboBox { ItemsSource = new[] { "Windows authentication", "SQL Server authentication", "Microsoft Entra (access token)" } };
@@ -569,17 +594,15 @@ namespace QuillSql.Compare
             _encrypt = Ui.Check("Encrypt", true);
             _trust = Ui.Check("Trust server certificate", false);
             _database = new ComboBox { IsEditable = true };
-            var refresh = new Button { Content = "↻", ToolTip = "List the databases", Width = 30, Margin = new Thickness(4, 0, 0, 0) };
-            refresh.Click += async (s, e) => await ListDatabases();
+            var refresh = Ui.IconButton(Glyph.Refresh, "List the databases", async () => await ListDatabases(), subtle: false);
+            refresh.Margin = new Thickness(8, 0, 0, 0);
             var dbRow = new DockPanel();
             DockPanel.SetDock(refresh, Dock.Right);
             dbRow.Children.Add(refresh);
             dbRow.Children.Add(_database);
-            var create = Ui.Button("Create…", async () => await CreateDatabase(), minWidth: 70);
-            create.HorizontalAlignment = HorizontalAlignment.Left;
-            create.Margin = new Thickness(0);
+            var create = Ui.Button("New database…", async () => await CreateDatabase(), minWidth: 70, glyph: Glyph.Add);
             _status = Ui.Text("", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
-            var test = Ui.Button("Test connection", async () => await Test(), minWidth: 110);
+            var test = Ui.Button("Test connection", async () => await Test(), minWidth: 110, glyph: Glyph.Connect);
             test.Margin = new Thickness(0);
             _live = Ui.Column(Ui.Form(
                 Ui.Field("Server", _server),
@@ -589,10 +612,9 @@ namespace QuillSql.Compare
                 Ui.Field(null, _remember),
                 Ui.Field(null, Ui.Row(_encrypt, _trust)),
                 Ui.Field("Database", dbRow),
-                Ui.Field(null, Ui.Row(create, test))), _status);
-            _live.Margin = new Thickness(0, 10, 0, 0);
+                Ui.Field(null, Ui.Row(test, create))), _status);
             _snapshot = new TextBox();
-            var browse = Ui.Button("Browse…", () =>
+            var browse = Ui.Button("Browse…", glyph: Glyph.Open, click: () =>
             {
                 var d = new OpenFileDialog { Filter = "QuillSQL snapshots (*.json)|*.json|All files|*.*" };
                 if (d.ShowDialog() == true) _snapshot.Text = d.FileName;
@@ -602,7 +624,6 @@ namespace QuillSql.Compare
             fileRow.Children.Add(browse);
             fileRow.Children.Add(_snapshot);
             _file = Ui.Column(Ui.Form(Ui.Field("Snapshot file", fileRow)), Ui.Text("Make a snapshot with quill schema /makesnapshot or Tools > Save snapshot.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
-            _file.Margin = new Thickness(0, 10, 0, 0);
             Children.Add(_live);
             Children.Add(_file);
             Load(session.Project.Obj(key) ?? new JsonObject(), session.Passwords.TryGetValue(key, out var p) ? p : null);
@@ -699,7 +720,7 @@ namespace QuillSql.Compare
 
         private async System.Threading.Tasks.Task CreateDatabase()
         {
-            var name = Microsoft.VisualBasic.Interaction.InputBox("Name of the new, empty database:", "Create database", _database.Text);
+            var name = Ui.Prompt(_session.Host.Owner, "New database", "Name of the new, empty database on " + Side.Str("server"), _database.Text);
             if (string.IsNullOrWhiteSpace(name)) return;
             var sql = "CREATE DATABASE [" + name.Replace("]", "]]") + "]";
             var result = await Ui.Try(_session.Host.Owner, () => _session.Engine.Request("execute", new JsonObject { ["source"] = WithPassword("master"), ["sql"] = sql }));

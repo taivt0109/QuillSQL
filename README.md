@@ -342,7 +342,8 @@ Compare: **Tables & views**, with keys, WHERE filters and columns to leave out),
 and **Options** (every SQL Compare / Data Compare option, with QuillSQL defaults, My defaults and
 Save as my defaults). Results show what differs; for schema, the SQL of both sides line by line.
 **Deploy** shows the script and its warnings (data loss, truncation, NOT NULL...) and runs it in
-one transaction, or opens it in a query window.
+one transaction, or opens it in a query window. QuillSQL Compare follows the Windows light or dark
+mode and accent color (Mica on Windows 11); in SSMS it uses the SSMS color theme.
 
 Projects are saved as `.qsc` (schema) and `.qdc` (data) JSON files that you can keep in Git.
 Passwords are never written to them: "Remember credentials" keeps them in Windows Credential
