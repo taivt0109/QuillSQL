@@ -1204,6 +1204,22 @@ impl Reader {
                 deps.insert((from.clone(), ObjectName::new(c.0, c.1)), true);
             }
         }
+        // Modules that use a user-defined type or an XML schema collection through a parameter
+        // (or a result column) can't outlive it.
+        let rows = db::query(
+            conn,
+            "SELECT p.object_id, SCHEMA_NAME(t.schema_id), t.name FROM sys.parameters AS p
+             JOIN sys.types AS t ON t.user_type_id = p.user_type_id AND t.is_user_defined = 1
+             UNION
+             SELECT p.object_id, SCHEMA_NAME(x.schema_id), x.name FROM sys.parameters AS p
+             JOIN sys.xml_schema_collections AS x ON x.xml_collection_id = p.xml_collection_id AND p.xml_collection_id > 0",
+        )
+        .await?;
+        for r in rows {
+            if let Some(from) = self.name_of(i(&r, 0)) {
+                deps.insert((from, ObjectName::new(&s(&r, 1), &s(&r, 2))), true);
+            }
+        }
         for syn in &self.db.synonyms {
             if let Some(target) = parse_synonym_target(&syn.base_object, &self.db.name) {
                 deps.entry((ObjectName::new(&syn.schema, &syn.name), target)).or_insert(false);

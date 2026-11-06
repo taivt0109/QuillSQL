@@ -253,6 +253,8 @@ impl<'a> Planner<'a> {
             if s.is_some() {
                 self.unbind_xml_columns(t);
             }
+            // Modules with parameters of the collection go first and come back.
+            self.disturbed.insert(tn.clone());
             // Message types that validate against it are dropped first and come back.
             let collection = tn.quoted();
             for m in tgt.message_types.iter().filter(|m| m.xml_collection.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(&collection))) {
