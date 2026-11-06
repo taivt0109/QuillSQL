@@ -813,6 +813,10 @@ pub struct Principal {
     /// Users mapped to an asymmetric key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asymmetric_key: Option<String>,
+    /// A user without the CONNECT permission CREATE USER gives (revoked). DENY CONNECT and
+    /// GRANT CONNECT WITH GRANT OPTION are kept as permissions.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_connect: bool,
 }
 
 impl Principal {

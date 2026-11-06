@@ -200,6 +200,8 @@ struct RawField {
     masking: String,
     generated: u8,
     hidden: bool,
+    bound_default: Option<String>,
+    bound_rule: Option<String>,
 }
 
 #[derive(Default)]
@@ -662,7 +664,7 @@ impl Cur<'_> {
         if v >= 6.0 {
             flags = self.i16()?;
         }
-        self.str()?; // bound default
+        f.bound_default = self.str()?.filter(|x| !x.is_empty());
         f.default_name = self.s()?;
         if v >= 4.0 {
             self.i32()?;
@@ -675,7 +677,7 @@ impl Cur<'_> {
             flags |= 0x20;
         }
         f.collation = self.s()?;
-        self.str()?; // bound rule
+        f.bound_rule = self.str()?.filter(|x| !x.is_empty());
         f.type_name = self.s()?;
         f.default_text = self.s()?;
         if v < 6.0 {
@@ -2280,6 +2282,7 @@ impl Snap {
                 kind: kind.into(),
                 login: u.login.clone().filter(|l| !l.is_empty()),
                 default_schema: u.default_schema.clone().filter(|s| !s.is_empty()),
+                no_connect: !u.db_perms.iter().any(|(a, _)| a.eq_ignore_ascii_case("CONNECT")),
                 ..Default::default()
             });
         }
@@ -2310,9 +2313,9 @@ impl Snap {
                 continue;
             }
             for (action, statement) in perms {
-                // CONNECT comes with CREATE USER.
+                // CONNECT comes with CREATE USER: only DENY and WITH GRANT OPTION are kept.
                 let Some(state) = state(i32::from(*statement)) else { continue };
-                if action.eq_ignore_ascii_case("CONNECT") {
+                if action.eq_ignore_ascii_case("CONNECT") && state == "GRANT" {
                     continue;
                 }
                 permissions.push(Permission {
@@ -2511,8 +2514,8 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         },
         hidden: f.hidden,
         masking_function: (!f.masking.is_empty()).then(|| f.masking.clone()),
-        bound_default: None,
-        bound_rule: None,
+        bound_default: f.bound_default.as_deref().map(requote),
+        bound_rule: f.bound_rule.as_deref().map(requote),
         sensitivity: None,
     }
 }
