@@ -55,6 +55,9 @@ pub fn type_sql(t: &DataType) -> String {
     if let Some(schema) = &t.schema {
         return qname(schema, &t.name);
     }
+    if matches!(t.name.as_str(), "geometry" | "geography" | "hierarchyid") {
+        return qname("sys", &t.name);
+    }
     let mut s = quote(&t.name);
     match t.name.as_str() {
         "char" | "varchar" | "nchar" | "nvarchar" | "binary" | "varbinary" => match t.length {
@@ -223,6 +226,29 @@ fn storage_sql(st: &Storage, o: &Options, default_fg: &str) -> String {
 fn key_sql(ix: &Index, o: &Options, default_fg: &str) -> String {
     let what = if ix.primary_key { "PRIMARY KEY" } else { "UNIQUE" };
     format!("{what} {} ({}){}", kind_words(ix), key_list(ix), index_tail(ix, o, default_fg))
+}
+
+/// XML and spatial indexes, as deployments write them.
+fn xml_or_spatial_sql(on: &str, ix: &Index, o: &Options) -> String {
+    use crate::schema::ddl::{Host, Render, create_index_with};
+    let r = Render { opts: o.clone(), features: crate::schema::features::Features::latest() };
+    // SQL Compare lists prefixed namespaces before the default one.
+    let mut ix = ix.clone();
+    if let Some(x) = ix.xml.as_mut() {
+        x.namespaces.sort_by_key(|n| n.prefix.is_none());
+    }
+    create_index_with(on, &ix, &r, &Host::default()).join("\r\nGO\r\n")
+}
+
+/// Order of indexes in a file: clustered, other relational, primary XML, other XML, spatial.
+fn index_rank(ix: &Index) -> u8 {
+    match ix.kind {
+        IndexKind::Clustered | IndexKind::ClusteredColumnstore => 0,
+        IndexKind::Xml if ix.xml.as_ref().is_none_or(|x| matches!(x.kind, XmlIndexKind::Primary | XmlIndexKind::Selective)) => 2,
+        IndexKind::Xml => 3,
+        IndexKind::Spatial => 4,
+        _ => 1,
+    }
 }
 
 fn create_index_sql(on: &str, ix: &Index, o: &Options, default_fg: &str) -> String {
@@ -489,8 +515,12 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
         }
         if !o.has(Opt::IgnoreIndexes) {
             let mut rest: Vec<&Index> = t.indexes.iter().filter(|i| !(i.primary_key || i.unique_constraint)).collect();
-            rest.sort_by_key(|i| (!matches!(i.kind, IndexKind::Clustered | IndexKind::ClusteredColumnstore), i.name.clone()));
+            rest.sort_by_key(|i| (index_rank(i), i.name.clone()));
             for ix in rest {
+                if matches!(ix.kind, IndexKind::Xml | IndexKind::Spatial) {
+                    out.module(&xml_or_spatial_sql(&name, ix, o));
+                    continue;
+                }
                 out.batch(&create_index_sql(&name, ix, o, default_fg));
                 if ix.disabled {
                     out.batch(&format!("ALTER INDEX {} ON {name} DISABLE", quote(&ix.name)));

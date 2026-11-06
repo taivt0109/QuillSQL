@@ -1596,9 +1596,8 @@ impl Builder {
             if c.eat("COLUMNSTORE") { IndexKind::NonclusteredColumnstore } else { IndexKind::Nonclustered }
         } else if c.eat("COLUMNSTORE") {
             IndexKind::NonclusteredColumnstore
-        } else if c.eat("XML") || c.eat("PRIMARY") || c.eat("SPATIAL") {
-            // XML and spatial indexes are not modelled.
-            return c.fail(MessageKind::IgnoredStatement);
+        } else if c.at("XML") || c.at("PRIMARY") || c.at("SELECTIVE") || c.at("SPATIAL") {
+            return self.xml_or_spatial_index(c);
         } else {
             IndexKind::Nonclustered
         };
@@ -1621,6 +1620,187 @@ impl Builder {
             ix.storage.compression = vec![PartitionCompression { partition: 0, compression: "COLUMNSTORE".into() }];
         }
         match self.parent(c, &on)? {
+            Parent::Table(t) => {
+                let t = &mut self.db.tables[t];
+                t.indexes.retain(|i| !i.name.eq_ignore_ascii_case(&ix.name));
+                t.indexes.push(ix);
+            }
+            Parent::View(v) => {
+                let v = &mut self.db.views[v];
+                v.indexes.retain(|i| !i.name.eq_ignore_ascii_case(&ix.name));
+                v.indexes.push(ix);
+            }
+        }
+        Ok(())
+    }
+
+    /// CREATE [PRIMARY | SELECTIVE] XML INDEX and CREATE SPATIAL INDEX.
+    fn xml_or_spatial_index(&mut self, c: &mut Cur) -> R<()> {
+        let mut ix = Index { allow_row_locks: true, allow_page_locks: true, ..Default::default() };
+        let spatial = c.eat("SPATIAL");
+        let mut xml = XmlIndex::default();
+        if !spatial {
+            xml.kind = if c.eat("PRIMARY") {
+                XmlIndexKind::Primary
+            } else if c.eat("SELECTIVE") {
+                XmlIndexKind::Selective
+            } else {
+                XmlIndexKind::Secondary
+            };
+            c.expect("XML")?;
+        }
+        c.expect("INDEX")?;
+        ix.name = c.ident()?;
+        c.expect("ON")?;
+        let on = c.object(&self.schema_default())?;
+        let parent = self.parent(c, &on)?;
+        ix.columns = self.key_columns(c)?;
+        if spatial {
+            ix.kind = IndexKind::Spatial;
+            let column = ix.columns.first().map(|k| k.name.clone()).unwrap_or_default();
+            let geography = match parent {
+                Parent::Table(t) => self.db.tables[t].columns.iter().any(|x| x.name.eq_ignore_ascii_case(&column) && x.data_type.name.eq_ignore_ascii_case("geography")),
+                Parent::View(_) => false,
+            };
+            let mut sp = SpatialIndex { geography, ..Default::default() };
+            if c.eat("USING") {
+                sp.tessellation = c.ident()?.to_ascii_uppercase();
+            }
+            if sp.tessellation.is_empty() {
+                sp.tessellation = if geography { "GEOGRAPHY_AUTO_GRID".into() } else { "GEOMETRY_AUTO_GRID".into() };
+            }
+            let auto = sp.tessellation.ends_with("AUTO_GRID");
+            sp.grids = vec!["MEDIUM".into(); 4];
+            sp.cells_per_object = match (auto, geography) {
+                (false, _) => 16,
+                (true, false) => 8,
+                (true, true) => 12,
+            };
+            if c.at("WITH") && c.t.get(c.i + 1).is_some_and(|t| t.text == "(") {
+                c.i += 1;
+                let (a, b) = c.group()?;
+                for (x, y) in c.split_commas(a, b) {
+                    let mut s = c.sub(x, y);
+                    let opt = s.ident()?.to_ascii_uppercase();
+                    match opt.as_str() {
+                        "BOUNDING_BOX" => {
+                            s.expect_punct("=")?;
+                            let (p, q) = s.group()?;
+                            let mut named: Vec<(String, String)> = Vec::new();
+                            for (u, v) in s.split_commas(p, q) {
+                                let mut e = s.sub(u, v);
+                                let key = if e.t.get(1).is_some_and(|t| t.text == "=") {
+                                    let k = e.ident()?.to_ascii_uppercase();
+                                    e.i += 1;
+                                    k
+                                } else {
+                                    String::new()
+                                };
+                                let n: f64 = match e.number()?.parse() {
+                                    Ok(n) => n,
+                                    Err(_) => return e.syntax(),
+                                };
+                                named.push((key, n.to_string()));
+                            }
+                            let pick = |k: &str, i: usize| named.iter().find(|(n, _)| n == k).or(named.get(i)).map(|(_, v)| v.clone()).unwrap_or_default();
+                            sp.bounding_box = vec![pick("XMIN", 0), pick("YMIN", 1), pick("XMAX", 2), pick("YMAX", 3)];
+                        }
+                        "GRIDS" => {
+                            s.expect_punct("=")?;
+                            let (p, q) = s.group()?;
+                            for (i, (u, v)) in s.split_commas(p, q).into_iter().enumerate() {
+                                let mut e = s.sub(u, v);
+                                let mut level = i;
+                                if e.t.get(1).is_some_and(|t| t.text == "=") {
+                                    let k = e.ident()?.to_ascii_uppercase();
+                                    level = k.strip_prefix("LEVEL_").and_then(|n| n.parse::<usize>().ok()).map(|n| n.saturating_sub(1)).unwrap_or(i);
+                                    e.i += 1;
+                                }
+                                if level < 4 {
+                                    sp.grids[level] = e.ident()?.to_ascii_uppercase();
+                                }
+                            }
+                        }
+                        "CELLS_PER_OBJECT" => {
+                            s.expect_punct("=")?;
+                            sp.cells_per_object = s.number()?.parse().unwrap_or(16);
+                        }
+                        _ => {
+                            let mut probe = c.sub(x, y);
+                            index_option(&mut probe, &mut ix)?;
+                        }
+                    }
+                }
+            }
+            if geography {
+                sp.bounding_box.clear();
+            }
+            ix.spatial = Some(sp);
+        } else {
+            ix.kind = IndexKind::Xml;
+            if c.eat_seq(&["USING", "XML", "INDEX"]) {
+                xml.using_index = Some(c.ident()?);
+                c.expect("FOR")?;
+                if c.is_punct("(") {
+                    let (a, b) = c.group()?;
+                    let mut s = c.sub(a, b);
+                    xml.kind = XmlIndexKind::SecondarySelective;
+                    xml.using_path = Some(s.ident()?);
+                } else {
+                    xml.secondary_type = Some(c.ident()?.to_ascii_uppercase());
+                }
+            }
+            if c.eat_seq(&["WITH", "XMLNAMESPACES"]) {
+                let (a, b) = c.group()?;
+                for (x, y) in c.split_commas(a, b) {
+                    let mut s = c.sub(x, y);
+                    let default = s.eat("DEFAULT");
+                    let uri = s.ident_or_string()?;
+                    let prefix = if default {
+                        None
+                    } else {
+                        s.expect("AS")?;
+                        Some(s.ident()?)
+                    };
+                    xml.namespaces.push(XmlNamespace { prefix, uri });
+                }
+            }
+            if xml.kind == XmlIndexKind::Selective && c.eat("FOR") {
+                let (a, b) = c.group()?;
+                for (n, (x, y)) in c.split_commas(a, b).into_iter().enumerate() {
+                    let mut s = c.sub(x, y);
+                    let mut p = SelectivePath { id: n as i32 + 1, name: s.ident()?, ..Default::default() };
+                    s.expect_punct("=")?;
+                    p.path = s.ident_or_string()?;
+                    if s.eat("AS") {
+                        if s.eat("SQL") {
+                            p.sql = true;
+                            p.data_type = Some(self.data_type(&mut s)?);
+                        } else {
+                            s.expect("XQUERY")?;
+                            if let Some(t) = s.peek().filter(|t| t.kind == Tok::Str) {
+                                let ty = string_value(&t.text);
+                                s.i += 1;
+                                if ty == "node()" {
+                                    p.node_hint = true;
+                                } else {
+                                    p.xquery_type = Some(ty);
+                                }
+                            }
+                            if s.eat("MAXLENGTH") {
+                                let (u, v) = s.group()?;
+                                p.max_length = s.text(u, v - 1).trim().parse().ok();
+                            }
+                        }
+                    }
+                    p.singleton = s.eat("SINGLETON");
+                    xml.paths.push(p);
+                }
+            }
+            ix.xml = Some(xml);
+        }
+        self.index_tail(c, &mut ix)?;
+        match parent {
             Parent::Table(t) => {
                 let t = &mut self.db.tables[t];
                 t.indexes.retain(|i| !i.name.eq_ignore_ascii_case(&ix.name));

@@ -817,50 +817,89 @@ impl Cur<'_> {
             2 => {
                 ix.kind = IndexKind::Xml;
                 let tv = self.f32()?;
-                self.i32()?;
-                self.str()?;
+                let mut x = XmlIndex {
+                    secondary_type: match self.i32()? {
+                        1 => Some("VALUE".into()),
+                        2 => Some("PATH".into()),
+                        3 => Some("PROPERTY".into()),
+                        _ => None,
+                    },
+                    using_index: self.str()?.filter(|s| !s.is_empty()),
+                    ..Default::default()
+                };
+                x.kind = if x.using_index.is_some() { XmlIndexKind::Secondary } else { XmlIndexKind::Primary };
                 if tv >= 11.1 {
-                    self.u8()?;
+                    x.kind = match self.u8()? {
+                        1 => XmlIndexKind::Secondary,
+                        2 => XmlIndexKind::Selective,
+                        3 => XmlIndexKind::SecondarySelective,
+                        _ => XmlIndexKind::Primary,
+                    };
                     let n = self.count()?;
                     for _ in 0..n {
                         let at = self.p;
                         let path_type = self.u8()?;
                         self.f32()?;
-                        self.i32()?;
-                        self.str()?;
-                        self.str()?;
+                        let mut p = SelectivePath { id: self.i32()?, name: self.str()?.unwrap_or_default(), path: self.str()?.unwrap_or_default(), ..Default::default() };
                         match path_type {
                             0 => {
-                                self.str()?;
-                                self.i32()?;
-                                self.bool()?;
-                                self.bool()?;
+                                p.xquery_type = self.str()?.filter(|s| !s.is_empty());
+                                p.max_length = Some(self.i32()?).filter(|n| *n > 0);
+                                p.node_hint = self.bool()?;
+                                p.singleton = self.bool()?;
                             }
                             1 => {
-                                for _ in 0..4 {
-                                    self.i32()?;
-                                }
-                                self.bool()?;
+                                p.sql = true;
+                                let ty = self.i32()?;
+                                let (size, precision, scale) = (self.i32()?, self.i32()?, self.i32()?);
+                                p.data_type = sql_type_name(ty).map(|n| system_type(n, size, precision, scale));
+                                p.singleton = self.bool()?;
                             }
                             t => return Err(format!("bad XML index path type {t} at offset {at}")),
                         }
+                        x.paths.push(p);
                     }
                     let n = self.count()?;
                     for _ in 0..n {
                         self.f32()?;
-                        self.str()?;
-                        self.str()?;
+                        let uri = self.str()?.unwrap_or_default();
+                        let prefix = self.str()?.filter(|s| !s.is_empty());
+                        x.namespaces.push(XmlNamespace { prefix, uri });
                     }
-                    self.str()?;
+                    x.namespaces.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+                    x.using_path = self.str()?.filter(|s| !s.is_empty());
                 }
+                ix.xml = Some(x);
             }
             3 => {
                 ix.kind = IndexKind::Spatial;
                 let tv = self.f32()?;
-                self.take(2 + 4 * 8 + 5 * 2)?;
+                let geography = self.u8()? == 2;
+                let tessellation = match self.u8()? {
+                    1 => "GEOMETRY_GRID",
+                    2 => "GEOGRAPHY_GRID",
+                    3 => "GEOMETRY_AUTO_GRID",
+                    _ => "GEOGRAPHY_AUTO_GRID",
+                };
+                // Stored as xmin, xmax, ymin, ymax.
+                let b = [self.f64()?, self.f64()?, self.f64()?, self.f64()?];
+                let mut grids = Vec::new();
+                for _ in 0..4 {
+                    grids.push(
+                        match self.i16()? {
+                            16 => "LOW",
+                            256 => "HIGH",
+                            _ => "MEDIUM",
+                        }
+                        .to_string(),
+                    );
+                }
+                let cells_per_object = i32::from(self.i16()?);
                 if tv >= 13.6915 {
                     self.i16()?;
                 }
+                let bounding_box = if geography { Vec::new() } else { [b[0], b[2], b[1], b[3]].iter().map(|f| f.to_string()).collect() };
+                ix.spatial = Some(SpatialIndex { geography, tessellation: tessellation.into(), bounding_box, grids, cells_per_object });
             }
             k => return Err(format!("unknown index kind {k} at offset {at}")),
         }
@@ -2482,6 +2521,16 @@ fn is_user_schema(schema: &str) -> bool {
 }
 
 /// A system type; snapshot lengths are already in characters.
+/// System type names by the type codes of XML index paths.
+fn sql_type_name(code: i32) -> Option<&'static str> {
+    const NAMES: [&str; 30] = [
+        "binary", "varbinary", "char", "varchar", "nchar", "nvarchar", "datetime", "smalldatetime", "decimal", "numeric", "float", "real", "bigint", "int",
+        "smallint", "tinyint", "money", "smallmoney", "bit", "timestamp", "uniqueidentifier", "image", "ntext", "text", "sql_variant", "xml", "date", "time",
+        "datetimeoffset", "datetime2",
+    ];
+    usize::try_from(code).ok().and_then(|c| c.checked_sub(1)).and_then(|c| NAMES.get(c).copied())
+}
+
 fn system_type(name: &str, length: i32, precision: i32, scale: i32) -> DataType {
     let mut t = DataType { name: name.to_string(), ..Default::default() };
     let small = |x: i32| u8::try_from(x).ok();
