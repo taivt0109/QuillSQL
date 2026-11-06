@@ -20,9 +20,14 @@ fn server() -> Option<Server> {
     Some(Server { host, auth })
 }
 
+/// Test databases get the process id, so runs from other worktrees on the same server don't collide.
+fn unique(name: &str) -> String {
+    if name == "master" { name.to_string() } else { format!("{name}_{}", std::process::id()) }
+}
+
 impl Server {
     fn spec(&self, database: &str) -> ConnectionSpec {
-        let mut spec = ConnectionSpec::new(&self.host, database, self.auth.clone());
+        let mut spec = ConnectionSpec::new(&self.host, &unique(database), self.auth.clone());
         spec.trust_server_certificate = true;
         spec
     }
@@ -32,8 +37,8 @@ impl Server {
         let rt = db::runtime().unwrap();
         rt.block_on(async {
             let mut master = db::connect_async(&self.spec("master")).await.unwrap();
-            let q = db::quote(name);
-            db::execute(&mut master, &format!("IF DB_ID({}) IS NOT NULL BEGIN ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q}; END; CREATE DATABASE {q};", db::literal(name)))
+            let q = db::quote(&unique(name));
+            db::execute(&mut master, &format!("IF DB_ID({}) IS NOT NULL BEGIN ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q}; END; CREATE DATABASE {q};", db::literal(&unique(name))))
                 .await
                 .unwrap();
             let mut conn = db::connect_async(&self.spec(name)).await.unwrap();
@@ -47,7 +52,7 @@ impl Server {
         let rt = db::runtime().unwrap();
         rt.block_on(async {
             let mut master = db::connect_async(&self.spec("master")).await.unwrap();
-            let q = db::quote(name);
+            let q = db::quote(&unique(name));
             let _ = db::execute(&mut master, &format!("ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q};")).await;
         });
     }
@@ -296,8 +301,8 @@ fn data_compare_orders_awkward_keys() {
     let Some(server) = server() else { return };
     server.create("QuillTest_Data1", KEYS);
     // Copy every row, then change a few in the second database.
-    let copy = "INSERT INTO dbo.KeyGuid (Id, V) SELECT Id, V FROM QuillTest_Data1.dbo.KeyGuid;";
-    let script = KEYS.replace("INSERT INTO dbo.KeyGuid (Id, V) SELECT TOP (500) NEWID(), ROW_NUMBER() OVER (ORDER BY (SELECT 1)) FROM sys.all_objects;", copy);
+    let copy = format!("INSERT INTO dbo.KeyGuid (Id, V) SELECT Id, V FROM {}.dbo.KeyGuid;", unique("QuillTest_Data1"));
+    let script = KEYS.replace("INSERT INTO dbo.KeyGuid (Id, V) SELECT TOP (500) NEWID(), ROW_NUMBER() OVER (ORDER BY (SELECT 1)) FROM sys.all_objects;", &copy);
     let changes = "UPDATE dbo.KeyText SET V = 100 WHERE Code = N'ß';\nDELETE FROM dbo.KeyText WHERE Code = N'中';\nINSERT INTO dbo.KeyText (Code, V) VALUES (N'new', 0);\nUPDATE TOP (3) dbo.KeyGuid SET V = -V;\nDELETE TOP (2) FROM dbo.KeyGuid WHERE V > 0;\nUPDATE dbo.KeyMixed SET V = 2.000 WHERE V = 2;\nUPDATE dbo.KeyVarchar SET Code = 'b' WHERE Code = 'B';";
     server.create("QuillTest_Data2", &format!("{script}\nGO\n{changes}"));
     let db1 = catalog::read_database(&server.spec("QuillTest_Data1")).unwrap();
@@ -348,7 +353,7 @@ fn data_deployment_converges() {
     server.create("QuillTest_Sync1", &format!("{base}\nGO\n{SHOP_DATA}"));
     // The target: some rows changed, some missing, some extra (including a new parent row).
     let target_rows = "SET IDENTITY_INSERT dbo.Customer ON;\nINSERT INTO dbo.Customer (CustomerId, Name, Email, Balance, Notes) VALUES (1, N'An Nguyen', 'an@example.com', 10, N'x'), (7, N'Chi', 'chi@example.com', 6, NULL), (9, N'Dung', NULL, 1, N'it''s here');\nSET IDENTITY_INSERT dbo.Customer OFF;\nINSERT INTO Sales.[Order] (OrderId, CustomerId, Total, Status) VALUES (1, 1, 12.5, 'N'), (3, 7, 99.99, 'S'), (4, 9, 1, 'N');\nINSERT INTO Sales.OrderLine (OrderId, LineNumber, Qty) VALUES (4, 1, 1);\nUPDATE dbo.KeyText SET V = NULL WHERE Code = N'a';\nDELETE FROM dbo.KeyMixed WHERE A = 'y';";
-    let keys_copy = "DELETE FROM dbo.KeyGuid; INSERT INTO dbo.KeyGuid (Id, V) SELECT Id, V + 1 FROM QuillTest_Sync1.dbo.KeyGuid;";
+    let keys_copy = format!("DELETE FROM dbo.KeyGuid; INSERT INTO dbo.KeyGuid (Id, V) SELECT Id, V + 1 FROM {}.dbo.KeyGuid;", unique("QuillTest_Sync1"));
     server.create("QuillTest_Sync2", &format!("{base}\nGO\n{keys_copy}\nGO\n{target_rows}"));
     let (s1, s2) = (server.spec("QuillTest_Sync1"), server.spec("QuillTest_Sync2"));
     let db1 = catalog::read_database(&s1).unwrap();
@@ -356,7 +361,7 @@ fn data_deployment_converges() {
     let opts = DataOptions::default_set();
     let result = compare(&s1, &s2, &db1, &db2, &opts, &DataMappings::default(), |_| true, 4, |_, _| {}).unwrap();
     assert!(!result.identical());
-    let settings = sync::SyncSettings::new("s", "t", "QuillTest_Sync2");
+    let settings = sync::SyncSettings::new("s", "t", &unique("QuillTest_Sync2"));
     let script = sync::generate(&result, &db2, &opts, &settings).unwrap();
     if let Err(e) = deploy::execute(&s2, &script, |_, _| {}) {
         panic!("{e}\n\n{}", script.sql);
