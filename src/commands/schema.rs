@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::common::{self, Source};
 use super::console;
+use super::sources;
 use super::enums;
 use crate::args::{ArgError, Args, Rule, Switch, exit};
 use crate::catalog::{Database, ObjectName};
@@ -193,9 +194,6 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             ));
         }
     }
-    if args.has("filter") {
-        return Err(ArgError::new(exit::UNAVAILABLE, "/filter is not supported by QuillSQL yet."));
-    }
     check_rule_types(args)?;
     let project = common::project_of(args, crate::project::ProjectKind::Schema)?;
     let source1 = common::source(args, 1)?.ok_or_else(|| ArgError::new(exit::USAGE, "The /database1 switch requires a database name."))?;
@@ -206,7 +204,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         if Path::new(path).exists() && !args.has("force") {
             return Err(ArgError::new(exit::IO_ERROR, format!("Unable to write snapshot to file '{path}' because the file already exists.")));
         }
-        let db = common::load(&source1, args)?;
+        let db = common::load(&source1, args, options.has(crate::schema::Opt::DecryptPost2kEncryptedObjects))?;
         console::verbose(&format!("Creating database snapshot file '{path}' from database '{}'...", db.name));
         common::save_snapshot(&db, Path::new(path))?;
         console::log(&format!(
@@ -217,6 +215,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             db.routines.len()
         ));
         return Ok(exit::SUCCESS);
+    }
+    if let Some(dir) = args.get("makescripts") {
+        let (db, _) = load(&source1, args, &options)?;
+        return sources::make_scripts(args, &db, Path::new(dir), &options, &describe(Some(&source1), &db));
     }
 
     let db2_given = ["snapshot2", "connection2", "database2", "server2"].iter().any(|k| args.has(k));
@@ -240,14 +242,15 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let selection = Selection::new(&includes, &excludes).map_err(|e| ArgError::new(exit::USAGE, e))?;
     let include_identical = selection.include_identical || args.has("allowIdenticalDatabases") || args.has("includeIdentical");
     let mappings = project.as_ref().map(|p| p.schema_mappings.clone()).unwrap_or_default();
+    let filter = sources::filter(args, project.as_ref().and_then(|p| p.filter.as_deref()))?;
     if let Some(path) = args.get("json").filter(|p| *p != "-") {
         common::check_output(Path::new(path), args)?;
     }
 
-    let db1 = common::load(&source1, args)?;
-    let db2 = match &side2 {
-        Side::Source(s) => common::load(s, args)?,
-        Side::Empty => Database { name: String::new(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() },
+    let (db1, folder1) = load(&source1, args, &options)?;
+    let (db2, folder2) = match &side2 {
+        Side::Source(s) => load(s, args, &options)?,
+        Side::Empty => (Database { name: String::new(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }, None),
     };
     console::verbose(&format!("Comparing database {} with database {}...", identifier(&source1, &db1), side_identifier(&side2, &db2)));
     let mut comparison = schema::compare(&db1, &db2, &options, &mappings);
@@ -258,7 +261,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             }
         }
     }
-    selection.apply(&mut comparison);
+    // A filter selects in place of /include and /exclude.
+    match &filter {
+        Some(f) => sources::apply_filter(f, &mut comparison),
+        None => {
+            selection.apply(&mut comparison);
+        }
+    }
+    let passes = |d: &Difference| filter.as_ref().is_none_or(|f| f.includes(d));
     for d in &mut comparison.differences {
         if d.kind == DiffKind::Equal {
             d.selected = false;
@@ -281,7 +291,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         let listed: Vec<&Difference> = comparison
             .differences
             .iter()
-            .filter(|d| if d.kind == DiffKind::Equal { include_identical && selection.includes(d) } else { d.selected })
+            .filter(|d| if d.kind == DiffKind::Equal { include_identical && selection.includes(d) && passes(d) } else { d.selected })
             .collect();
         let (id1, id2) = (identifier(&source1, &db1), side_identifier(&side2, &db2));
         print_summary(&listed, &id1, &id2);
@@ -311,7 +321,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     };
     let mut script = None;
     if args.has("scriptfile") || (args.has("synchronize") && live_target.is_some()) {
-        let s = build_script(args, &comparison, &db1, &db2, &options, &mappings, &source1, &side2)?;
+        let mut s = build_script(args, &comparison, &db1, &db2, &options, &mappings, &source1, &side2)?;
+        if let Some(f) = &folder1 {
+            sources::add_pre_post(&mut s, f, &options)?;
+        }
         common::write_script(args, &s)?;
         script = Some(s);
     }
@@ -321,6 +334,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     }
     if assert && !identical {
         return Ok(exit::NOT_IDENTICAL);
+    }
+    // Deploying to a scripts folder rewrites its files; ForceSyncScriptGeneration keeps it to the script.
+    if let (true, Some(f)) = (args.has("synchronize") && !options.has(crate::schema::Opt::ForceSyncScriptGeneration), &folder2) {
+        if matches!(side2, Side::Source(Source::Scripts { revision: Some(_), .. })) {
+            return Err(ArgError::new(exit::USAGE, "/synchronize cannot write to a source control revision; give the scripts folder with /scripts2"));
+        }
+        sources::sync_folder(&db1, f, &comparison.differences, &options)?;
+        return Ok(exit::SUCCESS);
     }
     if let (true, Some(target), Some(script)) = (args.has("synchronize"), live_target, &script) {
         if script.is_empty() {
@@ -339,7 +360,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
 fn identifier(source: &Source, db: &Database) -> String {
     match source {
         Source::Live(spec) => format!("{}.{}", spec.server, db.name),
-        Source::Snapshot(_) => db.name.clone(),
+        Source::Snapshot(_) | Source::Scripts { .. } => db.name.clone(),
     }
 }
 
@@ -464,6 +485,12 @@ fn report_source(side: Option<&Source>, db: &Database) -> report::DataSource {
             database: db.name.clone(),
             created: std::fs::metadata(path).and_then(|m| m.modified()).ok().map(|t| console::utc(t).report_format()),
         },
+        Some(Source::Scripts { revision, .. }) => report::DataSource {
+            kind: if revision.is_some() { "source control" } else { "folder" },
+            server: String::new(),
+            database: db.name.clone(),
+            created: None,
+        },
         None => report::DataSource { kind: "", server: String::new(), database: String::new(), created: None },
     }
 }
@@ -550,6 +577,7 @@ fn spec_of(side: Option<&Source>) -> crate::project::SourceSpec {
             }
         }
         Some(Source::Snapshot(p)) => SourceSpec { kind: "snapshot".into(), path: p.display().to_string(), ..Default::default() },
+        Some(Source::Scripts { path, .. }) => SourceSpec { kind: "scripts".into(), path: path.display().to_string(), ..Default::default() },
         None => SourceSpec { kind: "empty".into(), ..Default::default() },
     }
 }
@@ -588,10 +616,22 @@ fn write_project(
     }
 }
 
+/// Reads one side; a scripts folder also comes back as itself, for deploying to it.
+fn load(source: &Source, args: &Args, options: &Options) -> Result<(Database, Option<crate::sources::folder::Folder>), ArgError> {
+    match source {
+        Source::Scripts { path, revision } => {
+            let (db, folder) = sources::load(path, revision.as_deref(), args, options)?;
+            Ok((db, Some(folder)))
+        }
+        _ => Ok((common::load(source, args, options.has(crate::schema::Opt::DecryptPost2kEncryptedObjects))?, None)),
+    }
+}
+
 fn describe(side: Option<&Source>, db: &Database) -> String {
     match side {
         Some(Source::Live(spec)) => format!("{}.{}", spec.server, db.name),
         Some(Source::Snapshot(path)) => format!("{} (snapshot {})", db.name, path.display()),
+        Some(Source::Scripts { path, .. }) => format!("{} (scripts folder {})", db.name, path.display()),
         None => "Empty".into(),
     }
 }

@@ -126,7 +126,9 @@ impl Comparer<'_> {
 
     fn bindable(&self, a: &BindableObject, b: &BindableObject) -> Vec<PropDiff> {
         let mut d = Diffs::default();
-        self.module_text(&mut d, &a.definition, &b.definition, false, false);
+        // A statement terminator is not part of the definition.
+        let text = |x: &str| x.trim_end().trim_end_matches(';').to_string();
+        self.module_text(&mut d, &text(&a.definition), &text(&b.definition), false, false);
         d.out
     }
 
@@ -586,6 +588,34 @@ impl Comparer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_names() {
+        for (s, t) in [
+            ("MessageType", ObjectType::MessageType),
+            ("full text catalog", ObjectType::FullTextCatalog),
+            ("DdlTrigger", ObjectType::DdlTrigger),
+            ("xml schema collection", ObjectType::XmlSchemaCollection),
+            ("ServiceBinding", ObjectType::ServiceBinding),
+            ("ExternalTable", ObjectType::ExternalTable),
+        ] {
+            assert_eq!(ObjectType::parse(s), Some(t), "{s}");
+        }
+        assert_eq!(super::super::report::type_name(ObjectType::SearchPropertyList), "SearchPropertyList");
+    }
+
+    #[test]
+    fn statistics_and_policies_compare() {
+        let st = |cols: &[&str], nr: bool| Statistic { name: "S".into(), columns: cols.iter().map(|c| c.to_string()).collect(), no_recompute: nr, ..Default::default() };
+        let table = |s: Statistic| Table { schema: "dbo".into(), name: "T".into(), statistics: vec![s], ..Default::default() };
+        let db = |t: Table| Database { tables: vec![t], ..Default::default() };
+        let opts = super::super::Options::default_set();
+        let c = super::super::compare(&db(table(st(&["a", "b"], false))), &db(table(st(&["b", "a"], true))), &opts, &Default::default());
+        let names: Vec<&str> = c.differences[0].properties.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["No Recompute"]);
+        let c = super::super::compare(&db(table(st(&["a"], false))), &db(table(st(&["a"], true))), &opts.clone().with(Opt::IgnoreStatistics), &Default::default());
+        assert!(c.identical());
+    }
 
     #[test]
     fn xml_without_layout() {

@@ -150,7 +150,9 @@ impl<'a> Planner<'a> {
     /// policies on a function or table that is dropped. Returns whether `dep` was one.
     pub(super) fn object_dependant(&mut self, dep: &ObjectName) -> bool {
         let (src, tgt) = (self.src, self.tgt);
-        let Some(t) = scoped(&tgt.security_policies, dep, |p| (&p.schema, &p.name)) else { return false };
+        if scoped(&tgt.security_policies, dep, |p| (&p.schema, &p.name)).is_none() {
+            return false;
+        }
         if self.dropped.insert(dep.clone()) {
             self.core(Phase::DropObjects, format!("Dropping {dep}"), dep.clone(), vec![self.ex.object(dep, "SP", Check::Drop, &format!("DROP SECURITY POLICY {dep}"))]);
             if !self.recreate.contains(dep)
@@ -159,7 +161,6 @@ impl<'a> Planner<'a> {
                 self.create_security_policy(dep, s);
             }
         }
-        let _ = t;
         true
     }
 
@@ -622,6 +623,13 @@ impl<'a> Planner<'a> {
         self.ex.listed(&format!("sys.fulltext_indexes WHERE object_id = OBJECT_ID({})", ddl::sql_string(&table.quoted())), check, sql)
     }
 
+    /// A table that is dropped or rebuilt loses its full-text index before the transaction.
+    pub(super) fn drop_fulltext_before(&mut self, t: &Table) {
+        if t.fulltext_index.is_some() && !self.opts.has(Opt::IgnoreFullTextIndexing) {
+            self.drop_fulltext_index(&t.object_name());
+        }
+    }
+
     fn drop_fulltext_index(&mut self, table: &ObjectName) {
         if !self.dropped_sub.insert((table.clone(), "\u{1}fulltext".into())) {
             return;
@@ -939,7 +947,7 @@ impl<'a> Planner<'a> {
 
     /// What an in-place alter does to a table's versioning: whether versioning goes off first,
     /// and the PERIOD statements before and after the column changes.
-    pub(super) fn versioning_change(&mut self, s: &'a Table, t: &'a Table, drops: &[&Column]) -> (bool, (Vec<String>, Vec<String>)) {
+    pub(super) fn versioning_change(&mut self, s: &'a Table, t: &'a Table) -> (bool, (Vec<String>, Vec<String>)) {
         let name = t.object_name();
         let (mut before, mut after) = (Vec::new(), Vec::new());
         if !self.has(Feature::Temporal) {
@@ -951,7 +959,6 @@ impl<'a> Planner<'a> {
                 if t.columns.iter().any(|c| c.generated_always.is_some()) {
                     before.push(format!("ALTER TABLE {name} DROP PERIOD FOR SYSTEM_TIME"));
                 }
-                let _ = drops;
                 (true, (before, after))
             }
             (Some(x), None) => {
@@ -1608,5 +1615,118 @@ impl<'a> Planner<'a> {
         if let Some(s) = src.external_tables.iter().find(|x| x.schema == t.schema && x.name == t.name) {
             self.create_external_table(s);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::compare::compare;
+
+    fn script(src: &Database, tgt: &Database, opts: &Options) -> DeploymentScript {
+        let c = compare(src, tgt, opts, &Mappings::default());
+        let settings = ScriptSettings {
+            transaction_isolation_level: "SERIALIZABLE".into(),
+            source: "s".into(),
+            target: "t".into(),
+            target_database: "t".into(),
+            target_major_version: 0,
+        };
+        generate(&c, src, tgt, opts, &Mappings::default(), &settings).unwrap()
+    }
+
+    fn in_order(sql: &str, parts: &[&str]) {
+        let pos: Vec<usize> = parts.iter().map(|p| sql.find(p).unwrap_or_else(|| panic!("{p}\n{sql}"))).collect();
+        assert!(pos.windows(2).all(|w| w[0] < w[1]), "{sql}");
+    }
+
+    fn broker() -> Database {
+        Database {
+            message_types: vec![MessageType { name: "M".into(), validation: "NONE".into(), ..Default::default() }],
+            contracts: vec![Contract { name: "C".into(), messages: vec![ContractMessage { message_type: "M".into(), sent_by: "ANY".into() }], ..Default::default() }],
+            queues: vec![Queue { schema: "dbo".into(), name: "Q".into(), ..Default::default() }],
+            services: vec![Service { name: "S".into(), queue: ObjectName::new("dbo", "Q"), contracts: vec!["C".into()], ..Default::default() }],
+            dependencies: vec![
+                Dependency { from: ObjectName::new(KEY_CONTRACT, "C"), to: ObjectName::new(KEY_MESSAGE_TYPE, "M"), strong: true },
+                Dependency { from: ObjectName::new(KEY_SERVICE, "S"), to: ObjectName::new("dbo", "Q"), strong: true },
+                Dependency { from: ObjectName::new(KEY_SERVICE, "S"), to: ObjectName::new(KEY_CONTRACT, "C"), strong: true },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn service_broker_in_dependency_order() {
+        let opts = Options::default_set();
+        let s = script(&broker(), &Database::default(), &opts);
+        in_order(&s.sql, &["CREATE MESSAGE TYPE [M]", "CREATE CONTRACT [C]", "CREATE SERVICE [S]"]);
+        assert!(s.sql.contains("CREATE QUEUE [dbo].[Q]\r\nWITH STATUS=ON,\r\nRETENTION=OFF,\r\nPOISON_MESSAGE_HANDLING (STATUS=ON)"), "{}", s.sql);
+        let s = script(&Database::default(), &broker(), &opts);
+        in_order(&s.sql, &["DROP SERVICE [S]", "DROP CONTRACT [C]", "DROP MESSAGE TYPE [M]"]);
+        // A contract whose messages change is re-created, and the service on it too.
+        let mut changed = broker();
+        changed.contracts[0].messages[0].sent_by = "INITIATOR".into();
+        let s = script(&changed, &broker(), &opts);
+        in_order(&s.sql, &["DROP SERVICE [S]", "DROP CONTRACT [C]", "CREATE CONTRACT [C]", "CREATE SERVICE [S]"]);
+        // Azure SQL Database has no Service Broker.
+        let mut azure = Database::default();
+        azure.server.engine_edition = 5;
+        let s = script(&broker(), &azure, &opts);
+        assert!(!s.sql.contains("CREATE QUEUE") && s.warnings.iter().any(|w| w.message == "The queue [dbo].[Q] is not supported in the target database version."), "{:?}", s.warnings);
+    }
+
+    #[test]
+    fn partition_functions_split_and_merge() {
+        let pf = |b: &[&str]| PartitionFunction { name: "pf".into(), data_type: DataType { name: "int".into(), ..Default::default() }, range_right: true, boundaries: b.iter().map(|x| x.to_string()).collect() };
+        let ps = PartitionScheme { name: "ps".into(), function: "pf".into(), filegroups: vec!["PRIMARY".into(); 3] };
+        let db = |f| Database { partition_functions: vec![f], partition_schemes: vec![ps.clone()], ..Default::default() };
+        let opts = Options::default_set().without(Opt::IgnoreFileGroups);
+        let s = script(&db(pf(&["2", "3"])), &db(pf(&["1", "2"])), &opts);
+        in_order(&s.sql, &["MERGE RANGE (1)", "ALTER PARTITION SCHEME [ps] NEXT USED [PRIMARY]", "SPLIT RANGE (3)"]);
+        // Not compared when filegroups are ignored (the default).
+        assert!(script(&db(pf(&["2", "3"])), &db(pf(&["1", "2"])), &Options::default_set()).is_empty());
+    }
+
+    #[test]
+    fn ddl_triggers_and_policies() {
+        let tr = DdlTrigger { name: "audit".into(), definition: "CREATE TRIGGER audit ON DATABASE FOR CREATE_TABLE AS PRINT 1".into(), disabled: true, ..Default::default() };
+        let src = Database { ddl_triggers: vec![tr], ..Default::default() };
+        let s = script(&src, &Database::default(), &Options::default_set());
+        in_order(&s.sql, &["PRINT N'Creating DDL triggers'", "CREATE TRIGGER [audit] ON DATABASE", "DISABLE TRIGGER [audit] ON DATABASE"]);
+        let s = script(&Database::default(), &src, &Options::default_set());
+        assert!(s.sql.contains("DROP TRIGGER [audit] ON DATABASE"), "{}", s.sql);
+        let pr = SecurityPredicate { kind: "FILTER".into(), function: "[rls].[f]".into(), arguments: "([TenantId])".into(), table: ObjectName::new("dbo", "T"), operation: None };
+        let pol = SecurityPolicy { schema: "rls".into(), name: "P".into(), enabled: true, schema_bound: true, predicates: vec![pr], ..Default::default() };
+        let mut off = pol.clone();
+        off.enabled = false;
+        let s = script(&Database { security_policies: vec![off], ..Default::default() }, &Database { security_policies: vec![pol], ..Default::default() }, &Options::default_set());
+        assert!(s.sql.contains("ALTER SECURITY POLICY [rls].[P]\r\nWITH (STATE = OFF)"), "{}", s.sql);
+    }
+
+    #[test]
+    fn fulltext_outside_the_transaction() {
+        let col = Column { name: "Body".into(), data_type: DataType { name: "nvarchar".into(), length: Some(-1), ..Default::default() }, nullable: true, ..Default::default() };
+        let id = Column { name: "Id".into(), data_type: DataType { name: "int".into(), ..Default::default() }, ..Default::default() };
+        let pk = Index { name: "PK".into(), kind: IndexKind::Clustered, primary_key: true, unique: true, columns: vec![IndexColumn { name: "Id".into(), descending: false }], allow_row_locks: true, allow_page_locks: true, ..Default::default() };
+        let ft = FullTextIndex { catalog: "Cat".into(), key_index: "PK".into(), change_tracking: "AUTO".into(), stoplist: "SYSTEM".into(), columns: vec![FullTextColumn { name: "Body".into(), type_column: None, language: 1033 }], ..Default::default() };
+        let t = Table { schema: "dbo".into(), name: "Doc".into(), columns: vec![id, col], indexes: vec![pk], lock_escalation: "TABLE".into(), fulltext_index: Some(ft), ..Default::default() };
+        let src = Database { tables: vec![t], fulltext_catalogs: vec![FullTextCatalog { name: "Cat".into(), ..Default::default() }], ..Default::default() };
+        let s = script(&src, &Database::default(), &Options::default_set());
+        in_order(&s.sql, &["CREATE FULLTEXT CATALOG [Cat]", "BEGIN TRANSACTION", "CREATE TABLE [dbo].[Doc]", "COMMIT TRANSACTION", "CREATE FULLTEXT INDEX ON [dbo].[Doc] KEY INDEX [PK] ON [Cat]", "ADD ([Body] LANGUAGE 1033)", "ENABLE"]);
+        assert!(s.warnings.iter().any(|w| w.message.starts_with("Full-text indexes can't be deployed in transactions")));
+        let s = script(&Database::default(), &src, &Options::default_set());
+        in_order(&s.sql, &["DROP FULLTEXT INDEX ON [dbo].[Doc]", "DROP FULLTEXT CATALOG [Cat]", "BEGIN TRANSACTION", "DROP TABLE [dbo].[Doc]"]);
+        assert!(script(&src, &Database::default(), &Options::default_set().with(Opt::IgnoreFullTextIndexing)).sql.find("FULLTEXT").is_none());
+    }
+
+    #[test]
+    fn certificates_are_comments() {
+        let cert = Certificate { name: "C".into(), subject: "Quill".into(), private_key: "PW".into(), ..Default::default() };
+        let src = Database { certificates: vec![cert], ..Default::default() };
+        let s = script(&src, &Database::default(), &Options::default_set());
+        assert!(s.sql.contains("-- Certificate [C]\r\n--   Authorization: dbo\r\n--   Subject: Quill") && s.sql.contains("Encrypted by password"), "{}", s.sql);
+        let s = script(&Database::default(), &src, &Options::default_set());
+        in_order(&s.sql, &["COMMIT TRANSACTION", "DROP CERTIFICATE [C]"]);
+        assert!(script(&src, &Database::default(), &Options::default_set().with(Opt::IgnoreCertificatesAndCryptoKeys)).is_empty());
     }
 }

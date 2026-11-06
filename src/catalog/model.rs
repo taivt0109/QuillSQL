@@ -679,7 +679,7 @@ pub struct Routine {
     /// EXECUTE AS: CALLER (None), OWNER, SELF, or a user name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execute_as: Option<String>,
-    /// CLR: assembly.class.method.
+    /// CLR: `[assembly].[class].[method]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_method: Option<String>,
     /// CLR modules: the parameters (T-SQL modules carry them in their text).
@@ -728,7 +728,7 @@ pub struct UserType {
     pub check_constraints: Vec<CheckConstraint>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub memory_optimized: bool,
-    /// CLR: assembly.class.
+    /// CLR: `[assembly].[class]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_class: Option<String>,
 }
@@ -850,8 +850,8 @@ impl Permission {
     pub fn securable(&self) -> String {
         let q = |s: &Option<String>| crate::db::quote(s.as_deref().unwrap_or_default());
         match self.class.as_str() {
-            "DATABASE" => String::new(),
             "SCHEMA" => format!(" ON SCHEMA::{}", q(&self.schema)),
+            _ if self.object.is_none() => String::new(),
             class if self.schema.is_some() => format!(" ON {class}::{}.{}", q(&self.schema), q(&self.object)),
             class => format!(" ON {class}::{}", q(&self.object)),
         }

@@ -80,7 +80,8 @@ fn run_errors_have_sql_compare_codes() {
     assert_eq!(code(&o), 8);
     assert!(flat(&stderr(&o)).contains("except for /include:identical and /include:staticdata"));
     assert_eq!(code(&quill(&["/db1:a", "/p1:x", "/db2:b"])), 8);
-    assert_eq!(code(&quill(&["/scripts1", &p("none"), "/db2:b"])), 69);
+    // A scripts folder that is not there.
+    assert_eq!(code(&quill(&["/scripts1", &p("none"), "/db2:b"])), 60);
     assert_eq!(code(&quill(&["/project", &p("missing.scp")])), 74);
     std::fs::write(dir.join("bad.scp"), "not xml").unwrap();
     assert_eq!(code(&quill(&["/project", &p("bad.scp")])), 65);

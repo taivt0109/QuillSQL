@@ -55,8 +55,11 @@ pub struct SourceSpec {
     pub remember_password: bool,
     pub encrypt: bool,
     pub trust_server_certificate: bool,
-    /// Snapshot file, for `type = snapshot`.
+    /// Snapshot file for `type = snapshot`, folder for `type = scripts`.
     pub path: String,
+    /// `type = scripts`: the source-control revision of the folder to read (HEAD for the latest).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub revision: String,
     /// Run time only: never written to the file.
     #[serde(skip_serializing)]
     pub password: Option<String>,
@@ -73,6 +76,11 @@ impl SourceSpec {
         self.kind == "snapshot"
     }
 
+    /// A scripts folder (SQL Compare `FolderDataSource`), at `path`.
+    pub fn is_scripts(&self) -> bool {
+        self.kind == "scripts"
+    }
+
     /// An empty database (`/empty2`).
     pub fn is_empty_database(&self) -> bool {
         self.kind == "empty"
@@ -80,7 +88,7 @@ impl SourceSpec {
 
     /// `server / database` or the snapshot path.
     pub fn describe(&self) -> String {
-        if self.is_snapshot() { self.path.clone() } else { format!("{} / {}", self.server, self.database) }
+        if self.is_snapshot() || self.is_scripts() { self.path.clone() } else { format!("{} / {}", self.server, self.database) }
     }
 
     /// The connection, with the password from the spec or from `QUILL_PASSWORD<n>`.
@@ -136,6 +144,9 @@ pub struct Project {
     pub exclude: Vec<String>,
     pub deselected: Vec<Deselected>,
     pub note: String,
+    /// The filter of an imported SQL Compare project (its `ProjectFilter` XML).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
 }
 
 impl Project {
@@ -240,6 +251,9 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
         let ty = n.attribute("type").unwrap_or_default();
         if ty.eq_ignore_ascii_case("SnapshotSource") {
             return SourceSpec { kind: "snapshot".into(), path: text_of(n, "FileName"), ..Default::default() };
+        }
+        if ty.eq_ignore_ascii_case("FolderDataSource") {
+            return SourceSpec { kind: "scripts".into(), path: text_of(n, "Path"), ..Default::default() };
         }
         if ty.eq_ignore_ascii_case("EmptyDatabaseSource") {
             return SourceSpec { kind: "empty".into(), ..Default::default() };
@@ -367,6 +381,13 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
         }
     }
     p.note = text_of(root, "UserNote");
+    // Keep a filter that leaves anything out; the default one includes everything.
+    if kind == ProjectKind::Schema
+        && let Some(f) = child(root, "ProjectFilter")
+        && f.descendants().any(|e| e.tag_name().name() == "Expression" && e.text().is_none_or(|t| t.trim() != "TRUE"))
+    {
+        p.filter = Some(text[f.range()].to_string());
+    }
     Ok(p)
 }
 
@@ -458,6 +479,13 @@ pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
         if side.is_snapshot() {
             x.open(element, " version=\"1\" type=\"SnapshotSource\"");
             x.value("FileName", &side.path);
+            x.close(element);
+        } else if side.is_scripts() {
+            x.open(element, " version=\"2\" type=\"FolderDataSource\"");
+            x.value("Path", &side.path);
+            let name = std::path::Path::new(&side.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            x.value("DatabaseName", &name);
+            x.value("ServerName", "Scripts");
             x.close(element);
         } else if side.is_empty_database() || (side.server.is_empty() && side.database.is_empty()) {
             x.line(&format!("<{element} version=\"1\" type=\"EmptyDatabaseSource\" />"));
@@ -641,6 +669,34 @@ mod tests {
         assert!(p.options.contains(&"IgnoreComments".to_string()) && p.options.contains(&"IgnoreFileGroups".to_string()));
         assert_eq!(p.schema_mappings.schemas, [("dev".to_string(), "dbo".to_string())]);
         assert_eq!(p.schema_mappings.tables[0].target, ObjectName::new("dbo", "New"));
+    }
+
+    #[test]
+    fn imports_a_scripts_folder_and_its_filter() {
+        let scp = r#"<Project version="5" type="SQLComparisonToolsProject">
+  <DataSource1 version="2" type="FolderDataSource"><Path>C:\db\scripts</Path><DatabaseName>scripts</DatabaseName><ServerName>Scripts</ServerName></DataSource1>
+  <DataSource2 version="5" type="LiveDatabaseSource"><ServerName>b</ServerName><DatabaseName>y</DatabaseName></DataSource2>
+  <ProjectFilter version="1" type="DifferenceFilter">
+    <FilterCaseSensitive>False</FilterCaseSensitive>
+    <Filters version="1">
+      <None version="1"><Include>True</Include><Expression>TRUE</Expression></None>
+      <Table version="1"><Include>True</Include><Expression>@SCHEMA = 'dbo'</Expression></Table>
+    </Filters>
+  </ProjectFilter>
+</Project>"#;
+        let p = import_vendor(scp.as_bytes(), ProjectKind::Schema).unwrap();
+        assert!(p.source.is_scripts() && p.source.path == r"C:\db\scripts");
+        let f = crate::schema::filter::Filter::from_xml(p.filter.as_deref().unwrap()).unwrap();
+        let d = crate::schema::Difference {
+            object_type: crate::schema::ObjectType::Table,
+            name: ObjectName::new("Sales", "Order"),
+            target_name: None,
+            kind: crate::schema::DiffKind::Different,
+            properties: Vec::new(),
+            selected: true,
+            trivial: false,
+        };
+        assert!(!f.includes(&d));
     }
 
     #[test]
