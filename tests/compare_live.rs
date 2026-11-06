@@ -122,3 +122,56 @@ fn reads_the_shop_fixture() {
     // A default that uses a sequence makes the table depend on it.
     assert!(model.dependencies.iter().any(|d| d.from.name == "Order" && d.to.name == "OrderNumbers"));
 }
+
+const SHOP_CHANGES: &str = include_str!("fixtures/compare/shop_changes.sql");
+
+#[test]
+fn compares_two_versions_of_the_shop() {
+    use quillsql::schema::{self, DiffKind, Mappings, ObjectType, Opt, Options};
+    let Some(server) = server() else { return };
+    server.create("QuillTest_Cmp1", SHOP);
+    server.create("QuillTest_Cmp2", &format!("{SHOP}\nGO\n{SHOP_CHANGES}"));
+    let db1 = catalog::read_database(&server.spec("QuillTest_Cmp1")).unwrap();
+    let db2 = catalog::read_database(&server.spec("QuillTest_Cmp2")).unwrap();
+    server.drop("QuillTest_Cmp1");
+    server.drop("QuillTest_Cmp2");
+
+    // A database compared with itself is identical.
+    assert!(schema::compare(&db1, &db1, &Options::default_set(), &Mappings::default()).identical());
+
+    let c = schema::compare(&db1, &db2, &Options::default_set(), &Mappings::default());
+    let find = |ty: ObjectType, name: &str| c.differences.iter().find(|d| d.object_type == ty && d.name.name == name).unwrap();
+    let customer = find(ObjectType::Table, "Customer");
+    assert_eq!(customer.kind, DiffKind::Different);
+    let props: Vec<String> = customer
+        .properties
+        .iter()
+        .map(|p| format!("{}/{}", p.location.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(">"), p.name))
+        .collect();
+    assert!(props.contains(&"Column/Data type".to_string()), "{props:?}");
+    assert!(props.contains(&"/Column".to_string()), "{props:?}"); // Country only in database 2
+    assert!(props.contains(&"Index/Included columns".to_string()), "{props:?}");
+    assert!(!props.iter().any(|p| p.contains("FILLFACTOR")), "IgnoreFillFactor is a default: {props:?}");
+    assert!(props.contains(&"Check constraint/Expression".to_string()), "{props:?}");
+    assert!(props.contains(&"Extended property/Value".to_string()), "{props:?}");
+
+    assert_eq!(find(ObjectType::View, "CustomerTotals").kind, DiffKind::Equal);
+    assert_eq!(find(ObjectType::StoredProcedure, "GetOrders").kind, DiffKind::Different);
+    assert_eq!(find(ObjectType::Table, "Product").kind, DiffKind::OnlyIn2);
+    assert_eq!(find(ObjectType::Synonym, "Orders").kind, DiffKind::OnlyIn1);
+    assert_eq!(find(ObjectType::Function, "FullName").kind, DiffKind::Equal);
+
+    // Qty → Quantity has the same type: auto-mapped, so only the name differs.
+    assert!(c.auto_mapped_columns.iter().any(|(_, a, b)| a == "Qty" && b == "Quantity"));
+    let line = find(ObjectType::Table, "OrderLine");
+    assert!(line.properties.iter().all(|p| p.name == "Name"), "{:?}", line.properties);
+    let no_auto = schema::compare(&db1, &db2, &Options::default_set().with(Opt::NoAutoColumnMapping), &Mappings::default());
+    let line = no_auto.differences.iter().find(|d| d.name.name == "OrderLine").unwrap();
+    assert_eq!(line.properties.iter().filter(|p| p.name == "Column").count(), 2);
+
+    // Ignoring the differences in Customer except the column ones.
+    let opts = Options::default_set().with(Opt::IgnoreExtendedProperties).with(Opt::IgnoreChecks).with(Opt::IgnoreIndexes);
+    let c = schema::compare(&db1, &db2, &opts, &Mappings::default());
+    let customer = c.differences.iter().find(|d| d.name.name == "Customer").unwrap();
+    assert!(customer.properties.iter().all(|p| p.location.first().is_some_and(|f| f.name == "Column") || p.name == "Column"));
+}
