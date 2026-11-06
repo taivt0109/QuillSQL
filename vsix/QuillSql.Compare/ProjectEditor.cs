@@ -50,10 +50,7 @@ namespace QuillSql.Compare
             {
                 tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.List, "Tables & views", 12), Content = TablesAndViews() });
             }
-            else
-            {
-                tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.List, "Table mapping", 12), Content = TableMapping() });
-            }
+            tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.List, "Table mapping", 12), Content = TableMapping() });
             tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.People, "Owner mapping", 12), Content = OwnerMapping() });
             tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Settings, "Options", 12), Content = Options() });
             Children.Add(tabs);
@@ -163,19 +160,99 @@ namespace QuillSql.Compare
 
         private UIElement TableMapping()
         {
-            var mappings = _project.Obj("schemaMappings") ?? new JsonObject();
-            foreach (var t in mappings.List("tables").OfType<JsonObject>())
+            if (!_data)
             {
-                var cols = t.List("columns").OfType<List<object>>().Select(p => p.Count == 2 ? p[0] + "=" + p[1] : "");
-                _tableMappings.Add(new TableMappingRow { Source = QName(t.Obj("source")), Target = QName(t.Obj("target")), Columns = string.Join(", ", cols) });
+                var mappings = _project.Obj("schemaMappings") ?? new JsonObject();
+                foreach (var t in mappings.List("tables").OfType<JsonObject>())
+                {
+                    var cols = t.List("columns").OfType<List<object>>().Select(p => p.Count == 2 ? p[0] + "=" + p[1] : "");
+                    var target = t.Obj("target");
+                    _tableMappings.Add(new TableMappingRow { Source = QName(t.Obj("source")), Target = string.IsNullOrEmpty(target?.Str("name")) ? "" : QName(target), Columns = string.Join(", ", cols) });
+                }
             }
-            const string help = "Tables are paired by schema and name. Map a table to a differently named one here; columns pair by name, and similar columns are paired automatically unless that option is off. Write column pairs as old=new, separated by commas.";
-            var detect = Ui.Button("Detect renames", async () => await DetectRenames(), minWidth: 120, glyph: Glyph.Search);
+            _tablePane = new MappingPane(true, Preview, MapTable, UnmapTable, () => { if (_data) foreach (var r in _dataTables) r.Target = r.Source; else _tableMappings.Clear(); }, EditColumns);
+            var detect = Ui.Button("Detect renames", async () => { await DetectRenames(); await _tablePane.Reload(); }, minWidth: 120, glyph: Glyph.Search);
             detect.ToolTip = "Find tables only in one database that look like a renamed table of the other";
-            return MappingGrid("Table mapping", help, _tableMappings, new[] { ("Table in source", "Source", 220.0), ("Table in target", "Target", 220.0), ("Column pairs", "Columns", 300.0) },
-                () => _tableMappings.Add(new TableMappingRow { Source = "[dbo].[]", Target = "[dbo].[]" }), detect);
+            detect.Visibility = _data ? Visibility.Collapsed : Visibility.Visible;
+            const string help = "Tables pair by owner and name. Map a table with a differently named one, or unmap a pair to compare them as two separate tables; similar columns pair automatically unless that option is off. Double-click a mapped table to map its columns.";
+            return Page("Table mapping", help, _tablePane, detect);
         }
 
+        private MappingPane _tablePane, _ownerPane;
+        private JsonObject _lastPreview;
+
+        /// <summary>The pairs as the comparison will make them, from the project as edited so far.</summary>
+        private async System.Threading.Tasks.Task<JsonObject> Preview()
+        {
+            Collect();
+            _lastPreview = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("mapping_preview", new JsonObject { ["project"] = _session.WithPasswords() }));
+            return _lastPreview;
+        }
+
+        private DataTableRow DataRow(string source)
+        {
+            var row = _dataTables.FirstOrDefault(r => string.Equals(r.Source, source, StringComparison.OrdinalIgnoreCase));
+            if (row == null)
+            {
+                row = new DataTableRow { Source = source, Target = source };
+                _dataTables.Add(row);
+            }
+            return row;
+        }
+
+        private void MapTable(string source, string target)
+        {
+            if (_data)
+            {
+                // The data engine lets a user mapping displace the default pairs of both tables.
+                DataRow(source).Target = target;
+                return;
+            }
+            var columns = _tableMappings.FirstOrDefault(m => string.Equals(m.Source, source, StringComparison.OrdinalIgnoreCase))?.Columns;
+            foreach (var m in _tableMappings.Where(m => string.Equals(m.Source, source, StringComparison.OrdinalIgnoreCase)).ToList()) _tableMappings.Remove(m);
+            _tableMappings.Add(new TableMappingRow { Source = source, Target = target, Columns = columns });
+            // The source table that pairs with the target by name is left unmapped.
+            foreach (var p in (_lastPreview?.Obj("tables")?.List("mapped") ?? new List<object>()).OfType<JsonObject>())
+            {
+                var other = QName(p.Obj("source"));
+                if (string.Equals(QName(p.Obj("target")), target, StringComparison.OrdinalIgnoreCase) && !string.Equals(other, source, StringComparison.OrdinalIgnoreCase)) UnmapTable(other);
+            }
+        }
+
+        /// <summary>An empty target leaves the table unpaired, even with a table of the same name.</summary>
+        private void UnmapTable(string source)
+        {
+            if (_data)
+            {
+                DataRow(source).Target = "";
+                return;
+            }
+            foreach (var m in _tableMappings.Where(m => string.Equals(m.Source, source, StringComparison.OrdinalIgnoreCase)).ToList()) _tableMappings.Remove(m);
+            _tableMappings.Add(new TableMappingRow { Source = source, Target = "" });
+        }
+
+        /// <summary>Maps the columns of a mapped table (old=new pairs).</summary>
+        private async void EditColumns(JsonObject pair)
+        {
+            var source = QName(pair.Obj("source"));
+            var target = QName(pair.Obj("target"));
+            var current = string.Join(", ", pair.List("columns").OfType<JsonObject>().Where(c => !c.Bool("auto")).Select(c => c.Str("source") + "=" + c.Str("target")));
+            var result = Dialogs.MapColumns(_session.Host.Owner, source, pair.Strings("sourceColumns"), pair.Strings("targetColumns"), current);
+            if (result == null) return;
+            if (_data)
+            {
+                var row = DataRow(source);
+                row.ColumnMap = result;
+                if (string.IsNullOrEmpty(row.Target)) row.Target = target;
+            }
+            else
+            {
+                var row = _tableMappings.FirstOrDefault(m => string.Equals(m.Source, source, StringComparison.OrdinalIgnoreCase));
+                if (row == null) _tableMappings.Add(row = new TableMappingRow { Source = source, Target = target });
+                row.Columns = result;
+            }
+            await _tablePane.Reload();
+        }
         /// <summary>Reads both databases and offers the tables that look renamed as mappings.</summary>
         private async System.Threading.Tasks.Task DetectRenames()
         {
@@ -198,35 +275,25 @@ namespace QuillSql.Compare
 
         private UIElement OwnerMapping()
         {
-            var mappings = _project.Obj("schemaMappings") ?? new JsonObject();
+            var mappings = _project.Obj(_data ? "dataMappings" : "schemaMappings") ?? new JsonObject();
             foreach (var pair in mappings.List("schemas").OfType<List<object>>())
             {
                 if (pair.Count == 2) _ownerMappings.Add(new OwnerMappingRow { Source = pair[0] as string, Target = pair[1] as string });
             }
-            const string help = "Objects are paired with objects of the same schema. Map a schema of the source to a different schema of the target here.";
-            return MappingGrid("Owner mapping", help, _ownerMappings, new[] { ("Schema in source", "Source", 220.0), ("Schema in target", "Target", 220.0) },
-                () => _ownerMappings.Add(new OwnerMappingRow { Source = "dbo", Target = "dbo" }));
-        }
-
-        private static UIElement MappingGrid<T>(string title, string help, ObservableCollection<T> rows, (string, string, double)[] columns, Action add, UIElement extra = null)
-        {
-            var grid = new DataGrid
+            void map(string source, string target)
             {
-                ItemsSource = rows,
-                AutoGenerateColumns = false,
-                CanUserAddRows = false,
-            };
-            foreach (var (header, path, width) in columns)
-            {
-                grid.Columns.Add(new DataGridTextColumn { Header = header, Binding = new Binding(path) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = width });
+                foreach (var m in _ownerMappings.Where(m => m.Source == source || m.Target == target).ToList()) _ownerMappings.Remove(m);
+                _ownerMappings.Add(new OwnerMappingRow { Source = source, Target = target });
             }
-            var buttons = Ui.Row(
-                Ui.Button("Add", add, glyph: Glyph.Add),
-                Ui.Button("Remove", () => { if (grid.SelectedItem is T item) rows.Remove(item); }, glyph: Glyph.Delete));
-            if (extra != null) buttons.Children.Insert(0, extra);
-            return Page(title, help, grid, buttons);
+            void unmap(string source)
+            {
+                foreach (var m in _ownerMappings.Where(m => m.Source == source).ToList()) _ownerMappings.Remove(m);
+                _ownerMappings.Add(new OwnerMappingRow { Source = source, Target = "" });
+            }
+            _ownerPane = new MappingPane(false, Preview, map, unmap, () => _ownerMappings.Clear(), null);
+            const string help = "Objects pair with objects of the same owner (schema). Map an owner of the source with a different owner of the target here.";
+            return Page("Owner mapping", help, _ownerPane);
         }
-
         // ---- Tables & views (data) ----
 
         public sealed class DataTableRow
@@ -558,15 +625,15 @@ namespace QuillSql.Compare
             if (_optionBoxes.Count > 0) _project["options"] = Selected(defs);
 
             var schemaMappings = _project.Obj("schemaMappings") ?? new JsonObject();
-            schemaMappings["schemas"] = _ownerMappings.Where(m => !string.IsNullOrWhiteSpace(m.Source) && !string.IsNullOrWhiteSpace(m.Target))
-                .Select(m => (object)new List<object> { m.Source.Trim(), m.Target.Trim() }).ToList();
+            schemaMappings["schemas"] = _ownerMappings.Where(m => !string.IsNullOrWhiteSpace(m.Source))
+                .Select(m => (object)new List<object> { m.Source.Trim(), (m.Target ?? "").Trim() }).ToList();
             if (!_data)
             {
-                schemaMappings["tables"] = _tableMappings.Where(m => !string.IsNullOrWhiteSpace(m.Source) && !string.IsNullOrWhiteSpace(m.Target))
+                schemaMappings["tables"] = _tableMappings.Where(m => !string.IsNullOrWhiteSpace(m.Source))
                     .Select(m => (object)new JsonObject
                     {
                         ["source"] = ParseName(m.Source),
-                        ["target"] = ParseName(m.Target),
+                        ["target"] = ParseName(m.Target ?? ""),
                         ["columns"] = (m.Columns ?? "").Split(',').Select(p => p.Split('=')).Where(p => p.Length == 2 && p[0].Trim() != "")
                             .Select(p => (object)new List<object> { p[0].Trim().Trim('[', ']'), p[1].Trim().Trim('[', ']') }).ToList(),
                     }).ToList();
@@ -581,7 +648,7 @@ namespace QuillSql.Compare
                 {
                     var src = ParseName(r.Source);
                     var o = new JsonObject { ["source"] = src };
-                    if (!string.Equals(r.Source, r.Target, StringComparison.OrdinalIgnoreCase)) o["target"] = ParseName(r.Target);
+                    if (!string.Equals(r.Source, r.Target, StringComparison.OrdinalIgnoreCase)) o["target"] = ParseName(r.Target ?? "");
                     var keyText = (r.Key ?? "").Trim();
                     if (keyText.StartsWith("(", StringComparison.Ordinal))
                     {
@@ -605,6 +672,7 @@ namespace QuillSql.Compare
                 }
                 var dm = _project.Obj("dataMappings") ?? new JsonObject();
                 dm["tables"] = overrides;
+                dm["schemas"] = schemaMappings["schemas"];
                 _project["dataMappings"] = dm;
                 _project["deselected"] = deselected;
             }
@@ -651,7 +719,8 @@ namespace QuillSql.Compare
             header.Children.Add(names);
             Children.Add(header);
 
-            _server = new ComboBox { IsEditable = true, ItemsSource = CompareSettings.Load().RecentServers };
+            _server = new ComboBox { IsEditable = true };
+            ServerDiscovery.Attach(_server);
             _auth = new ComboBox { ItemsSource = new[] { "Windows authentication", "SQL Server authentication", "Microsoft Entra (access token)" } };
             _auth.SelectionChanged += (s, e) => { var sql = _auth.SelectedIndex == 1; _user.IsEnabled = sql; _password.IsEnabled = sql; _remember.IsEnabled = sql; };
             _user = new TextBox();

@@ -407,6 +407,13 @@ pub fn map_tables(db1: &Database, db2: &Database, o: &DataOptions, user: &DataMa
     // User table mappings displace whatever either side was paired with.
     for t in user.tables.iter().filter(|t| t.target.is_some()) {
         let want = t.target.as_ref().unwrap();
+        // An empty target leaves the table unmapped.
+        if want.name.is_empty() {
+            if let Some(i) = left.iter().position(|x| x.name == t.source) {
+                matched.retain(|&(x, _)| x != i);
+            }
+            continue;
+        }
         let (Some(i), Some(j)) = (left.iter().position(|x| x.name == t.source), right.iter().position(|x| x.name == *want)) else { continue };
         matched.retain(|&(x, y)| x != i && y != j);
         matched.push((i, j));
