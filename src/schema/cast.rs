@@ -134,6 +134,17 @@ fn capacity(t: &DataType) -> Option<i64> {
     Some(if len < 0 { i64::MAX } else { len as i64 })
 }
 
+/// Whether a type change shortens values (length or fractional seconds) and whether it drops
+/// Unicode (n-types to single-byte ones).
+pub fn losses(old: &DataType, new: &DataType) -> (bool, bool) {
+    let shorter = matches!((capacity(old), capacity(new)), (Some(o), Some(n)) if n < o)
+        || (matches!(new.name.as_str(), "time" | "datetime2" | "datetimeoffset")
+            && old.name == new.name
+            && new.scale.unwrap_or(7) < old.scale.unwrap_or(7));
+    let unicode = matches!(old.name.as_str(), "nchar" | "nvarchar" | "ntext") && matches!(new.name.as_str(), "char" | "varchar" | "text");
+    (shorter, unicode)
+}
+
 /// Warnings about data that may not survive a type change (length, Unicode, fractional seconds).
 pub fn data_loss(old: &DataType, new: &DataType) -> Vec<String> {
     let mut out = Vec::new();

@@ -693,6 +693,74 @@ impl<'a> Comparer<'a> {
         if !o.has(Opt::IgnoreDataCompression) && !(o.has(Opt::IgnoreFileGroups) && a.storage.partition_column.is_some()) {
             d.prop("Data compression", compression(&a.storage), compression(&b.storage));
         }
+        if let (Some(x), Some(y)) = (&a.xml, &b.xml) {
+            self.xml_index_props(d, x, y);
+        }
+        if let (Some(x), Some(y)) = (&a.spatial, &b.spatial) {
+            if !x.tessellation.is_empty() && !y.tessellation.is_empty() {
+                d.prop("Tessellation scheme", &x.tessellation, &y.tessellation);
+            }
+            d.prop("Spatial index type", if x.geography { "Geography" } else { "Geometry" }, if y.geography { "Geography" } else { "Geometry" });
+            d.prop("Cells per object", x.cells_per_object, y.cells_per_object);
+            let num = |v: &[String], i: usize| v.get(i).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            for (i, what) in ["X minimum", "Y minimum", "X maximum", "Y maximum"].iter().enumerate() {
+                if num(&x.bounding_box, i) != num(&y.bounding_box, i) {
+                    d.add(what, x.bounding_box.get(i).cloned(), y.bounding_box.get(i).cloned());
+                }
+            }
+            for (i, what) in ["Level 1", "Level 2", "Level 3", "Level 4"].iter().enumerate() {
+                d.opt_prop(what, x.grids.get(i).map(String::as_str), y.grids.get(i).map(String::as_str));
+            }
+        }
+    }
+
+    fn xml_index_props(&self, d: &mut Diffs, a: &XmlIndex, b: &XmlIndex) {
+        d.prop("XML index type", format!("{:?}", a.kind), format!("{:?}", b.kind));
+        d.opt_prop("Secondary type", a.secondary_type.as_deref(), b.secondary_type.as_deref());
+        let using = |x: &XmlIndex| x.using_index.as_ref().map(|n| self.key(n));
+        if using(a) != using(b) {
+            d.add("XML primary index", a.using_index.clone(), b.using_index.clone());
+        }
+        if a.kind == XmlIndexKind::SecondarySelective {
+            let path = |x: &XmlIndex| x.using_path.as_ref().map(|n| self.key(n));
+            if path(a) != path(b) {
+                d.add("XML primary selective path", a.using_path.clone(), b.using_path.clone());
+            }
+        }
+        if !matches!(a.kind, XmlIndexKind::Selective | XmlIndexKind::SecondarySelective) {
+            return;
+        }
+        for p in &a.paths {
+            match b.paths.iter().find(|q| q.id == p.id) {
+                None => d.add("Selective XML index path", Some(p.name.clone()), None),
+                Some(q) => {
+                    let same_type = p.sql == q.sql
+                        && (if p.sql {
+                            p.data_type == q.data_type
+                        } else {
+                            p.node_hint == q.node_hint
+                                && (p.node_hint
+                                    || ((p.xquery_type.is_none() || q.xquery_type.is_none() || p.xquery_type == q.xquery_type)
+                                        && (p.max_length.is_none() || q.max_length.is_none() || p.max_length == q.max_length)))
+                        });
+                    if p.path != q.path || !self.same_name(&p.name, &q.name) || p.singleton != q.singleton || !same_type {
+                        d.add("Selective XML index path", Some(p.name.clone()), Some(q.name.clone()));
+                    }
+                }
+            }
+        }
+        for q in b.paths.iter().filter(|q| !a.paths.iter().any(|p| p.id == q.id)) {
+            d.add("Selective XML index path", None, Some(q.name.clone()));
+        }
+        let ns = |x: &XmlIndex| {
+            let mut v: Vec<(String, String)> = x.namespaces.iter().map(|n| (n.prefix.clone().unwrap_or_default(), n.uri.clone())).collect();
+            v.sort();
+            v
+        };
+        if ns(a) != ns(b) {
+            let list = |x: &XmlIndex| x.namespaces.iter().map(|n| n.uri.clone()).collect::<Vec<_>>().join(", ");
+            d.add("Selective XML index namespace", Some(list(a)), Some(list(b)));
+        }
     }
 
     fn foreign_keys(&self, d: &mut Diffs, a: &Table, b: &Table, mapping: Option<&TableMapping>) {
@@ -1216,6 +1284,15 @@ fn column_props(d: &mut Diffs, a: &Column, b: &Column, o: &Options, memory_optim
         }
     }
     d.prop("ROWGUIDCOL", a.rowguidcol, b.rowguidcol);
+    if !o.has(Opt::IgnoreBindings) {
+        let key = |n: &Option<String>| n.as_ref().map(|s| if o.has(Opt::CaseSensitiveObjectDefinition) { s.clone() } else { s.to_lowercase() });
+        if key(&a.bound_default) != key(&b.bound_default) {
+            d.add("Bound default", a.bound_default.clone(), b.bound_default.clone());
+        }
+        if key(&a.bound_rule) != key(&b.bound_rule) {
+            d.add("Bound rule", a.bound_rule.clone(), b.bound_rule.clone());
+        }
+    }
     if !computed && (memory_optimized || !o.has(Opt::IgnoreCollations)) {
         d.opt_prop("Collation", a.collation.as_deref(), b.collation.as_deref());
     }

@@ -256,7 +256,7 @@ fn rebuild_keeps_data() {
     server.create("QuillTest_Reb1", &source);
     server.create("QuillTest_Reb2", &format!("{SHOP}\nGO\n{SHOP_DATA}"));
     let script = converge(&server, "QuillTest_Reb1", "QuillTest_Reb2", &Options::default_set());
-    assert!(script.sql.contains("INSERT INTO [dbo].[QS_Rebuild_Customer]"), "{}", script.sql);
+    assert!(script.sql.contains("INSERT INTO [dbo].[RG_Recovery_1_Customer]("), "{}", script.sql);
     assert!(script.sql.contains("DROP VIEW [Sales].[CustomerTotals]"), "{}", script.sql);
 
     let rt = quillsql::db::runtime().unwrap();
