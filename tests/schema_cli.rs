@@ -195,7 +195,7 @@ fn live_compare_report_project_and_deploy() {
     let out = stdout(&quill_owned(&both(&["/include:Identical", "/verbose"])));
     assert!(out.contains("==  ==") && out.contains("[dbo].[Same]"), "{out}");
     assert!(out.contains("Details - comparing") && out.contains("Table [dbo].[Customer]"), "{out}");
-    assert!(out.lines().any(|l| l.starts_with(">> ") && l.contains("nvarchar(100)")) && out.lines().any(|l| l.starts_with("<< ") && l.contains("(50)")), "{out}");
+    assert!(out.lines().any(|l| l.starts_with(">> ") && l.contains("[nvarchar] (100)")) && out.lines().any(|l| l.starts_with("<< ") && l.contains("(50)")), "{out}");
     // /quiet prints nothing after the title.
     let out = stdout(&quill_owned(&both(&["/quiet"])));
     assert!(!out.contains("Summary Information"), "{out}");
