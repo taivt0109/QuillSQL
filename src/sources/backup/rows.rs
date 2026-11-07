@@ -28,8 +28,103 @@ pub fn object_id(cat: &Catalog, schema: &str, name: &str) -> Option<i32> {
         .map(|r| r.int("id") as i32)
 }
 
+/// A graph table's pseudo column, computed from stored columns: its JSON id text.
+struct GraphId {
+    kind: &'static str,
+    /// The column holding the object id, or the object id itself.
+    object: Result<String, i64>,
+    id: String,
+}
+
+/// `node_id_from_parts(<object>, [graph_id_...])` and `edge_id_from_parts(...)` definitions.
+fn graph_id(definition: &str) -> Option<GraphId> {
+    let d = definition.trim().trim_start_matches('(').trim_end_matches(')');
+    let (kind, args) = if let Some(a) = d.strip_prefix("node_id_from_parts(") {
+        ("node", a)
+    } else {
+        let a = d.strip_prefix("edge_id_from_parts(")?;
+        ("edge", a)
+    };
+    let (a, b) = args.split_once(',')?;
+    let name = |s: &str| s.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    let object = a.trim().parse::<i64>().map_err(|_| name(a));
+    Some(GraphId { kind, object: match object { Ok(id) => Err(id), Err(n) => Ok(n) }, id: name(b) })
+}
+
 /// The values of `columns` (by name) of every row of the table.
 pub fn read(cat: &Catalog, object: i32, columns: &[(String, Want)]) -> Result<Vec<Vec<Value>>, String> {
+    // Graph pseudo columns are not stored: they are made from the columns they are defined on.
+    let definitions: HashMap<String, String> = {
+        let pars = cat.colpars.get(&object).cloned().unwrap_or_default();
+        let values = cat.system("sysobjvalues");
+        pars.iter()
+            .filter_map(|p| {
+                let v = values.iter().find(|v| v.int("valclass") == 2 && v.int("objid") == object as i64 && v.int("subobjid") == p.int("colid"))?;
+                let b = v.bytes("imageval");
+                let text = if v.int("value") & 2 != 0 { b.iter().map(|&c| c as char).collect() } else { values::utf16(&b) };
+                Some((p.str("name"), text))
+            })
+            .collect()
+    };
+    let names = object_names(cat);
+    let mut wanted: Vec<(String, Want)> = Vec::new();
+    let mut graph: Vec<Option<GraphId>> = Vec::new();
+    for (n, _) in columns {
+        let g = definitions.get(n).and_then(|d| graph_id(d));
+        if let Some(g) = &g {
+            for part in [g.object.as_ref().ok(), Some(&g.id)].into_iter().flatten() {
+                if !wanted.iter().any(|(x, _)| x == part) && !columns.iter().any(|(x, _)| x == part) {
+                    wanted.push((part.clone(), Want::Value));
+                }
+            }
+        }
+        graph.push(g);
+    }
+    let mut all: Vec<(String, Want)> = columns.iter().zip(&graph).filter(|(_, g)| g.is_none()).map(|(c, _)| c.clone()).collect();
+    all.extend(wanted);
+    let stored = read_stored(cat, object, &all)?;
+    if graph.iter().all(Option::is_none) {
+        return Ok(stored);
+    }
+    let at = |name: &str| all.iter().position(|(n, _)| n == name);
+    Ok(stored
+        .into_iter()
+        .map(|row| {
+            let mut out = Vec::with_capacity(columns.len());
+            for ((n, _), g) in columns.iter().zip(&graph) {
+                let v = match g {
+                    None => row[at(n).unwrap()].clone(),
+                    Some(g) => {
+                        let object = match &g.object {
+                            Err(id) => Some(*id),
+                            Ok(c) => match &row[at(c).unwrap()] {
+                                Value::Int(i) => Some(*i),
+                                _ => None,
+                            },
+                        };
+                        match (object.and_then(|o| names.get(&o)), &row[at(&g.id).unwrap()]) {
+                            (Some((schema, table)), Value::Int(id)) => {
+                                let json = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+                                Value::Str(format!("{{\"type\":\"{}\",\"schema\":\"{}\",\"table\":\"{}\",\"id\":{id}}}", g.kind, json(schema), json(table)))
+                            }
+                            _ => Value::Null,
+                        }
+                    }
+                };
+                out.push(v);
+            }
+            out
+        })
+        .collect())
+}
+
+/// object id → (schema, name).
+fn object_names(cat: &Catalog) -> HashMap<i64, (String, String)> {
+    let schemas: HashMap<i64, String> = cat.system("sysclsobjs").into_iter().filter(|r| r.int("class") == 50).map(|r| (r.int("id"), r.str("name"))).collect();
+    cat.table_rows(34).into_iter().map(|r| (r.int("id"), (schemas.get(&r.int("nsid")).cloned().unwrap_or_default(), r.str("name")))).collect()
+}
+
+fn read_stored(cat: &Catalog, object: i32, columns: &[(String, Want)]) -> Result<Vec<Vec<Value>>, String> {
     let mut out = Vec::new();
     let levels: HashMap<u64, i64> = cat.rowset_rows.iter().map(|r| (r.int("rowsetid") as u64, r.int("cmprlevel"))).collect();
     for (_, rowset) in cat.partitions(object) {
