@@ -350,6 +350,10 @@ FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY paramete
             }
             target = ConnectionResolver.TryGetActive();
             var details = Load(target, name);
+            if (details != null && !details.IsTable && details.Definition == null && !TryDecrypt(target, details))
+            {
+                return true;
+            }
             var script = details == null ? null : Script(details, true);
             if (script == null)
             {
@@ -359,6 +363,34 @@ FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY paramete
             EditorContext.OpenInNewQuery(script);
             EditorContext.Status("script of " + name + " opened in a new window.");
             return true;
+        }
+
+        /// <summary>
+        /// For a module created WITH ENCRYPTION: asks, then reads its definition over the dedicated
+        /// admin connection. False when the user declines or it fails (the reason is shown).
+        /// </summary>
+        private static bool TryDecrypt(ConnectionTarget target, ObjectDetails details)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var answer = System.Windows.MessageBox.Show(
+                Loc.T("The definition of " + details.FullName + " is encrypted. Decrypt it? QuillSQL reads it over the dedicated admin connection (DAC), which needs a sysadmin login; nothing is changed on the server."),
+                "QuillSQL", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Question);
+            if (answer != System.Windows.MessageBoxResult.Yes)
+            {
+                return false;
+            }
+            try
+            {
+                details.Definition = Decryptor.Decrypt(target, details.FullName);
+                Log.Write("decrypted the definition of " + details.FullName);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("decrypting " + details.FullName, ex);
+                System.Windows.MessageBox.Show(Loc.T("The definition could not be decrypted: " + ex.Message), "QuillSQL", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+                return false;
+            }
         }
 
         /// <summary>Replaces `ALTER PROCEDURE name` (from `start` to `end`) with the object's ALTER script.</summary>

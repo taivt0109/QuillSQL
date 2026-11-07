@@ -22,6 +22,19 @@ namespace QuillSql.Vsix
         /// </summary>
         public Func<string> AccessToken { get; set; }
 
+        /// <summary>The same server and login, in another database of the server.</summary>
+        public ConnectionTarget ForDatabase(string database)
+        {
+            var builder = new SqlConnectionStringBuilder(ConnectionString) { InitialCatalog = database };
+            var parts = (Key ?? "").Split('|');
+            if (parts.Length > 1)
+            {
+                parts[1] = database;
+            }
+            var server = Description?.Split(new[] { " / " }, StringSplitOptions.None)[0];
+            return new ConnectionTarget { Key = string.Join("|", parts), ConnectionString = builder.ConnectionString, Description = server + " / " + database, AccessToken = AccessToken };
+        }
+
         /// <summary>False for logins QuillSQL cannot open a connection with.</summary>
         public bool CanQuery => ConnectionString != null;
 

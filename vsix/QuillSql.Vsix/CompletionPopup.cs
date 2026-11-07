@@ -96,6 +96,8 @@ namespace QuillSql.Vsix
 
         public IEnumerable<string> Labels => _list.Items.Cast<Row>().Select(r => r.Item.Label);
 
+        public IEnumerable<CompletionItem> Items => _list.Items.Cast<Row>().Select(r => r.Item);
+
         /// <summary>A row: colored kind badge, the name, then the detail dimmed at the right.</summary>
         private static DataTemplate BuildTemplate()
         {
@@ -221,6 +223,10 @@ namespace QuillSql.Vsix
                         case "join": case "join_guess": return "⋈";
                         case "body": return "…";
                         case "parameter": return "@";
+                        case "picker": return "☑";
+                        case "type": return "Ty";
+                        case "database": return "DB";
+                        case "server": return "LS";
                         default: return "K";
                     }
                 }
@@ -234,12 +240,12 @@ namespace QuillSql.Vsix
                     {
                         case "table": case "table_function": case "cte": case "synonym": return Table;
                         case "view": return View;
-                        case "column": return Column;
+                        case "column": case "picker": return Column;
                         case "procedure": case "function": return Routine;
                         case "variable": case "global_variable": case "parameter": return Variable;
                         case "snippet": case "body": return Snippet;
                         case "join": case "join_guess": return Join;
-                        case "schema": case "alias": return Name;
+                        case "schema": case "alias": case "database": case "server": case "type": return Name;
                         default: return Keyword;
                     }
                 }

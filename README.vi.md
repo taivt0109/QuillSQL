@@ -149,11 +149,18 @@ Khi gõ, danh sách gợi ý hiện ra:
 - procedure sau `EXEC`; object sau `schema.`;
 - cột sau `alias.` hoặc `table.`;
 - cột của mọi bảng trong câu lệnh, khi gõ trong `SELECT`, `WHERE` và `ON`. Tên cột có ở hai bảng sẽ được chèn kèm alias;
-- cột trong `INSERT INTO t (`; biến đã khai báo trong script sau `@`.
+- cột trong `INSERT INTO t (`; biến đã khai báo trong script sau `@`;
+- cột của bảng tạm và biến bảng mà script tạo ra (`CREATE TABLE #t`, `DECLARE @t TABLE`, `SELECT ... INTO #t`);
+- object của database khác trên cùng server sau `OtherDb.` và `OtherDb.dbo.`, kèm cột; linked server sau `FROM`;
+- chỉ những từ có thể đứng tiếp theo: sau `c.Name ` là toán tử và mệnh đề (AND, LIKE, IS, ORDER BY...), sau `INNER` là JOIN, sau `IS` là NULL, sau `ORDER BY c.Name ` là ASC và DESC, kiểu dữ liệu sau `CAST(x AS` và `DECLARE @x`, table hint trong `WITH (`, query hint trong `OPTION (`, và các câu lệnh ở đầu một câu lệnh;
+- trong DDL và phân quyền: những gì theo sau `ALTER TABLE t`, cột của bảng sau `ALTER COLUMN`, trong `CREATE INDEX ... ON t (` và `INCLUDE (`, tùy chọn cột trong `CREATE TABLE`, object sau `GRANT ... ON`; `WHEN MATCHED THEN` và các hành động trong MERGE;
+- sau `EXEC name a, `: các tham số chưa truyền.
+
+Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
 
 Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách. Bên cạnh danh sách có ô hiện định nghĩa của bảng, view hoặc procedure đang chọn. Phím nào dùng để chèn (Tab, Enter, Space, `.`, `,`, `(`) do bạn chọn trong Options.
 
-Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Sau khi sửa schema, chạy **Tools > QuillSQL > Refresh T-SQL Suggestions** để nạp lại.
+Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** nạp lại toàn bộ.
 
 Danh sách còn viết code giúp bạn:
 
@@ -164,6 +171,12 @@ Danh sách còn viết code giúp bạn:
 - **Sau `EXEC`:** procedure kèm đủ tham số, mỗi tham số một dòng có ghi kiểu dữ liệu.
 - **Sau `INSERT INTO table `:** danh sách cột và một dòng `VALUES` có sẵn chỗ điền cho từng cột.
 - **Sau `UPDATE table SET `:** tất cả các cột. Cột identity, computed và rowversion được bỏ qua.
+- **Trong danh sách SELECT:** mục **(choose columns…)** mở danh sách checkbox để chèn nhiều cột một lúc.
+- **Alias:** bỏ qua tiền tố như `tbl` (`tblCustomer AS c`), hoặc dùng alias riêng cho từng bảng; cả hai chỉnh trong Options.
+
+Khi gõ đối số của hàm hoặc procedure, một tooltip phía trên dòng hiện các tham số, tham số hiện tại in đậm (Esc để đóng).
+
+F12 trên procedure, view hoặc function tạo bằng `WITH ENCRYPTION` sẽ hỏi có giải mã không. QuillSQL đọc định nghĩa qua kết nối quản trị riêng (DAC): cần login sysadmin, và nếu SSMS chạy trên máy khác thì server phải bật "remote admin connections". Không có gì bị thay đổi trên server. SQL Server Express và LocalDB mặc định không bật DAC.
 
 Khi gõ, `'`, `[` và `/*` được tự đóng (cả `(` nếu bạn bật); gõ ký tự đóng thì con trỏ chỉ nhảy qua nó.
 
@@ -266,7 +279,7 @@ Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ 
 
 ### Nhận biết nhanh
 
-- **Tô màu tab:** cửa sổ query kết nối tới server bạn đánh dấu sẽ có tab và thanh trên đầu editor được tô màu. Chuột phải vào server hoặc database trong Object Explorer, chọn **QuillSQL: Màu tab...** (hoặc **Màu tab cho kết nối này...** trong menu QuillSQL), chọn Production, Staging, UAT, Development, Test hoặc màu bất kỳ, áp cho riêng database đó hoặc mọi database trên server. Options > Tab colors còn tô màu theo một từ trong tên server, và có nút thêm sẵn các môi trường thường dùng. Các quy tắc lưu trong `%USERPROFILE%\.quillsql-colors.json`:
+- **Tô màu tab:** cửa sổ query kết nối tới server bạn đánh dấu sẽ có tab được tô màu. Chuột phải vào server hoặc database trong Object Explorer, chọn **QuillSQL: Màu tab...** (hoặc **Màu tab cho kết nối này...** trong menu QuillSQL), chọn Production, Staging, UAT, Development, Test hoặc màu bất kỳ, áp cho riêng database đó hoặc mọi database trên server. Options > Tab colors còn tô màu theo một từ trong tên server, và có nút thêm sẵn các môi trường thường dùng. Các quy tắc lưu trong `%USERPROFILE%\.quillsql-colors.json`:
 
   ```json
   [{ "match": "prod", "color": "#C62828", "label": "PRODUCTION" },
@@ -346,7 +359,7 @@ Muốn tùy chỉnh chi tiết hơn thì dùng **style theo nhóm**: các thiế
 | Đường dẫn | Công dụng |
 |---|---|
 | `%USERPROFILE%\.quillsql.json` | Tùy chọn format |
-| `%USERPROFILE%\.quillsql-colors.json` | Màu tab và thanh màu theo server |
+| `%USERPROFILE%\.quillsql-colors.json` | Màu tab theo server |
 | `%LOCALAPPDATA%\QuillSQL\settings.json` | Mọi thiết lập trong cửa sổ Options |
 | `%LOCALAPPDATA%\QuillSQL\ai.json` | Model AI và ngôn ngữ trả lời |
 | `%LOCALAPPDATA%\QuillSQL\Snippets\` | Snippet của bạn |

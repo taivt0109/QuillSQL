@@ -11,6 +11,7 @@ pub mod plan;
 pub mod refactor;
 pub mod snippets;
 pub mod script;
+pub mod signature;
 pub mod style;
 pub mod tools;
 pub mod transform;

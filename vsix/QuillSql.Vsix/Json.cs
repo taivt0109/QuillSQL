@@ -80,6 +80,23 @@ namespace QuillSql.Vsix
     }
 
     [DataContract]
+    internal sealed class SignatureReply
+    {
+        [DataMember(Name = "error")] public string Error { get; set; }
+        [DataMember(Name = "result")] public SignatureResult Result { get; set; }
+    }
+
+    /// <summary>The function or procedure whose arguments the caret is in.</summary>
+    [DataContract]
+    internal sealed class SignatureResult
+    {
+        [DataMember(Name = "name")] public string Name { get; set; }
+        [DataMember(Name = "params")] public string[] Params { get; set; }
+        [DataMember(Name = "active")] public int Active { get; set; }
+        [DataMember(Name = "returns")] public string Returns { get; set; }
+    }
+
+    [DataContract]
     internal sealed class ErrorOnlyReply
     {
         [DataMember(Name = "error")] public string Error { get; set; }

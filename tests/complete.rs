@@ -29,7 +29,7 @@ fn run(sql: &str) -> quillsql::complete::Completion {
 
 /// `|` marks the caret.
 fn labels(sql: &str) -> Vec<String> {
-    run(sql).items.into_iter().map(|i| i.label).collect()
+    run(sql).items.into_iter().filter(|i| i.kind != "picker").map(|i| i.label).collect()
 }
 
 fn inserts(sql: &str) -> Vec<String> {
@@ -252,7 +252,7 @@ fn nothing_for_go_alone_on_its_line() {
     assert!(labels("select 1\n  go|\nselect 2").is_empty());
     assert!(labels("GO|").is_empty());
     // Inside a statement it is the start of a word, such as GROUP.
-    assert!(labels("select 1\nGRO|").iter().any(|l| l == "GROUP BY" || l.starts_with("GROUP")));
+    assert!(labels("select * from dbo.Customers c\nGRO|").iter().any(|l| l == "GROUP BY" || l.starts_with("GROUP")));
 }
 #[test]
 fn a_whole_word_typed_in_another_case_comes_first() {
@@ -284,4 +284,203 @@ fn only_sure_matches_are_selected() {
     assert_eq!(run("sel|").selected, Some(0));
     // Something that only appears inside other words selects nothing.
     assert_eq!(run("select * from dbo.Customers c where c.Name = 'x' and c.ame|").selected, None);
+}
+fn first(sql: &str) -> Option<String> {
+    let r = run(sql);
+    r.selected.map(|i| r.items[i].label.clone())
+}
+
+#[test]
+fn after_a_complete_operand_come_operators_and_clauses() {
+    assert_eq!(first("select * from dbo.Customers c order by c.Name de|").as_deref(), Some("DESC"));
+    assert_eq!(first("select * from dbo.Customers c where c.Name l|").as_deref(), Some("LIKE"));
+    assert_eq!(first("select * from dbo.Customers c where c.Name is n|").as_deref(), Some("NULL"));
+    assert_eq!(first("select * from dbo.Customers c where c.CustomerId = 1 gr|").as_deref(), Some("GROUP BY"));
+    assert_eq!(first("select * from dbo.Customers c where c.CustomerId = 1 an|").as_deref(), Some("AND"));
+    let l = labels("select * from dbo.Customers c where c.Name = 'x' |");
+    assert_eq!(&l[..2], ["AND", "OR"], "{l:?}");
+    assert!(!l.contains(&"CustomerId".into()) && !l.iter().any(|x| x == "ABS"), "{l:?}");
+    // A function's arguments, the select list after TOP, and a new condition still get columns.
+    assert!(labels("select count(c.Name |) from dbo.Customers c").contains(&"Name".into()));
+    assert!(labels("select * from dbo.Customers c where (c.Name = 'x' |").starts_with(&["AND".into(), "OR".into()]));
+    assert!(labels("select top 10 | from dbo.Customers c").contains(&"Name".into()));
+    assert!(labels("select * from dbo.Customers c where c.Name = 'x' and |").contains(&"Name".into()));
+}
+
+#[test]
+fn words_that_must_follow_a_keyword() {
+    assert_eq!(labels("select * from dbo.Customers c inner |"), ["JOIN"]);
+    assert_eq!(labels("select * from dbo.Customers c left |"), ["JOIN", "OUTER JOIN"]);
+    assert_eq!(labels("select * from dbo.Customers c where c.Name is |"), ["NULL", "NOT NULL"]);
+    assert_eq!(labels("select * from dbo.Customers c order |"), ["BY"]);
+    assert_eq!(labels("insert |"), ["INTO"]);
+    assert_eq!(labels("select * from dbo.Customers c union |"), ["ALL", "SELECT"]);
+    assert_eq!(labels("select * from dbo.Customers c where exists (|"), ["SELECT"]);
+    assert_eq!(labels("select row_number() over (|"), ["PARTITION BY", "ORDER BY"]);
+    assert!(labels("create |").starts_with(&["TABLE".into(), "PROCEDURE".into()]));
+    assert!(labels("drop |").contains(&"VIEW".into()));
+    assert!(labels("select * from dbo.Customers c with (|").starts_with(&["NOLOCK".into()]));
+    assert!(labels("select * from dbo.Customers c option (|").starts_with(&["RECOMPILE".into()]));
+    assert!(labels("select top |").is_empty());
+    assert_eq!(labels("insert into dbo.Customers (Name) |")[0], "VALUES");
+}
+
+#[test]
+fn data_types_where_a_type_comes_next() {
+    assert_eq!(labels("select cast(1 as |")[0], "INT");
+    assert_eq!(first("declare @x nv|").as_deref(), Some("NVARCHAR"));
+    assert!(labels("create table t (Id |").contains(&"INT".into()));
+    assert!(labels("create procedure p @Id |").contains(&"INT".into()));
+}
+
+#[test]
+fn statement_keywords_where_a_statement_starts() {
+    assert_eq!(labels("|")[0], "SELECT");
+    assert!(labels("begin tran\n|").contains(&"UPDATE".into()));
+    assert!(!labels("|").iter().any(|l| l == "ABS"));
+    let set = labels("declare @x int; set |");
+    assert!(set.contains(&"@x".into()) && set.contains(&"NOCOUNT ON".into()), "{set:?}");
+}
+
+#[test]
+fn tables_after_insert_into_and_schemas_after_the_database() {
+    assert!(labels("insert into |").contains(&"Customers".into()));
+    assert_eq!(labels("select * from Shop.|"), ["dbo", "sales"]);
+    assert!(labels("delete dbo.Customers where |").contains(&"Name".into()));
+}
+
+#[test]
+fn the_functions_most_called_come_first() {
+    assert_eq!(labels("select co|")[0], "COUNT");
+    assert_eq!(labels("select su|")[0], "SUM");
+}
+
+#[test]
+fn temporary_tables_and_table_variables_have_their_columns() {
+    let script = "create table #t (Id int not null, Code varchar(10), constraint pk primary key (Id));\n";
+    let l = labels(&format!("{script}select * from #t t where t.|"));
+    assert_eq!(l, ["Code", "Id"]);
+    assert!(labels(&format!("{script}select * from #|")).contains(&"#t".into()));
+    // Still being typed, with no closing parenthesis.
+    for partial in ["create table #t (Id int, |", "create table #t (|", "create table #t (Id |", "declare @t table (Id int, Code varchar(|"] {
+        let _ = labels(partial);
+    }
+    let l = labels("declare @t table (Id int, Total money); select * from @t x where x.|");
+    assert_eq!(l, ["Id", "Total"]);
+    let l = labels("select c.CustomerId, c.Name into #c from dbo.Customers c; select * from #c x where x.|");
+    assert_eq!(l, ["CustomerId", "Name"]);
+    let l = labels("select * into #all from dbo.Customers; select * from #all a where a.|");
+    assert!(l.contains(&"CustomerId".into()) && l.contains(&"Name".into()), "{l:?}");
+}
+
+#[test]
+fn exec_goes_on_with_the_parameters_not_yet_given() {
+    let s: Schema = serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo", "schemas": ["dbo"],
+        "objects": [{"schema": "dbo", "name": "p", "kind": "procedure", "params": [
+            {"name": "@A", "type": "int"}, {"name": "@B", "type": "date"}, {"name": "@C", "type": "bit"}]}]
+    })).unwrap();
+    let text = "exec dbo.p @A = 1, ";
+    let l: Vec<String> = complete(text, text.len(), Some(&s)).items.into_iter().map(|i| i.label).collect();
+    assert_eq!(l, ["@B", "@C"]);
+}
+
+#[test]
+fn ddl_permissions_and_merge() {
+    assert!(labels("alter table dbo.Customers |").starts_with(&["ADD".into(), "ALTER COLUMN".into()]));
+    assert_eq!(labels("alter table dbo.Customers alter column |"), ["CustomerId", "Name", "Order"]);
+    assert_eq!(labels("alter table dbo.Customers drop column |"), ["CustomerId", "Name", "Order"]);
+    assert!(labels("alter table sales.Orders add constraint fk foreign key (CustomerId) |").contains(&"REFERENCES".into()));
+    assert!(labels("alter table sales.Orders add constraint fk foreign key (CustomerId) references |").contains(&"Customers".into()));
+    assert_eq!(labels("alter table sales.Orders add constraint fk foreign key (CustomerId) references dbo.Customers (|"), ["CustomerId", "Name", "Order"]);
+    assert!(labels("create index ix on |").contains(&"Customers".into()));
+    assert_eq!(labels("create index ix on dbo.Customers (|"), ["CustomerId", "Name", "Order"]);
+    assert_eq!(labels("create index ix on dbo.Customers (Name, |"), ["CustomerId", "Name", "Order"]);
+    assert_eq!(labels("create index ix on dbo.Customers (Name) include (|"), ["CustomerId", "Name", "Order"]);
+    assert!(labels("create index ix on dbo.Customers (Name) |").contains(&"INCLUDE".into()));
+    assert!(labels("create table t (Id int |").starts_with(&["NOT NULL".into()]));
+    assert_eq!(labels("create table t (Id int not |"), ["NULL"]);
+    assert!(labels("create table t (Id |").contains(&"INT".into()));
+    assert!(labels("grant |").starts_with(&["SELECT".into()]));
+    let on = labels("grant select on |");
+    assert!(on.contains(&"Customers".into()) && on.contains(&"usp_GetOrders".into()), "{on:?}");
+    assert!(labels("grant select on dbo.Customers |").contains(&"TO".into()));
+    assert!(labels("merge dbo.Customers as t using sales.Orders as s on s.CustomerId = t.CustomerId |").starts_with(&["WHEN MATCHED THEN".into()]));
+    assert_eq!(labels("merge dbo.Customers as t using sales.Orders as s on s.CustomerId = t.CustomerId when |")[0], "MATCHED");
+    assert!(labels("merge t using s on 1 = 1 when matched then |").contains(&"UPDATE SET".into()));
+    assert!(labels("drop table |").contains(&"IF EXISTS".into()));
+    assert!(labels("drop table if exists |").contains(&"Customers".into()));
+}
+
+#[test]
+fn procedures_are_not_offered_in_an_expression() {
+    let l = labels("select dbo.|");
+    assert!(l.contains(&"fn_Tax".into()) && !l.contains(&"usp_GetOrders".into()), "{l:?}");
+}
+
+#[test]
+fn generated_aliases_leave_out_prefixes_or_use_your_own() {
+    let s: Schema = serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo", "schemas": ["dbo"],
+        "objects": [{"schema": "dbo", "name": "tblCustomer", "kind": "table"}, {"schema": "dbo", "name": "OrderLine", "kind": "table"}]
+    })).unwrap();
+    let inserts = |text: &str, options: quillsql::complete::CompleteOptions| -> Vec<String> {
+        quillsql::complete::complete_full(text, text.len(), Some(&s), &[], options).items.into_iter().map(|i| i.insert).collect()
+    };
+    let defaults = quillsql::complete::CompleteOptions::default();
+    assert!(inserts("select * from tblC", defaults.clone()).contains(&"dbo.tblCustomer AS c".into()));
+    let mut own = defaults;
+    own.aliases.insert("OrderLine".into(), "lines".into());
+    assert!(inserts("select * from Ord", own).contains(&"dbo.OrderLine AS lines".into()));
+}
+
+#[test]
+fn other_databases_named_in_the_script() {
+    let other: Schema = serde_json::from_value(json!({
+        "database": "Archive", "defaultSchema": "dbo", "schemas": ["dbo", "hist"],
+        "objects": [{"schema": "hist", "name": "OldOrders", "kind": "table", "columns": [{"name": "OldId", "type": "int"}]}]
+    })).unwrap();
+    let here = schema();
+    let run = |sql: &str| -> Vec<String> {
+        let caret = sql.find('|').unwrap();
+        let text = sql.replace('|', "");
+        quillsql::complete::complete_across(&text, caret, Some(&here), &[&other], &[], Default::default()).items.into_iter().map(|i| i.label).collect()
+    };
+    assert_eq!(run("select * from Archive.|"), ["dbo", "hist"]);
+    assert_eq!(run("select * from Archive.hist.|"), ["OldOrders"]);
+    assert_eq!(run("select * from Archive.hist.OldOrders o where o.|"), ["OldId"]);
+    // Its tables are not offered without the database.
+    assert!(!run("select * from |").contains(&"OldOrders".into()));
+    assert!(run("select * from |").contains(&"master".into()));
+}
+
+#[test]
+fn the_column_picker_opens_a_select_list() {
+    let kinds = |sql: &str| run(sql).items.into_iter().map(|i| i.kind).collect::<Vec<_>>();
+    assert_eq!(kinds("select | from dbo.Customers c")[0], "picker");
+    assert_eq!(kinds("select c.| from dbo.Customers c")[0], "picker");
+    assert!(!kinds("select * from dbo.Customers c where |").contains(&"picker"));
+    assert!(!kinds("select c.Na| from dbo.Customers c").contains(&"picker"));
+}
+
+#[test]
+fn the_shortest_name_that_starts_with_the_letters_comes_first() {
+    let mut s = schema();
+    let more: Schema = serde_json::from_value(json!({"objects": [
+        {"schema": "sys", "name": "table_types", "kind": "view", "columns": [{"name": "name", "type": "sysname"}]},
+        {"schema": "sys", "name": "tables", "kind": "view", "columns": [{"name": "name", "type": "sysname"}]}
+    ]}))
+    .unwrap();
+    s.objects.extend(more.objects);
+    let text = "select * from sys.tabl";
+    let l: Vec<String> = complete(text, text.len(), Some(&s)).items.into_iter().map(|i| i.label).collect();
+    assert_eq!(l.first().map(String::as_str), Some("tables"), "{l:?}");
+}
+
+#[test]
+fn a_parameter_given_by_name_is_not_offered_again_nor_taken_for_a_variable() {
+    let l = labels("exec dbo.usp_GetOrders @CustomerId = 1, @|");
+    assert!(!l.contains(&"@CustomerId".into()), "{l:?}");
+    let l = labels("declare @CustomerId int = 1;\nexec dbo.usp_GetOrders @CustomerId = @|");
+    assert!(l.contains(&"@CustomerId".into()), "{l:?}");
 }

@@ -141,13 +141,31 @@ As you type, a list offers:
 - procedures after `EXEC`, objects after `schema.`;
 - columns after `alias.` or `table.`, and the columns of every table in the statement inside
   `SELECT`, `WHERE` and `ON` (a name found in two tables is inserted with its alias);
-- columns inside `INSERT INTO t (`, and the variables declared in the script after `@`.
+- columns inside `INSERT INTO t (`, and the variables declared in the script after `@`;
+- the columns of temporary tables and table variables the script defines (`CREATE TABLE #t`,
+  `DECLARE @t TABLE`, `SELECT ... INTO #t`);
+- objects of another database of the server after `OtherDb.` and `OtherDb.dbo.`, with their
+  columns; linked servers after `FROM`;
+- only the words that can come next: after `c.Name ` the operators and clauses (AND, LIKE, IS,
+  ORDER BY...), after `INNER` JOIN, after `IS` NULL, after `ORDER BY c.Name ` ASC and DESC, data types
+  after `CAST(x AS` and `DECLARE @x`, table hints in `WITH (`, query hints in `OPTION (`, and the
+  statements where one starts;
+- in DDL and permissions: what follows `ALTER TABLE t`, the table's columns after `ALTER COLUMN`,
+  in `CREATE INDEX ... ON t (` and `INCLUDE (`, column options in `CREATE TABLE`, objects after
+  `GRANT ... ON`; `WHEN MATCHED THEN` and its actions in MERGE;
+- after `EXEC name a, `, the parameters not given yet.
+
+The first item is selected only when what you typed matches it for sure: the whole word, its start,
+or the initials of its parts (`cid` for CustomerId). Otherwise nothing is selected and Enter and
+Tab keep their usual meaning. The item picked for some letters is selected first the next time.
 
 Up/Down moves, Enter or Tab inserts, Esc closes, Ctrl+Space opens the list. Next to the list, a
 box shows the definition of the selected table, view or procedure. Which keys insert (Tab, Enter,
 Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
-background the first time a database is used and follows `USE`; **Tools > QuillSQL > Refresh T-SQL
-Suggestions** reloads it after schema changes.
+background the first time a database is used and follows `USE`. When tables, columns or other
+objects change, by you or anyone else, it reloads by itself: a light check runs at most once a
+minute while you type, and at once on Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions**
+reloads everything.
 
 The list also writes code:
 
@@ -159,7 +177,19 @@ The list also writes code:
 - built-in and scalar functions with their parentheses, the caret inside: `GETDATE()`;
 - after `EXEC`, the procedure with all its parameters, one per line with its type;
 - after `INSERT INTO table `, the column list and a `VALUES` row with a placeholder per column;
-  after `UPDATE table SET `, every column (identity, computed and rowversion columns are skipped).
+  after `UPDATE table SET `, every column (identity, computed and rowversion columns are skipped);
+- in a select list, **(choose columns…)** opens a list of check boxes to insert several columns at
+  once;
+- aliases leave out prefixes such as `tbl` (`tblCustomer AS c`), or use your own per table; both are
+  set in Options.
+
+While you type the arguments of a function or procedure, a tip above the line shows its
+parameters, the current one in bold (Esc closes it).
+
+F12 on a procedure, view or function created `WITH ENCRYPTION` offers to decrypt it. QuillSQL then
+reads the definition over the dedicated admin connection (DAC), which needs a sysadmin login and,
+when SSMS runs on another computer, "remote admin connections" turned on; nothing is changed on
+the server. SQL Server Express and LocalDB start without the DAC.
 
 While you type, `'`, `[` and `/*` are closed for you (and `(` if you turn it on); typing the
 closing character moves over it.
@@ -278,8 +308,8 @@ step. Optional settings in
 
 ### Safety at a glance
 
-- **Colored tabs**: query windows connected to servers you mark get a colored document tab and a
-  colored bar above the editor. Right-click a server or a database in Object Explorer and choose
+- **Colored tabs**: query windows connected to servers you mark get a colored document tab.
+  Right-click a server or a database in Object Explorer and choose
   **QuillSQL: Tab Color...** (or use **Tab Color for This Connection...** in the QuillSQL menu),
   pick Production, Staging, UAT, Development, Test or any color, for that database or for every
   database on the server. Options > Tab colors also colors servers by a word in their name, and

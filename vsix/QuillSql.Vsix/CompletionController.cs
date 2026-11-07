@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.VisualStudio;
@@ -26,13 +27,22 @@ namespace QuillSql.Vsix
             "FROM", "JOIN", "EXEC", "EXECUTE", "INTO", "UPDATE", "APPLY", "USING", "TABLE",
             // ...and columns, aliases and functions in conditions, lists and expressions.
             "SELECT", "WHERE", "AND", "OR", "NOT", "ON", "BY", "HAVING", "SET", "CASE", "WHEN", "THEN", "ELSE", "DISTINCT",
+            // ...and the words that must follow these.
+            "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "IS", "ORDER", "GROUP", "PARTITION", "CREATE", "ALTER", "DROP",
+            "INSERT", "UNION", "BEGIN", "COMMIT", "ROLLBACK",
         };
+
+        /// <summary>Words after which an opening parenthesis opens the suggestions: hints, OVER and EXISTS.</summary>
+        private static readonly string[] TriggerAfterParenthesis = { "WITH", "OPTION", "OVER", "EXISTS" };
 
         /// <summary>Characters after which a space opens the suggestions: comparisons and lists.</summary>
         private const string TriggerAfterSpaceSymbols = "=<>,(+-*/";
 
         private readonly IVsTextView _view;
         private readonly CompletionPopup _popup = new CompletionPopup();
+        private readonly SignatureTip _signature = new SignatureTip();
+        private int _signatureVersion;
+        private readonly int[] _firstVisible = { -1, -1 };
         private IOleCommandTarget _next;
         private IConnectionPoint _events;
         private uint _eventsCookie;
@@ -69,6 +79,7 @@ namespace QuillSql.Vsix
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             _popup.Close();
+            _signature.Close();
             _view.RemoveCommandFilter(this);
             _events?.Unadvise(_eventsCookie);
         }
@@ -183,6 +194,11 @@ namespace QuillSql.Vsix
                     CardPopup.Close();
                     return VSConstants.S_OK;
                 }
+                if (std2k && command == VSConstants.VSStd2KCmdID.CANCEL && _signature.IsOpen)
+                {
+                    _signature.Close();
+                    return VSConstants.S_OK;
+                }
                 if (std2k && (command == VSConstants.VSStd2KCmdID.COMPLETEWORD || command == VSConstants.VSStd2KCmdID.SHOWMEMBERLIST))
                 {
                     Trigger(true);
@@ -228,10 +244,19 @@ namespace QuillSql.Vsix
                         InsertClosing(closing);
                     }
                     OnTyped(typed);
+                    if (typed == '(' || typed == ',' || _signature.IsOpen || (typed == ' ' && LineStartsWithExec()))
+                    {
+                        UpdateSignature();
+                    }
                 }
                 else if (std2k && _popup.IsOpen && (command == VSConstants.VSStd2KCmdID.BACKSPACE || command == VSConstants.VSStd2KCmdID.DELETE))
                 {
                     Trigger(false);
+                }
+                if (std2k && _signature.IsOpen && typed == '\0' && (command == VSConstants.VSStd2KCmdID.BACKSPACE || command == VSConstants.VSStd2KCmdID.DELETE
+                    || command == VSConstants.VSStd2KCmdID.LEFT || command == VSConstants.VSStd2KCmdID.RIGHT))
+                {
+                    UpdateSignature();
                 }
             }
             catch (Exception ex)
@@ -394,14 +419,22 @@ namespace QuillSql.Vsix
                 return;
             }
             _popup.Close();
-            if (c == ' ' && TryGetText(out var text, out var caret))
+            if ((c == ' ' || c == '(') && TryGetText(out var text, out var caret))
             {
-                var before = text.Substring(0, caret).TrimEnd();
+                var before = text.Substring(0, caret);
+                if (c == '(')
+                {
+                    // The caret is after the "(" typed, or between it and the ")" inserted with it.
+                    var open = before.LastIndexOf('(');
+                    before = open < 0 ? "" : before.Substring(0, open);
+                }
+                before = before.TrimEnd();
                 var word = new string(before.Reverse().TakeWhile(char.IsLetter).Reverse().ToArray());
                 var last = before.Length == 0 ? '\0' : before[before.Length - 1];
                 // A word only counts when it stands alone: "brand" does not end with the keyword AND.
                 var alone = word.Length == before.Length || !IsWordChar(before[before.Length - word.Length - 1]);
-                if ((alone && TriggerAfterSpace.Contains(word, StringComparer.OrdinalIgnoreCase)) || (word.Length == 0 && TriggerAfterSpaceSymbols.IndexOf(last) >= 0))
+                var words = c == ' ' ? TriggerAfterSpace : TriggerAfterParenthesis;
+                if ((alone && words.Contains(word, StringComparer.OrdinalIgnoreCase)) || (c == ' ' && word.Length == 0 && TriggerAfterSpaceSymbols.IndexOf(last) >= 0))
                 {
                     Trigger(false);
                 }
@@ -434,9 +467,11 @@ namespace QuillSql.Vsix
             var target = ConnectionResolver.TryGetActive();
             if (target != null)
             {
-                MetadataCache.EnsureLoaded(target);
+                // Ctrl+Space also checks at once whether the objects changed since they were read.
+                MetadataCache.EnsureLoaded(target, explicitRequest);
             }
             var key = target?.Key ?? "";
+            var others = string.Join(",", OtherDatabases(target, text).Select(Json.Str));
             var version = ++_version;
             ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
             {
@@ -449,7 +484,7 @@ namespace QuillSql.Vsix
                         return;
                     }
                     var reply = EngineProcess.Shared.Request("complete",
-                        "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + caret + ",\"options\":" + Settings.Current.CompletionOptionsJson());
+                        "\"key\":" + Json.Str(key) + ",\"others\":[" + others + "],\"text\":" + Json.Str(text) + ",\"caret\":" + caret + ",\"options\":" + Settings.Current.CompletionOptionsJson());
                     var parsed = reply == null ? null : Json.Parse<CompletionReply>(reply);
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     if (version != _version)
@@ -467,6 +502,37 @@ namespace QuillSql.Vsix
                     Log.Error("completion", ex);
                 }
             }).FileAndForget("QuillSQL/Completion");
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex Qualifier =
+            new System.Text.RegularExpressions.Regex(@"(?:\[([^\]\r\n]+)\]|\b([A-Za-z_][\w@$#]*))\s*\.", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>
+        /// The keys of other databases of the server that the script names (`Archive.dbo.t`), loading
+        /// their metadata the first time; those not loaded yet are left out until they are.
+        /// </summary>
+        private static IEnumerable<string> OtherDatabases(ConnectionTarget target, string text)
+        {
+            if (target == null || !target.CanQuery || !MetadataLoader.Databases.TryGetValue(target.Key, out var databases))
+            {
+                return Enumerable.Empty<string>();
+            }
+            var current = (target.Key.Split('|').ElementAtOrDefault(1) ?? "");
+            var named = Qualifier.Matches(text).Cast<System.Text.RegularExpressions.Match>()
+                .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(n => !string.Equals(n, current, StringComparison.OrdinalIgnoreCase) && databases.Contains(n, StringComparer.OrdinalIgnoreCase))
+                .Take(5);
+            var keys = new List<string>();
+            foreach (var name in named)
+            {
+                var other = target.ForDatabase(databases.First(d => string.Equals(d, name, StringComparison.OrdinalIgnoreCase)));
+                if (MetadataCache.EnsureLoaded(other))
+                {
+                    keys.Add(other.Key);
+                }
+            }
+            return keys;
         }
 
         private void Show(CompletionResult result, int caret, bool explicitRequest)
@@ -515,12 +581,27 @@ namespace QuillSql.Vsix
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var item = _popup.Selected;
+            var listed = _popup.Items.ToList();
             _popup.Close();
             if (item == null || !TryGetText(out var before, out var caret) || caret < _replaceStart)
             {
                 return;
             }
-            Picks.Remember(before.Substring(_replaceStart, caret - _replaceStart), item.Insert);
+            if (item.Kind == "picker")
+            {
+                // Check the columns to insert; after `c.` each one gets the same qualifier.
+                var chosen = ColumnPicker.Pick(listed.Where(i => i.Kind == "column").ToList());
+                if (chosen == null)
+                {
+                    return;
+                }
+                var qualifier = System.Text.RegularExpressions.Regex.Match(before.Substring(0, _replaceStart), @"(?:(?:\[[^\]]+\]|[\w@#$]+)\.)+$").Value;
+                item = new CompletionItem { Label = item.Label, Kind = "column", Insert = string.Join(", " + qualifier, chosen) };
+            }
+            else
+            {
+                Picks.Remember(before.Substring(_replaceStart, caret - _replaceStart), item.Insert);
+            }
             // `ALTER PROCEDURE name`: fill in the object's whole definition.
             var alter = System.Text.RegularExpressions.Regex.Match(before.Substring(0, _replaceStart), @"\bALTER\s+(PROC|PROCEDURE|VIEW|FUNCTION)\s+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (alter.Success && Settings.Current.GenerateAlter && (item.Kind == "procedure" || item.Kind == "view" || item.Kind == "function" || item.Kind == "table_function"))
@@ -557,18 +638,111 @@ namespace QuillSql.Vsix
                 var editor = EditorContext.For(_view);
                 var end = _replaceStart + item.Insert.Length - 1;
                 editor?.Select(end, end);
+                UpdateSignature();
             }
+        }
+
+        private bool LineStartsWithExec()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!TryGetText(out var text, out var caret))
+            {
+                return false;
+            }
+            var lineStart = text.LastIndexOf('\n', Math.Max(0, caret - 1)) + 1;
+            var line = text.Substring(lineStart, caret - lineStart).TrimStart();
+            return line.StartsWith("EXEC", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Shows, moves or closes the parameter hints for the call around the caret.</summary>
+        private void UpdateSignature()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!Settings.Current.ParameterHints || !TryGetText(out var text, out var caret))
+            {
+                _signature.Close();
+                return;
+            }
+            var key = ConnectionResolver.TryGetActive()?.Key ?? "";
+            var version = ++_signatureVersion;
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try
+                {
+                    await TaskScheduler.Default;
+                    var reply = EngineProcess.Shared.Request("signature", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + caret);
+                    var signature = reply == null ? null : Json.Parse<SignatureReply>(reply)?.Result;
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    if (version != _signatureVersion)
+                    {
+                        return;
+                    }
+                    // Typed on while the engine answered: ask again for where the caret is now.
+                    if (TryGetText(out _, out var moved) && moved != caret)
+                    {
+                        UpdateSignature();
+                        return;
+                    }
+                    Log.Verbose("parameter hints at " + caret + ": " + (signature?.Name ?? "none"));
+                    if (signature == null || _view.GetCaretPos(out var line, out var column) != VSConstants.S_OK)
+                    {
+                        _signature.Close();
+                        return;
+                    }
+                    var point = new POINT[1];
+                    _view.GetPointOfLineColumn(line, column, point);
+                    var window = _view.GetWindowHandle();
+                    var screen = new NativePoint { X = point[0].x, Y = point[0].y };
+                    ClientToScreen(window, ref screen);
+                    _signature.Show(signature, window, screen.X, screen.Y);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("parameter hints", ex);
+                }
+            }).FileAndForget("QuillSQL/Signature");
         }
 
         public void OnSetFocus(IVsTextView view) { }
 
-        public void OnKillFocus(IVsTextView view) => _popup.Close();
+        public void OnKillFocus(IVsTextView view)
+        {
+            if (_signature.IsOpen)
+            {
+                Log.Verbose("parameter hints closed: focus lost");
+            }
+            _popup.Close();
+            _signature.Close();
+        }
 
-        public void OnSetBuffer(IVsTextView view, IVsTextLines buffer) => _popup.Close();
+        public void OnSetBuffer(IVsTextView view, IVsTextLines buffer)
+        {
+            _popup.Close();
+            _signature.Close();
+        }
 
-        public void OnChangeScrollInfo(IVsTextView view, int bar, int minUnit, int maxUnits, int visibleUnits, int firstVisibleUnit) => _popup.Close();
+        public void OnChangeScrollInfo(IVsTextView view, int bar, int minUnit, int maxUnits, int visibleUnits, int firstVisibleUnit)
+        {
+            // Typing a longer line changes the horizontal range without scrolling; only a move of the
+            // view puts the list and the tip in the wrong place.
+            if (bar < 0 || bar > 1 || _firstVisible[bar] == firstVisibleUnit)
+            {
+                return;
+            }
+            _firstVisible[bar] = firstVisibleUnit;
+            if (_signature.IsOpen)
+            {
+                Log.Verbose("parameter hints closed: scrolled (bar " + bar + ")");
+            }
+            _popup.Close();
+            _signature.Close();
+        }
 
-        public void OnChangeCaretLine(IVsTextView view, int newLine, int oldLine) => _popup.Close();
+        public void OnChangeCaretLine(IVsTextView view, int newLine, int oldLine)
+        {
+            _popup.Close();
+            _signature.Close();
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct NativePoint

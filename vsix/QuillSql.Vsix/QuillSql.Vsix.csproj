@@ -31,6 +31,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AiAssistant.cs" />
+    <Compile Include="SignatureTip.cs" />
+    <Compile Include="ColumnPicker.cs" />
+    <Compile Include="Decryptor.cs" />
     <Compile Include="AiChat.cs" />
     <Compile Include="AiChatPane.cs" />
     <Compile Include="McpServer.cs" />
