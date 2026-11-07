@@ -546,7 +546,11 @@ pub fn import_redgate(bytes: &[u8], kind: ProjectKind) -> Result<Project, String
 
     match kind {
         ProjectKind::Schema => {
-            let options = text_of(root, "Options");
+            let mut options = text_of(root, "Options");
+            // Old SQL Compare projects store the options as a number.
+            if let Ok(bits) = options.parse::<u64>() {
+                options = OLD_OPTION_BITS.iter().filter(|(b, _)| bits & b != 0).map(|(_, n)| *n).collect::<Vec<_>>().join(",");
+            }
             if !options.is_empty() {
                 // Group names (Default, NoSQLPlumbing...) expand; unknown names are dropped.
                 let names: Vec<&str> = options.split(',').map(str::trim).filter(|n| crate::schema::Options::parse(n).is_ok()).collect();
@@ -722,6 +726,34 @@ pub fn import_redgate(bytes: &[u8], kind: ProjectKind) -> Result<Project, String
         }
     }
     p.note = text_of(root, "UserNote");
+    // Old SQL Compare projects (before SelectedSyncObjects): owner mappings and the object
+    // selection as user actions.
+    if kind == ProjectKind::Schema {
+        for ev in child(root, "OwnerMappingUserActions").into_iter().flat_map(|l| l.children().filter(|c| c.is_element())) {
+            match text_of(ev, "action").as_str() {
+                "MapOwners" => p.schema_mappings.schemas.push((text_of(ev, "Owner1"), text_of(ev, "Owner2"))),
+                "UnmapOwners" if !text_of(ev, "val").is_empty() => p.schema_mappings.schemas.push((text_of(ev, "val"), String::new())),
+                _ => {}
+            }
+        }
+        if let Some(list) = child(root, "ObjectSelectionUserActions") {
+            let mut sel = RedgateSelection { select_all: true, entries: Vec::new() };
+            for ev in list.children().filter(|c| c.is_element()) {
+                match text_of(ev, "action").as_str() {
+                    "SelectAll" => sel = RedgateSelection { select_all: true, entries: Vec::new() },
+                    "DeselectAll" => sel = RedgateSelection { select_all: false, entries: Vec::new() },
+                    a @ ("SelectItem" | "DeselectItem") => {
+                        let Some(n) = split_name(&text_of(ev, "val")) else { continue };
+                        let hash = hex(&crate::project_codec::object_hash(&n.name));
+                        sel.entries.retain(|e| !(e.schema == n.schema && e.hash == hash));
+                        sel.entries.push(SelectionEntry { schema: n.schema, hash, object_type: 1, difference: 0, selected: a == "SelectItem" });
+                    }
+                    _ => {}
+                }
+            }
+            p.redgate_selection = Some(sel);
+        }
+    }
     if kind == ProjectKind::Schema
         && let Some(sel) = child(root, "SelectedSyncObjects").filter(|n| n.attribute("isNull") != Some("1"))
     {
@@ -769,6 +801,70 @@ pub fn import_redgate(bytes: &[u8], kind: ProjectKind) -> Result<Project, String
 }
 
 use crate::data::DataOpt;
+
+/// Option bits of old SQL Compare projects (a number in place of the names).
+const OLD_OPTION_BITS: &[(u64, &str)] = &[
+    (0x1, "ForceColumnOrder"),
+    (0x2, "IgnoreFillFactor"),
+    (0x4, "IgnorePermissions"),
+    (0x8, "IgnoreWhiteSpace"),
+    (0x10, "IgnoreBindings"),
+    (0x20, "IgnoreQuotedIdentifiersAndAnsiNullSettings"),
+    (0x40, "CaseSensitiveObjectDefinition"),
+    (0x80, "IgnoreExtendedProperties"),
+    (0x100, "IgnoreFullTextIndexing"),
+    (0x200, "NoSQLPlumbing"),
+    (0x400, "IgnoreCollations"),
+    (0x800, "IgnoreComments"),
+    (0x2000, "IgnoreIndexes"),
+    (0x4000, "IgnoreKeys"),
+    (0x8000, "IgnoreChecks"),
+    (0x10000, "IgnoreTriggers"),
+    (0x20000, "IncludeDependencies"),
+    (0x40000, "IgnoreInsteadOfTriggers"),
+    (0x80000, "IgnoreFileGroups"),
+    (0x100000, "IgnoreIdentitySeedAndIncrement"),
+    (0x200000, "IgnoreWithNocheck"),
+    (0x400000, "IgnoreConstraintNames"),
+    (0x800000, "IgnoreStatistics"),
+    (0x1000000, "DoNotOutputCommentHeader"),
+    (0x2000000, "AddWithEncryption"),
+    (0x4000000, "IgnoreSynonymDependencies"),
+    (0x8000000, "SeparateTriggers"),
+    (0x10000000, "IgnoreOwners"),
+    (0x20000000, "IgnoreQueueEventNotifications"),
+    (0x40000000, "TargetIsPre2005"),
+    (0x80000000, "UseClrUdtToStringForClrMigration"),
+    (0x100000000, "ConsiderNextFilegroupInPartitionSchemes"),
+    (0x200000000, "IgnoreCertificatesAndCryptoKeys"),
+    (0x400000000, "IgnoreTriggerOrder"),
+    (0x800000000, "IgnoreUsers"),
+    (0x1000000000, "IgnoreUserProperties"),
+    (0x2000000000, "DisableAndReenableDdlTriggers"),
+    (0x4000000000, "IgnoreWithElementOrder"),
+    (0x8000000000, "IgnoreIndexLockProperties"),
+    (0x10000000000, "IgnoreReplicationTriggers"),
+    (0x20000000000, "IgnoreIdentityProperties"),
+    (0x40000000000, "IgnoreNotForReplication"),
+    (0x80000000000, "TargetIsPre2008"),
+    (0x100000000000, "IgnoreDataCompression"),
+    (0x200000000000, "IgnoreDatabaseAndServerName"),
+    (0x400000000000, "AddDatabaseUseStatement"),
+    (0x800000000000, "IgnoreSchemaObjectAuthorization"),
+    (0x1000000000000, "DecryptPost2kEncryptedObjects"),
+    (0x2000000000000, "ForceSyncScriptGeneration"),
+    (0x4000000000000, "IgnoreStatisticsNorecompute"),
+    (0x8000000000000, "IgnoreSquareBrackets"),
+    (0x10000000000000, "ThrowOnFileParseFailed"),
+    (0x40000000000000, "TargetIsSqlAzure"),
+    (0x80000000000000, "ObjectExistenceChecks"),
+    (0x100000000000000, "DropAndCreateInsteadOfAlter"),
+    (0x200000000000000, "IgnoreMigrationScripts"),
+    (0x400000000000000, "IgnoreTSQLT"),
+    (0x800000000000000, "IgnoreSystemNamedConstraintNames"),
+    (0x2000000000000000, "SsdtCompatibleOptions"),
+    (0x4000000000000000, "IgnoreInternallyUsedMicrosoftExtendedProperties"),
+];
 
 /// Bits of SQL Data Compare's MappingOptions, ComparisonOptions and SQLOptions project values.
 const MAPPING_BITS: &[(u64, DataOpt)] = &[
@@ -1437,6 +1533,57 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(serde_json::to_string(&side).unwrap().contains("\"authentication\":\"entraPassword\""));
+    }
+
+
+    #[test]
+    fn old_layouts_are_read() {
+        let scp = r#"<Project version="9" type="SQLCompareProject">
+  <DataSource1 version="3" type="LiveDatabaseSource"><ServerName>a</ServerName><DatabaseName>x</DatabaseName><IntegratedSecurity>True</IntegratedSecurity></DataSource1>
+  <DataSource2 version="3" type="LiveDatabaseSource"><ServerName>b</ServerName><DatabaseName>y</DatabaseName></DataSource2>
+  <Options>2056</Options>
+  <ObjectSelectionUserActions type="ArrayList" version="1">
+    <value version="1" type="UserActionItem"><action>DeselectAll</action></value>
+    <value version="1" type="UserActionItem"><action>SelectItem</action><val>[dbo].[Keep]</val></value>
+  </ObjectSelectionUserActions>
+  <OwnerMappingUserActions type="ArrayList" version="1">
+    <value version="1" type="UserActionItem"><action>MapOwners</action><Owner1>dev</Owner1><Owner2>dbo</Owner2></value>
+  </OwnerMappingUserActions>
+</Project>"#;
+        let p = import_redgate(scp.as_bytes(), ProjectKind::Schema).unwrap();
+        assert_eq!(p.source.authentication, Authentication::Windows);
+        // 2056 = IgnoreWhiteSpace (8) + IgnoreComments (0x800).
+        let mut o = p.options.clone();
+        o.sort();
+        assert_eq!(o, ["IgnoreComments", "IgnoreWhiteSpace"]);
+        assert_eq!(p.schema_mappings.schemas, [("dev".to_string(), "dbo".to_string())]);
+        assert_eq!((p.redgate_selected("dbo", "Keep"), p.redgate_selected("dbo", "Other")), (Some(true), Some(false)));
+    }
+
+    #[test]
+    fn sca_and_source_control_sides_round_trip() {
+        let location = "&lt;?xml version=\"1.0\"?&gt;&lt;ISOCCompareLocation version=\"1\" type=\"GitLocation\"&gt;&lt;RepositoryUrl&gt;C:\\repo&lt;/RepositoryUrl&gt;&lt;/ISOCCompareLocation&gt;";
+        let scp = format!(
+            r#"<Project version="5" type="SQLComparisonToolsProject">
+  <DataSource1 version="1" type="ScaDataSource"><ProjectFilePath>C:\p\Db.sqlproj</ProjectFilePath><DatabaseName>Db</DatabaseName><ServerName /></DataSource1>
+  <DataSource2 version="4" type="SourceControlDataSource"><VersionType>Specific</VersionType><SpecificVersion>abc123</SpecificVersion><ServerName>s</ServerName><DatabaseName>d</DatabaseName><ScriptFolderLocation>{location}</ScriptFolderLocation></DataSource2>
+</Project>"#
+        );
+        let p = import_redgate(scp.as_bytes(), ProjectKind::Schema).unwrap();
+        assert!(p.source.is_sca() && p.source.is_scripts() && p.source.path == r"C:\p\Db.sqlproj");
+        assert!(p.target.is_scripts() && !p.target.is_sca());
+        assert_eq!(p.target.revision, "abc123");
+        assert!(p.target.location_xml.contains("GitLocation"));
+        let text = decode_text(&export_redgate(&p, ""));
+        assert!(text.contains("type=\"ScaDataSource\"") && text.contains("<ProjectFilePath>C:\\p\\Db.sqlproj</ProjectFilePath>"), "{text}");
+        assert!(text.contains("type=\"SourceControlDataSource\"") && text.contains("<VersionType>Specific</VersionType>") && text.contains("<SpecificVersion>abc123</SpecificVersion>"), "{text}");
+        let back = import_redgate(text.as_bytes(), ProjectKind::Schema).unwrap();
+        assert_eq!((back.source.clone(), back.target.revision.clone(), back.target.location_xml.clone()), (p.source.clone(), p.target.revision.clone(), p.target.location_xml.clone()));
+        // Older versions: newest revision, or version 2's VersionToUse 0.
+        let v1 = r#"<Project><DataSource1 version="1" type="SourceControlDataSource"><ServerName>s</ServerName><DatabaseName>d</DatabaseName><Revision>7</Revision><UseNewestRevision>True</UseNewestRevision></DataSource1></Project>"#;
+        assert_eq!(import_redgate(v1.as_bytes(), ProjectKind::Schema).unwrap().source.revision, "HEAD");
+        let v2 = r#"<Project><DataSource1 version="2" type="SourceControlDataSource"><VersionToUse>1</VersionToUse><SpecificVersion>9</SpecificVersion></DataSource1></Project>"#;
+        assert_eq!(import_redgate(v2.as_bytes(), ProjectKind::Schema).unwrap().source.revision, "9");
     }
 
 }
