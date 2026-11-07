@@ -567,7 +567,6 @@ impl Builder {
             s.expect("BY")?;
             k.messages.push(ContractMessage { message_type, sent_by: s.ident()?.to_ascii_uppercase() });
         }
-        k.messages.sort_by(|a, b| a.message_type.cmp(&b.message_type));
         self.db.contracts.retain(|x| !same(&x.name, &name));
         self.db.contracts.push(k);
         self.origin(ObjectType::Contract, "", &name);

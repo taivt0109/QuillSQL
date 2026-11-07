@@ -4,7 +4,7 @@
 
 use crate::catalog::*;
 use crate::db::{literal, quote};
-use crate::schema::ddl::{module_sql, qname};
+use crate::schema::ddl::{Render, module_sql, qname};
 use crate::schema::{Opt, Options};
 
 /// Builds a file batch by batch.
@@ -50,7 +50,7 @@ fn crlf(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
-/// `[int]`, `[nvarchar] (100)`, `[decimal] (18, 2)`, `[dbo].[Phone]`.
+/// `[int]`, `[nvarchar] (100)`, `[decimal] (18, 2)`, `[datetime2] (3)`, `[dbo].[Phone]`.
 pub fn type_sql(t: &DataType) -> String {
     if let Some(schema) = &t.schema {
         return qname(schema, &t.name);
@@ -66,14 +66,10 @@ pub fn type_sql(t: &DataType) -> String {
             None => {}
         },
         "decimal" | "numeric" => s.push_str(&format!(" ({}, {})", t.precision.unwrap_or(18), t.scale.unwrap_or(0))),
+        // The default scale, 7, is not written.
         "datetime2" | "time" | "datetimeoffset" => {
-            if let Some(sc) = t.scale {
+            if let Some(sc) = t.scale.filter(|sc| *sc != 7) {
                 s.push_str(&format!(" ({sc})"));
-            }
-        }
-        "float" => {
-            if let Some(p) = t.precision.filter(|p| *p != 53) {
-                s.push_str(&format!(" ({p})"));
             }
         }
         "xml" => {
@@ -103,7 +99,9 @@ pub fn column_sql(c: &Column) -> String {
     s.push(' ');
     s.push_str(&type_sql(&c.data_type));
     if c.column_set {
+        // A column set has no nullability of its own.
         s.push_str(" COLUMN_SET FOR ALL_SPARSE_COLUMNS");
+        return s;
     }
     if c.filestream {
         s.push_str(" FILESTREAM");
@@ -140,155 +138,153 @@ pub fn column_sql(c: &Column) -> String {
     s
 }
 
-fn kind_words(ix: &Index) -> &'static str {
-    match ix.kind {
-        IndexKind::Clustered => "CLUSTERED",
-        IndexKind::ClusteredColumnstore => "CLUSTERED COLUMNSTORE",
-        IndexKind::NonclusteredColumnstore => "NONCLUSTERED COLUMNSTORE",
-        IndexKind::NonclusteredHash => "NONCLUSTERED HASH",
-        _ => "NONCLUSTERED",
-    }
+/// How the folder renders indexes and keys: the deployment's renderer, for the latest server.
+fn render(o: &Options) -> Render {
+    Render { opts: o.clone(), features: crate::schema::features::Features::latest() }
 }
 
-fn key_list(ix: &Index) -> String {
-    ix.columns.iter().map(|c| format!("{}{}", quote(&c.name), if c.descending { " DESC" } else { "" })).collect::<Vec<_>>().join(", ")
+/// Strings in the order .NET's culture-aware comparison (en-US) gives them, which SQL Compare
+/// sorts names with: case is ignored first (lower case wins a tie), and punctuation sorts
+/// before digits, digits before letters.
+pub fn culture_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let key = |c: char| {
+        let class = if c.is_alphabetic() { 2 } else if c.is_numeric() { 1 } else { 0 };
+        (class, c.to_lowercase().next().unwrap_or(c))
+    };
+    let primary = a.chars().map(key).cmp(b.chars().map(key));
+    primary.then_with(|| a.chars().map(|c| !c.is_lowercase()).cmp(b.chars().map(|c| !c.is_lowercase())))
 }
 
-fn compression_sql(st: &Storage) -> Option<String> {
-    match st.compression.as_slice() {
-        [] => None,
-        [one] if one.partition == 0 && one.compression == "COLUMNSTORE" => None,
-        [one] if one.partition == 0 => Some(format!("DATA_COMPRESSION = {}", one.compression)),
-        many => Some(
-            many.iter()
-                .map(|p| format!("DATA_COMPRESSION = {} ON PARTITIONS ({})", p.compression, p.partition))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
-    }
+/// An index or a CREATE STATISTICS object of a table, as SQL Compare sorts them in its file.
+enum TablePart<'a> {
+    Index(&'a Index),
+    Statistic(&'a Statistic),
 }
 
-/// ` WITH (...)` and ` ON [fg]` for an index or key.
-fn index_tail(ix: &Index, o: &Options, default_fg: &str) -> String {
-    let mut opts = Vec::new();
-    if !o.has(Opt::IgnoreFillFactor) {
-        if ix.pad_index {
-            opts.push("PAD_INDEX = ON".to_string());
-        }
-        if ix.fill_factor != 0 {
-            opts.push(format!("FILLFACTOR = {}", ix.fill_factor));
+impl TablePart<'_> {
+    /// Primary key, other relational indexes, primary XML, secondary XML, spatial, statistics.
+    fn rank(&self) -> u8 {
+        match self {
+            TablePart::Index(ix) if ix.primary_key => 1,
+            TablePart::Index(ix) => match ix.kind {
+                IndexKind::Xml if ix.xml.as_ref().is_some_and(|x| matches!(x.kind, XmlIndexKind::Secondary | XmlIndexKind::SecondarySelective)) => 4,
+                IndexKind::Xml => 3,
+                IndexKind::Spatial => 5,
+                _ => 2,
+            },
+            TablePart::Statistic(_) => 6,
         }
     }
-    if ix.ignore_dup_key {
-        opts.push("IGNORE_DUP_KEY = ON".into());
-    }
-    if ix.no_recompute {
-        opts.push("STATISTICS_NORECOMPUTE = ON".into());
-    }
-    if ix.incremental {
-        opts.push("STATISTICS_INCREMENTAL = ON".into());
-    }
-    if !ix.allow_row_locks {
-        opts.push("ALLOW_ROW_LOCKS = OFF".into());
-    }
-    if !ix.allow_page_locks {
-        opts.push("ALLOW_PAGE_LOCKS = OFF".into());
-    }
-    if ix.optimize_for_sequential_key {
-        opts.push("OPTIMIZE_FOR_SEQUENTIAL_KEY = ON".into());
-    }
-    if let Some(b) = ix.bucket_count {
-        opts.push(format!("BUCKET_COUNT = {b}"));
-    }
-    if let Some(c) = compression_sql(&ix.storage) {
-        opts.push(c);
-    }
-    let mut s = String::new();
-    if !opts.is_empty() {
-        s.push_str(&format!(" WITH ({})", opts.join(", ")));
-    }
-    s.push_str(&storage_sql(&ix.storage, o, default_fg));
-    s
-}
 
-fn storage_sql(st: &Storage, o: &Options, default_fg: &str) -> String {
-    if o.has(Opt::IgnoreFileGroups) {
-        return String::new();
+    fn name(&self) -> &str {
+        match self {
+            TablePart::Index(ix) => &ix.name,
+            TablePart::Statistic(s) => &s.name,
+        }
     }
-    match (&st.data_space, &st.partition_column) {
-        (Some(ds), Some(col)) => format!(" ON {} ({})", quote(ds), quote(col)),
-        (Some(ds), None) if !ds.eq_ignore_ascii_case(default_fg) => format!(" ON {}", quote(ds)),
-        _ => String::new(),
+
+    fn keys(&self) -> Vec<&str> {
+        match self {
+            TablePart::Index(ix) => ix.columns.iter().map(|c| c.name.as_str()).collect(),
+            TablePart::Statistic(s) => s.columns.iter().map(String::as_str).collect(),
+        }
+    }
+
+    fn included(&self) -> Vec<&str> {
+        match self {
+            TablePart::Index(ix) => ix.included.iter().map(String::as_str).collect(),
+            TablePart::Statistic(_) => Vec::new(),
+        }
     }
 }
 
-/// The PK/UQ clause after `ADD CONSTRAINT [name]`.
-fn key_sql(ix: &Index, o: &Options, default_fg: &str) -> String {
-    let what = if ix.primary_key { "PRIMARY KEY" } else { "UNIQUE" };
-    format!("{what} {} ({}){}", kind_words(ix), key_list(ix), index_tail(ix, o, default_fg))
+/// Kind first; within a kind, by key columns, then included columns, then name.
+fn part_order(a: &TablePart, b: &TablePart) -> std::cmp::Ordering {
+    let list = |x: Vec<&str>, y: Vec<&str>| {
+        for (p, q) in x.iter().zip(&y) {
+            let c = culture_cmp(p, q);
+            if c.is_ne() {
+                return c;
+            }
+        }
+        x.len().cmp(&y.len())
+    };
+    a.rank()
+        .cmp(&b.rank())
+        .then_with(|| if a.name() == b.name() { std::cmp::Ordering::Equal } else { list(a.keys(), b.keys()) })
+        .then_with(|| list(a.included(), b.included()))
+        .then_with(|| culture_cmp(a.name(), b.name()))
 }
 
 /// XML and spatial indexes, as deployments write them.
 fn xml_or_spatial_sql(on: &str, ix: &Index, o: &Options) -> String {
-    use crate::schema::ddl::{Host, Render, create_index_with};
-    let r = Render { opts: o.clone(), features: crate::schema::features::Features::latest() };
+    use crate::schema::ddl::{Host, create_index_with};
     // SQL Compare lists prefixed namespaces before the default one.
     let mut ix = ix.clone();
     if let Some(x) = ix.xml.as_mut() {
         x.namespaces.sort_by_key(|n| n.prefix.is_none());
     }
-    create_index_with(on, &ix, &r, &Host::default()).join("\r\nGO\r\n")
+    create_index_with(on, &ix, &render(o), &Host::default()).join("\r\nGO\r\n")
 }
 
-/// Order of indexes in a file: clustered, other relational, primary XML, other XML, spatial.
-fn index_rank(ix: &Index) -> u8 {
-    match ix.kind {
-        IndexKind::Clustered | IndexKind::ClusteredColumnstore => 0,
-        IndexKind::Xml if ix.xml.as_ref().is_none_or(|x| matches!(x.kind, XmlIndexKind::Primary | XmlIndexKind::Selective)) => 2,
-        IndexKind::Xml => 3,
-        IndexKind::Spatial => 4,
-        _ => 1,
+/// The class prefix SQL Compare writes before a securable in GRANT … ON: none for objects.
+fn class_prefix(class: &str) -> String {
+    match class {
+        "OBJECT" | "DATABASE" => String::new(),
+        "FULLTEXT STOPLIST" | "SEARCH PROPERTY LIST" => String::new(),
+        c => format!("{c}::"),
     }
 }
 
-fn create_index_sql(on: &str, ix: &Index, o: &Options, default_fg: &str) -> String {
-    let unique = if ix.unique { "UNIQUE " } else { "" };
-    let mut s = format!("CREATE {unique}{} INDEX {} ON {on}", kind_words(ix), quote(&ix.name));
-    match ix.kind {
-        IndexKind::ClusteredColumnstore => {}
-        IndexKind::NonclusteredColumnstore => {
-            s.push_str(&format!(" ({})", ix.columns.iter().map(|c| quote(&c.name)).collect::<Vec<_>>().join(", ")));
-        }
-        _ => s.push_str(&format!(" ({})", key_list(ix))),
-    }
-    if !ix.included.is_empty() {
-        s.push_str(&format!(" INCLUDE ({})", ix.included.iter().map(|c| quote(c)).collect::<Vec<_>>().join(", ")));
-    }
-    if let Some(f) = &ix.filter {
-        s.push_str(&format!(" WHERE {f}"));
-    }
-    s.push_str(&index_tail(ix, o, default_fg));
-    s
-}
-
-/// Permissions on one securable: `GRANT SELECT ON  [dbo].[T] TO [app]`.
-fn permissions(out: &mut Out, db: &Database, class: &str, schema: &str, object: Option<&str>, o: &Options) {
+/// GRANT / DENY statements on one securable in the order SQL Compare writes them: by grantee,
+/// then by permission, the object-level statement before its column-level ones, columns in
+/// table order. Object-level statements read `ON  [s].[o]` (an empty class prefix), column-level
+/// ones `ON [s].[o]`.
+pub fn securable_grants(db: &Database, class: &str, schema: Option<&str>, object: Option<&str>, columns: &[&str], o: &Options) -> Vec<String> {
     if o.has(Opt::IgnorePermissions) {
-        return;
+        return Vec::new();
     }
-    let on = match class {
-        "OBJECT" => format!(" ON  {}", qname(schema, object.unwrap_or_default())),
-        "TYPE" => format!(" ON TYPE:: {}", qname(schema, object.unwrap_or_default())),
-        _ => format!(" ON SCHEMA:: {}", quote(schema)),
+    let list: Vec<&Permission> = db.permissions.iter().filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == object).collect();
+    let name = match (class, schema, object) {
+        ("SCHEMA", Some(s), _) => quote(s),
+        (_, Some(s), Some(n)) => qname(s, n),
+        (_, _, Some(n)) => quote(n),
+        _ => String::new(),
     };
-    let mut list: Vec<&Permission> = db
-        .permissions
-        .iter()
-        .filter(|p| p.class == class && p.schema.as_deref() == Some(schema) && p.object.as_deref() == object)
-        .collect();
-    list.sort_by_key(|p| (p.grantee.to_lowercase(), state_order(&p.state), p.permission.clone()));
-    for p in list {
-        out.batch(&grant_sql(p, &on));
+    let mut users: Vec<&str> = list.iter().map(|p| p.grantee.as_str()).collect();
+    users.sort_by(|a, b| culture_cmp(a, b));
+    users.dedup();
+    let mut levels: Vec<&str> = list.iter().map(|p| p.permission.as_str()).collect();
+    levels.sort_by(|a, b| culture_cmp(a, b));
+    levels.dedup();
+    let mut out = Vec::new();
+    let statement = |p: &Permission, action: String, on: &str| {
+        let (verb, with) = match p.state.as_str() {
+            "DENY" => ("DENY", ""),
+            "GRANT_WITH_GRANT_OPTION" => ("GRANT", " WITH GRANT OPTION"),
+            _ => ("GRANT", ""),
+        };
+        format!("{verb} {action} ON {on} TO {}{with}", quote(&p.grantee))
+    };
+    for user in &users {
+        for level in &levels {
+            let of = |p: &&&Permission| p.grantee == *user && p.permission == *level;
+            if let Some(p) = list.iter().filter(of).find(|p| p.column.is_none()) {
+                out.push(statement(p, p.permission.clone(), &format!("{} {name}", class_prefix(class))));
+            }
+            let mut cols: Vec<&&Permission> = list.iter().filter(of).filter(|p| p.column.is_some()).collect();
+            cols.sort_by_key(|p| columns.iter().position(|c| Some(*c) == p.column.as_deref()).unwrap_or(usize::MAX));
+            for p in cols {
+                out.push(statement(p, p.action(), &name));
+            }
+        }
+    }
+    out
+}
+
+fn permissions(out: &mut Out, db: &Database, class: &str, schema: &str, object: Option<&str>, columns: &[&str], o: &Options) {
+    for s in securable_grants(db, class, Some(schema), object, columns, o) {
+        out.batch(&s);
     }
 }
 
@@ -408,6 +404,8 @@ fn trigger_sql(definition: &str, schema: &str, name: &str, on: &str) -> String {
     out
 }
 
+/// Each trigger: its settings, its text, its order (AFTER triggers: first delete, insert,
+/// update, then last ones, as `'first', 'update', null`), then DISABLE TRIGGER.
 fn triggers(out: &mut Out, list: &[Trigger], schema: &str, on: &str, o: &Options) {
     if o.has(Opt::IgnoreTriggers) {
         return;
@@ -416,14 +414,24 @@ fn triggers(out: &mut Out, list: &[Trigger], schema: &str, on: &str, o: &Options
         if tr.encrypted || tr.definition.is_empty() {
             continue;
         }
+        if (o.has(Opt::IgnoreInsteadOfTriggers) && tr.instead_of) || (o.has(Opt::IgnoreReplicationTriggers) && tr.not_for_replication) {
+            continue;
+        }
         out.set_options(&tr.settings);
         out.module(&trigger_sql(&tr.definition, schema, &tr.name, on));
-        for (event, order) in &tr.order {
-            out.batch(&format!(
-                "EXEC sp_settriggerorder N'{}', N'{}', '{event}'",
-                qname(schema, &tr.name).replace('\'', "''"),
-                title(order)
-            ));
+        if !tr.instead_of && !o.has(Opt::IgnoreTriggerOrder) {
+            for when in ["FIRST", "LAST"] {
+                for event in ["DELETE", "INSERT", "UPDATE"] {
+                    if tr.order.iter().any(|(e, w)| e.eq_ignore_ascii_case(event) && w.eq_ignore_ascii_case(when)) {
+                        out.batch(&format!(
+                            "EXEC sp_settriggerorder N'{}', '{}', '{}', null",
+                            qname(schema, &tr.name).replace('\'', "''"),
+                            when.to_lowercase(),
+                            event.to_lowercase()
+                        ));
+                    }
+                }
+            }
         }
         if tr.disabled {
             out.batch(&format!("DISABLE TRIGGER {} ON {on}", qname(schema, &tr.name)));
@@ -431,65 +439,123 @@ fn triggers(out: &mut Out, list: &[Trigger], schema: &str, on: &str, o: &Options
     }
 }
 
-fn title(s: &str) -> String {
-    let lower = s.to_lowercase();
-    let mut c = lower.chars();
-    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+/// `ADD SENSITIVITY CLASSIFICATION … WITH (LABEL = '…', …)`: SQL Compare quotes the values
+/// without N and leaves the rank out.
+fn sensitivity_sql(table: &str, column: &str, s: &Sensitivity) -> String {
+    let mut items = Vec::new();
+    for (k, v) in [("LABEL", &s.label), ("LABEL_ID", &s.label_id), ("INFORMATION_TYPE", &s.information_type), ("INFORMATION_TYPE_ID", &s.information_type_id)] {
+        if let Some(v) = v {
+            items.push(format!("{k} = '{v}'"));
+        }
+    }
+    format!("ADD SENSITIVITY CLASSIFICATION TO {table}.{} WITH ({})", quote(column), items.join(", "))
 }
 
-pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String {
+/// The CREATE TABLE statement: columns, the keys and indexes that go inside it (all of a
+/// memory-optimized table's, the primary key of a system-versioned table, PK/UQ and checks
+/// under InlineTableObjects), storage and the WITH options.
+fn create_table_sql(t: &Table, o: &Options, inline: bool, default_fg: &str) -> String {
     let name = qname(&t.schema, &t.name);
-    let mut out = Out::default();
-    // The history table of a system-versioned table goes first, in the same file.
-    if let Some(h) = t.temporal.as_ref().and_then(|tv| db.tables.iter().find(|x| x.history_table && x.object_name() == tv.history_table)) {
-        out.s.push_str(&table(db, h, o, default_fg));
-    }
+    let r = render(o);
+    let host = crate::schema::ddl::Host::of_table(t);
     let mut lines: Vec<String> = t.columns.iter().filter(|c| !is_graph_internal(c)).map(column_sql).collect();
     if let Some(tv) = &t.temporal
         && !tv.period_start.is_empty()
     {
-        lines.push(format!("PERIOD FOR SYSTEM_TIME ({}, {})", quote(&tv.period_start), quote(&tv.period_end)));
+        lines.push(format!("PERIOD FOR SYSTEM_TIME ({}, {})", tv.period_start, tv.period_end));
     }
-    // InlineTableObjects: keys, checks and foreign keys inside CREATE TABLE.
-    let inline = o.has(Opt::InlineTableObjects) && !t.memory_optimized;
-    let nocheck_ok = !o.has(Opt::IgnoreNocheckAndWithNocheck);
-    let with_nocheck = |not_trusted: bool| if not_trusted && nocheck_ok && !o.has(Opt::IgnoreWithNocheck) { "WITH NOCHECK " } else { "" };
-    let checks: Vec<(&CheckConstraint, String)> = if o.has(Opt::IgnoreChecks) {
-        Vec::new()
-    } else {
-        t.check_constraints
-            .iter()
-            .map(|ck| {
-                let nfr = if ck.not_for_replication { "NOT FOR REPLICATION " } else { "" };
-                (ck, format!("CONSTRAINT {} CHECK {nfr}({})", quote(&ck.name), super::expr::rewrite(&ck.definition)))
-            })
-            .collect()
-    };
-    let mut keys: Vec<&Index> = if t.memory_optimized { Vec::new() } else { t.indexes.iter().filter(|i| i.primary_key || i.unique_constraint).collect() };
-    keys.sort_by_key(|i| (!i.primary_key, i.name.clone()));
-    let fks: Vec<(&ForeignKey, String)> = if o.has(Opt::IgnoreKeys) { Vec::new() } else { t.foreign_keys.iter().map(|fk| (fk, foreign_key_sql(fk))).collect() };
-    if inline {
-        lines.extend(keys.iter().map(|ix| format!("CONSTRAINT {} {}", quote(&ix.name), key_sql(ix, o, default_fg))));
-        lines.extend(checks.iter().map(|(_, s)| s.clone()));
-        lines.extend(fks.iter().map(|(_, s)| s.clone()));
-    }
-    if t.memory_optimized {
-        for ix in &t.indexes {
+    if !o.has(Opt::IgnoreIndexes) || t.memory_optimized {
+        for ix in t.indexes.iter().filter(|i| inlined(t, i, inline)) {
             if ix.primary_key || ix.unique_constraint {
-                lines.push(format!("CONSTRAINT {} {}", quote(&ix.name), key_sql(ix, o, default_fg)));
+                lines.push(crate::schema::ddl::key_constraint_with(ix, &r, &host));
             } else {
-                let mut s = format!("INDEX {} {} ({})", quote(&ix.name), kind_words(ix), key_list(ix));
+                let unique = if ix.unique { "UNIQUE " } else { "" };
+                let kind = if ix.kind == IndexKind::NonclusteredHash { "NONCLUSTERED HASH" } else if ix.kind == IndexKind::Clustered { "CLUSTERED" } else { "NONCLUSTERED" };
+                let mut s = format!("INDEX {} {unique}{kind} ({})", quote(&ix.name), ix.columns.iter().map(|c| format!("{}{}", quote(&c.name), if c.descending { " DESC" } else { "" })).collect::<Vec<_>>().join(", "));
                 if let Some(b) = ix.bucket_count {
-                    s.push_str(&format!(" WITH (BUCKET_COUNT = {b})"));
+                    s.push_str(&format!(" WITH (BUCKET_COUNT={b})"));
                 }
                 lines.push(s);
             }
         }
     }
+    if inline && !o.has(Opt::IgnoreChecks) {
+        for ck in &t.check_constraints {
+            // SQL Compare leaves system-generated names out here; we keep them, so the folder
+            // reads back with the same names.
+            let nfr = if ck.not_for_replication && !o.has(Opt::IgnoreNotForReplication) { "NOT FOR REPLICATION " } else { "" };
+            lines.push(format!("CONSTRAINT {} CHECK {nfr}({})", quote(&ck.name), super::expr::rewrite(&ck.definition)));
+        }
+    }
     let mut s = format!("CREATE TABLE {name}\n(\n{}\n)", lines.join(",\n"));
+    if let Some(g) = &t.graph {
+        s.push_str(&format!(" AS {g}"));
+    }
+    if !o.has(Opt::IgnoreFileGroups) && !t.memory_optimized {
+        match (&t.storage.data_space, &t.storage.partition_column) {
+            (Some(ds), Some(col)) => s.push_str(&format!(" ON {} ({})", quote(ds), quote(col))),
+            (Some(ds), None) => s.push_str(&format!(" ON {}", quote(ds))),
+            _ => {}
+        }
+        let table_fg = t.storage.data_space.as_deref().filter(|_| t.storage.partition_column.is_none()).unwrap_or(default_fg);
+        if let Some(fg) = t.text_filegroup.as_ref().filter(|fg| !fg.eq_ignore_ascii_case(table_fg)) {
+            s.push_str(&format!(" TEXTIMAGE_ON {}", quote(fg)));
+        }
+        if let Some(fg) = &t.filestream_filegroup {
+            s.push_str(&format!(" FILESTREAM_ON {}", quote(fg)));
+        }
+    }
+    let mut with = Vec::new();
+    let clustered_inline = t.indexes.iter().any(|i| matches!(i.kind, IndexKind::Clustered | IndexKind::ClusteredColumnstore) && inlined(t, i, inline));
+    if !clustered_inline
+        && !t.memory_optimized
+        && let Some(c) = crate::schema::ddl::compression_option(&t.storage, &r)
+    {
+        with.push(c);
+    }
+    if t.memory_optimized {
+        with.push("MEMORY_OPTIMIZED = ON".into());
+        if t.durability.as_deref().is_some_and(|d| d.eq_ignore_ascii_case("SCHEMA_ONLY")) {
+            with.push("DURABILITY = SCHEMA_ONLY".into());
+        }
+    }
+    if let Some(tv) = &t.temporal {
+        let mut v = format!("SYSTEM_VERSIONING = ON (HISTORY_TABLE = {}", tv.history_table.quoted());
+        if let Some(r) = &tv.retention {
+            v.push_str(&format!(", HISTORY_RETENTION_PERIOD = {r}"));
+        }
+        v.push(')');
+        with.push(v);
+    }
+    if !with.is_empty() {
+        s.push_str(&format!("\nWITH\n(\n{}\n)", with.join(",\n")));
+    }
+    s
+}
+
+/// Indexes written inside CREATE TABLE: all of a memory-optimized table's, the primary key of
+/// a system-versioned table, and PK/UQ constraints under InlineTableObjects.
+fn inlined(t: &Table, ix: &Index, inline: bool) -> bool {
+    t.memory_optimized || (ix.primary_key && t.temporal.is_some()) || (inline && (ix.primary_key || ix.unique_constraint))
+}
+
+/// A table's file, in SQL Compare's order: CREATE TABLE (Stretch, owner), triggers, checks and
+/// their NOCHECKs, keys, indexes and statistics (sorted as SQL Compare sorts them), foreign keys
+/// and their NOCHECKs, change tracking, bindings, permissions, extended properties, lock
+/// escalation, large value types, the full-text index and sensitivity classifications. The
+/// history table of a system-versioned table goes first, in the same file.
+pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String {
+    let name = qname(&t.schema, &t.name);
+    let mut out = Out::default();
+    if let Some(h) = t.temporal.as_ref().and_then(|tv| db.tables.iter().find(|x| x.history_table && x.object_name() == tv.history_table)) {
+        out.s.push_str(&table(db, h, o, default_fg));
+    }
+    let inline = o.has(Opt::InlineTableObjects) && !t.memory_optimized;
+    let nocheck_ok = !o.has(Opt::IgnoreNocheckAndWithNocheck);
+    let with_nocheck = |not_trusted: bool| if not_trusted && nocheck_ok && !o.has(Opt::IgnoreWithNocheck) { "WITH NOCHECK " } else { "" };
     if let Some(ft) = &t.file_table {
         // A FileTable's columns, keys and defaults are fixed.
-        s = format!("CREATE TABLE {name} AS FILETABLE");
+        let mut s = format!("CREATE TABLE {name} AS FILETABLE");
         if let Some(fg) = &t.storage.data_space {
             s.push_str(&format!(" ON {}", quote(fg)));
         }
@@ -506,128 +572,112 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
             out.batch(&a);
         }
         triggers(&mut out, &t.triggers, &t.schema, &name, o);
-        permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), o);
+        permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), &[], o);
         xprops(&mut out, db, "TABLE", &t.schema, Some(&t.name), o);
         return out.s;
     }
-    if let Some(g) = &t.graph {
-        s.push_str(&format!(" AS {g}"));
-    }
-    if !t.memory_optimized {
-        let clustered = t.indexes.iter().any(|i| matches!(i.kind, IndexKind::Clustered | IndexKind::ClusteredColumnstore));
-        if !clustered {
-            s.push_str(&storage_sql(&t.storage, o, default_fg));
-        }
-        if !o.has(Opt::IgnoreFileGroups) {
-            if let Some(fg) = t.text_filegroup.as_ref().filter(|fg| !fg.eq_ignore_ascii_case(default_fg)) {
-                s.push_str(&format!(" TEXTIMAGE_ON {}", quote(fg)));
-            }
-            if let Some(fg) = &t.filestream_filegroup {
-                s.push_str(&format!(" FILESTREAM_ON {}", quote(fg)));
-            }
-        }
-    }
-    let mut with = Vec::new();
-    if !t.memory_optimized
-        && let Some(c) = compression_sql(&t.storage)
-    {
-        with.push(c);
-    }
-    if t.memory_optimized {
-        with.push("MEMORY_OPTIMIZED = ON".into());
-        if let Some(d) = &t.durability {
-            with.push(format!("DURABILITY = {d}"));
-        }
-    }
-    if let Some(tv) = &t.temporal {
-        let mut v = format!("SYSTEM_VERSIONING = ON (HISTORY_TABLE = {}", tv.history_table.quoted());
-        if let Some(r) = &tv.retention {
-            v.push_str(&format!(", HISTORY_RETENTION_PERIOD = {r}"));
-        }
-        v.push(')');
-        with.push(v);
-    }
-    if !with.is_empty() {
-        s.push_str(&format!("\nWITH\n(\n{}\n)", with.join(",\n")));
-    }
-    out.batch(&s);
+    out.batch(&create_table_sql(t, o, inline, default_fg));
     if t.remote_data_archive {
         out.batch(&format!("ALTER TABLE {name} SET (REMOTE_DATA_ARCHIVE = ON (MIGRATION_STATE = PAUSED))"));
     }
     if let Some(a) = authorization(None, &t.schema, &t.name, t.owner.as_deref(), o) {
         out.batch(&a);
     }
-    if t.lock_escalation != "TABLE" && !t.lock_escalation.is_empty() {
-        out.batch(&format!("ALTER TABLE {name} SET (LOCK_ESCALATION = {})", t.lock_escalation));
-    }
     triggers(&mut out, &t.triggers, &t.schema, &name, o);
-    if !inline {
-        for (ck, s) in &checks {
-            out.batch(&format!("ALTER TABLE {name} {}ADD {s}", with_nocheck(ck.not_trusted)));
+    // Checks (named ones by name, then system-named ones by text) and edge constraints.
+    if !o.has(Opt::IgnoreChecks) {
+        let mut checks: Vec<&CheckConstraint> = t.check_constraints.iter().collect();
+        checks.sort_by(|a, b| a.system_named.cmp(&b.system_named).then_with(|| if a.system_named { a.definition.cmp(&b.definition) } else { a.name.cmp(&b.name) }));
+        if !inline {
+            for ck in &checks {
+                let nfr = if ck.not_for_replication && !o.has(Opt::IgnoreNotForReplication) { "NOT FOR REPLICATION " } else { "" };
+                out.batch(&format!("ALTER TABLE {name} {}ADD CONSTRAINT {} CHECK {nfr}({})", with_nocheck(ck.not_trusted), quote(&ck.name), super::expr::rewrite(&ck.definition)));
+            }
+            for e in &t.edge_constraints {
+                out.batch(&crate::schema::ddl_objects::add_edge_constraint(&t.object_name(), e, false));
+            }
+        }
+        if nocheck_ok {
+            // Inline constraints cannot be created WITH NOCHECK: those are disabled afterwards.
+            for ck in checks.iter().filter(|c| c.disabled || (inline && c.not_trusted && !o.has(Opt::IgnoreWithNocheck))) {
+                out.batch(&format!("ALTER TABLE {name} NOCHECK CONSTRAINT {}", quote(&ck.name)));
+            }
         }
     }
-    if !t.memory_optimized {
-        for ix in keys {
-            if !inline {
-                out.batch(&format!("ALTER TABLE {name} ADD CONSTRAINT {} {}", quote(&ix.name), key_sql(ix, o, default_fg)));
-            }
-            if ix.disabled {
-                out.batch(&format!("ALTER INDEX {} ON {name} DISABLE", quote(&ix.name)));
-            }
-        }
-        if !o.has(Opt::IgnoreIndexes) {
-            let mut rest: Vec<&Index> = t.indexes.iter().filter(|i| !(i.primary_key || i.unique_constraint)).collect();
-            rest.sort_by_key(|i| (index_rank(i), i.name.clone()));
-            for ix in rest {
-                if matches!(ix.kind, IndexKind::Xml | IndexKind::Spatial) {
-                    out.module(&xml_or_spatial_sql(&name, ix, o));
-                    continue;
+    // Keys, indexes and statistics.
+    let r = render(o);
+    let host = crate::schema::ddl::Host::of_table(t);
+    let mut parts: Vec<TablePart> = Vec::new();
+    if !o.has(Opt::IgnoreIndexes) {
+        parts.extend(
+            t.indexes
+                .iter()
+                .filter(|i| !inlined(t, i, inline))
+                .filter(|i| !(o.has(Opt::IgnorePerformanceIndexes) && !(i.primary_key || i.unique_constraint)))
+                .map(TablePart::Index),
+        );
+    }
+    if !o.has(Opt::IgnoreStatistics) {
+        parts.extend(t.statistics.iter().map(TablePart::Statistic));
+    }
+    parts.sort_by(part_order);
+    for p in parts {
+        match p {
+            TablePart::Index(ix) if matches!(ix.kind, IndexKind::Xml | IndexKind::Spatial) => out.module(&xml_or_spatial_sql(&name, ix, o)),
+            TablePart::Index(ix) => {
+                for s in crate::schema::ddl::create_index_with(&name, ix, &r, &host) {
+                    out.batch(&s);
                 }
-                out.batch(&create_index_sql(&name, ix, o, default_fg));
-                if ix.disabled {
-                    out.batch(&format!("ALTER INDEX {} ON {name} DISABLE", quote(&ix.name)));
-                }
+            }
+            TablePart::Statistic(s) => out.batch(&crate::schema::ddl_objects::create_statistics(&t.object_name(), s, true)),
+        }
+    }
+    if !o.has(Opt::IgnoreKeys) {
+        for fk in &t.foreign_keys {
+            out.batch(&format!("ALTER TABLE {name} {}ADD {}", with_nocheck(fk.not_trusted), foreign_key_sql(fk, o)));
+        }
+        if nocheck_ok {
+            for fk in t.foreign_keys.iter().filter(|f| f.disabled) {
+                out.batch(&format!("ALTER TABLE {name} NOCHECK CONSTRAINT {}", quote(&fk.name)));
             }
         }
     }
-    if !inline {
-        for (fk, s) in &fks {
-            out.batch(&format!("ALTER TABLE {name} {}ADD {s}", with_nocheck(fk.not_trusted)));
-        }
-    }
-    if nocheck_ok {
-        // Inline constraints cannot be created WITH NOCHECK: those are disabled afterwards.
-        let off = |disabled: bool, not_trusted: bool| disabled || (inline && not_trusted && !o.has(Opt::IgnoreWithNocheck));
-        let mut disabled: Vec<&str> = t.foreign_keys.iter().filter(|f| off(f.disabled, f.not_trusted)).map(|f| f.name.as_str()).collect();
-        disabled.extend(t.check_constraints.iter().filter(|c| off(c.disabled, c.not_trusted)).map(|c| c.name.as_str()));
-        for n in disabled {
-            out.batch(&format!("ALTER TABLE {name} NOCHECK CONSTRAINT {}", quote(n)));
-        }
+    if let Some(ct) = t.change_tracking.as_ref().filter(|_| !o.has(Opt::IgnoreChangeTracking)) {
+        let columns = if ct.track_columns_updated { " WITH (TRACK_COLUMNS_UPDATED = ON)" } else { "" };
+        out.batch(&format!("ALTER TABLE {name} ENABLE CHANGE_TRACKING{columns}"));
     }
     // Rules and defaults bound with sp_bindrule / sp_bindefault, in that order.
-    for c in &t.columns {
-        let column = literal(&format!("{name}.{}", quote(&c.name)));
-        if let Some(r) = &c.bound_rule {
-            out.batch(&format!("EXEC sp_bindrule {}, {column}", literal(r)));
+    if !o.has(Opt::IgnoreBindings) {
+        for c in &t.columns {
+            let column = literal(&format!("{name}.{}", quote(&c.name)));
+            if let Some(r) = &c.bound_rule {
+                out.batch(&format!("EXEC sp_bindrule {}, {column}", literal(r)));
+            }
+            if let Some(d) = &c.bound_default {
+                out.batch(&format!("EXEC sp_bindefault {}, {column}", literal(d)));
+            }
         }
-        if let Some(d) = &c.bound_default {
-            out.batch(&format!("EXEC sp_bindefault {}, {column}", literal(d)));
-        }
     }
-    if let Some(ct) = &t.change_tracking {
-        out.batch(&format!(
-            "ALTER TABLE {name} ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = {})",
-            on_off(ct.track_columns_updated)
-        ));
-    }
-    // Statistics, edge constraints, the full-text index and sensitivity classification.
-    for s in crate::schema::ddl_objects::table_parts(t, o.has(Opt::InlineFulltextFields)) {
-        out.batch(&s);
-    }
-    permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), o);
+    let columns: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+    permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), &columns, o);
     xprops(&mut out, db, "TABLE", &t.schema, Some(&t.name), o);
+    if !t.lock_escalation.is_empty() && !t.lock_escalation.eq_ignore_ascii_case("TABLE") {
+        out.module(&format!("{}\r\n", crate::schema::ddl::lock_escalation(&name, &t.lock_escalation.to_uppercase())));
+    }
     if t.large_value_types_out_of_row {
         out.batch(&crate::schema::ddl::large_values_out_of_row(&name, true));
+    }
+    if let Some(f) = t.fulltext_index.as_ref().filter(|_| !o.has(Opt::IgnoreFullTextIndexing)) {
+        for s in crate::schema::ddl_objects::create_fulltext_index(&t.object_name(), f, true, false, true, o.has(Opt::InlineFulltextFields)) {
+            out.batch(&s);
+        }
+    }
+    if !o.has(Opt::IgnoreSensitivityClassification) {
+        for c in &t.columns {
+            if let Some(s) = &c.sensitivity {
+                out.batch(&sensitivity_sql(&name, &c.name, s));
+            }
+        }
     }
     out.s
 }
@@ -642,7 +692,7 @@ pub fn statements(list: &[String]) -> String {
 }
 
 /// `CONSTRAINT [n] FOREIGN KEY (...) REFERENCES ...`.
-fn foreign_key_sql(fk: &ForeignKey) -> String {
+fn foreign_key_sql(fk: &ForeignKey, o: &Options) -> String {
     let mut s = format!(
         "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         quote(&fk.name),
@@ -655,7 +705,7 @@ fn foreign_key_sql(fk: &ForeignKey) -> String {
             s.push_str(&format!(" ON {what} {}", action.replace('_', " ")));
         }
     }
-    if fk.not_for_replication {
+    if fk.not_for_replication && !o.has(Opt::IgnoreNotForReplication) {
         s.push_str(" NOT FOR REPLICATION");
     }
     s
@@ -666,7 +716,9 @@ fn is_graph_internal(c: &Column) -> bool {
         || c.name.starts_with("to_obj_id_") || c.name.starts_with("to_id_") || c.name.starts_with('$')
 }
 
-pub fn view(db: &Database, v: &View, o: &Options, default_fg: &str) -> String {
+/// A view's file: its text and owner, triggers, indexes (clustered, then nonclustered, then
+/// statistics), permissions, extended properties and the full-text index.
+pub fn view(db: &Database, v: &View, o: &Options, _default_fg: &str) -> String {
     let name = qname(&v.schema, &v.name);
     let mut out = Out::default();
     if !v.definition.is_empty() {
@@ -676,14 +728,31 @@ pub fn view(db: &Database, v: &View, o: &Options, default_fg: &str) -> String {
     if let Some(a) = authorization(None, &v.schema, &v.name, v.owner.as_deref(), o) {
         out.batch(&a);
     }
-    let mut ixs: Vec<&Index> = v.indexes.iter().collect();
-    ixs.sort_by_key(|i| (i.kind != IndexKind::Clustered, i.name.clone()));
-    for ix in ixs {
-        out.batch(&create_index_sql(&name, ix, o, default_fg));
-    }
     triggers(&mut out, &v.triggers, &v.schema, &name, o);
-    permissions(&mut out, db, "OBJECT", &v.schema, Some(&v.name), o);
+    if !o.has(Opt::IgnoreIndexes) {
+        let r = render(o);
+        let host = crate::schema::ddl::Host::view();
+        let mut ixs: Vec<&Index> = v.indexes.iter().filter(|i| !(o.has(Opt::IgnorePerformanceIndexes) && !(i.primary_key || i.unique_constraint))).collect();
+        ixs.sort_by_key(|i| i.kind != IndexKind::Clustered);
+        for ix in ixs {
+            for s in crate::schema::ddl::create_index_with(&name, ix, &r, &host) {
+                out.batch(&s);
+            }
+        }
+        if !o.has(Opt::IgnoreStatistics) {
+            for s in &v.statistics {
+                out.batch(&crate::schema::ddl_objects::create_statistics(&ObjectName::new(&v.schema, &v.name), s, true));
+            }
+        }
+    }
+    let columns: Vec<&str> = v.columns.iter().map(|c| c.name.as_str()).collect();
+    permissions(&mut out, db, "OBJECT", &v.schema, Some(&v.name), &columns, o);
     xprops(&mut out, db, "VIEW", &v.schema, Some(&v.name), o);
+    if let Some(f) = v.fulltext_index.as_ref().filter(|_| !o.has(Opt::IgnoreFullTextIndexing)) {
+        for s in crate::schema::ddl_objects::create_fulltext_index(&ObjectName::new(&v.schema, &v.name), f, true, false, true, o.has(Opt::InlineFulltextFields)) {
+            out.batch(&s);
+        }
+    }
     out.s
 }
 
@@ -691,7 +760,9 @@ pub fn routine(db: &Database, r: &Routine, o: &Options) -> String {
     let name = qname(&r.schema, &r.name);
     let mut out = Out::default();
     if r.clr_method.is_some() {
-        out.batch(&crate::schema::ddl_objects::clr_routine(r, "CREATE"));
+        // CLR modules have no session settings: both are written OFF.
+        out.set_options(&ModuleSettings { ansi_nulls: false, quoted_identifier: false });
+        out.module(&clr_routine(r));
     } else if !r.definition.is_empty() {
         out.set_options(&r.settings);
         out.module(&module_sql(&r.definition, "CREATE", &name));
@@ -699,10 +770,68 @@ pub fn routine(db: &Database, r: &Routine, o: &Options) -> String {
     if let Some(a) = authorization(None, &r.schema, &r.name, r.owner.as_deref(), o) {
         out.batch(&a);
     }
-    permissions(&mut out, db, "OBJECT", &r.schema, Some(&r.name), o);
+    permissions(&mut out, db, "OBJECT", &r.schema, Some(&r.name), &[], o);
     let class = if matches!(r.kind, RoutineKind::Procedure | RoutineKind::ClrProcedure) { "PROCEDURE" } else { "FUNCTION" };
     xprops(&mut out, db, class, &r.schema, Some(&r.name), o);
     out.s
+}
+
+/// A parameter or return type as SQL Compare writes it for CLR modules: `[nvarchar] (50)`,
+/// `[decimal] (10, 2)`, `[dbo].[Point]`.
+fn clr_type(t: &str) -> String {
+    let t = t.trim();
+    if t.starts_with('[') {
+        return t.to_string();
+    }
+    let (base, args) = match t.split_once('(') {
+        Some((b, a)) => (b.trim(), Some(a.trim_end_matches(')').trim())),
+        None => (t, None),
+    };
+    let mut s = quote(base);
+    match (base.to_ascii_lowercase().as_str(), args) {
+        ("datetime2" | "time" | "datetimeoffset", Some("7")) | (_, None) => {}
+        ("decimal" | "numeric", Some(a)) => s.push_str(&format!(" ({})", a.split(',').map(str::trim).collect::<Vec<_>>().join(", "))),
+        (_, Some(a)) => s.push_str(&format!(" ({})", if a.eq_ignore_ascii_case("max") || a == "-1" { "max" } else { a })),
+    }
+    s
+}
+
+/// CREATE of a CLR procedure, function or aggregate, ending with a line break.
+fn clr_routine(r: &Routine) -> String {
+    let name = qname(&r.schema, &r.name);
+    let method = r.clr_method.clone().unwrap_or_default();
+    let params = r
+        .parameters
+        .iter()
+        .map(|p| format!("{} {}{}{}", p.name, clr_type(&p.data_type), p.default.as_ref().map(|d| format!("={d}")).unwrap_or_default(), if p.output { " OUTPUT" } else { "" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let execute_as = match r.execute_as.as_deref() {
+        None => "CALLER".to_string(),
+        Some(x @ ("OWNER" | "SELF")) => x.to_string(),
+        Some(u) => literal(u),
+    };
+    match r.kind {
+        RoutineKind::ClrProcedure => {
+            let params = if r.parameters.is_empty() { String::new() } else { format!(" ({params})") };
+            format!("CREATE PROCEDURE {name}{params}\r\nWITH EXECUTE AS {execute_as}\r\nAS EXTERNAL NAME {method}\r\n")
+        }
+        RoutineKind::ClrAggregate => format!("CREATE AGGREGATE {name} ({params})\r\nRETURNS {}\r\nEXTERNAL NAME {method}\r\n", clr_type(r.returns.as_deref().unwrap_or_default())),
+        _ => {
+            let returns = if r.kind == RoutineKind::ClrTableFunction {
+                let cols: Vec<String> = r
+                    .result_columns
+                    .iter()
+                    .map(|c| column_sql(&Column { identity: None, default: None, rowguidcol: false, ..c.clone() }))
+                    .collect();
+                format!("TABLE (\r\n{})", cols.join(",\r\n"))
+            } else {
+                clr_type(r.returns.as_deref().unwrap_or_default())
+            };
+            let null_input = if r.null_on_null_input { ", \r\nRETURNS NULL ON NULL INPUT" } else { "" };
+            format!("CREATE FUNCTION {name} ({params})\r\nRETURNS {returns}\r\nWITH EXECUTE AS {execute_as}{null_input}\r\nEXTERNAL NAME {method}\r\n")
+        }
+    }
 }
 
 pub fn user_type(db: &Database, t: &UserType, o: &Options) -> String {
@@ -713,25 +842,50 @@ pub fn user_type(db: &Database, t: &UserType, o: &Options) -> String {
             let base = t.base_type.as_ref().map(|b| type_sql(b).replacen('[', "", 1).replacen(']', "", 1)).unwrap_or_default();
             out.batch(&format!("CREATE TYPE {name} FROM {base} {}", if t.nullable { "NULL" } else { "NOT NULL" }));
         }
-        UserTypeKind::Clr => out.batch(&format!("CREATE TYPE {name} EXTERNAL NAME {}", t.clr_class.clone().unwrap_or_default())),
+        UserTypeKind::Clr => out.batch(&format!("CREATE TYPE {name}\nEXTERNAL NAME {}", t.clr_class.clone().unwrap_or_default())),
         UserTypeKind::Table => {
-            let mut lines: Vec<String> = t.columns.iter().map(column_sql).collect();
-            for ix in &t.indexes {
-                let named = if ix.system_named { String::new() } else { format!("CONSTRAINT {} ", quote(&ix.name)) };
-                if ix.primary_key || ix.unique_constraint {
-                    let what = if ix.primary_key { "PRIMARY KEY" } else { "UNIQUE" };
-                    lines.push(format!("{named}{what} {} ({})", kind_words(ix), key_list(ix)));
-                } else {
-                    lines.push(format!("INDEX {} {} ({})", quote(&ix.name), kind_words(ix), key_list(ix)));
+            // Constraint names are not written in a table type, defaults' included.
+            let mut lines: Vec<String> = t
+                .columns
+                .iter()
+                .map(|c| {
+                    let mut c = c.clone();
+                    let default = c.default.take();
+                    let mut s = column_sql(&c);
+                    if let Some(d) = default {
+                        s.push_str(&format!(" DEFAULT {}", d.definition));
+                    }
+                    s
+                })
+                .collect();
+            if !o.has(Opt::IgnoreIndexes) || t.memory_optimized {
+                let host = crate::schema::ddl::Host { table_type: true, memory_optimized: t.memory_optimized, ..Default::default() };
+                // The primary key first, then other indexes, then unique constraints.
+                let mut ixs: Vec<&Index> = t.indexes.iter().collect();
+                ixs.sort_by_key(|i| if i.primary_key { 0 } else if i.unique_constraint { 2 } else { 1 });
+                for ix in ixs {
+                    if ix.primary_key || ix.unique_constraint {
+                        let unnamed = Index { system_named: true, ..ix.clone() };
+                        lines.push(crate::schema::ddl::key_constraint_with(&unnamed, &render(&o.clone().with(Opt::IgnoreSystemNamedConstraintNames)), &host));
+                    } else {
+                        let unique = if ix.unique { "UNIQUE " } else { "" };
+                        let kind = if ix.kind == IndexKind::NonclusteredHash { "NONCLUSTERED HASH" } else if ix.kind == IndexKind::Clustered { "CLUSTERED" } else { "NONCLUSTERED" };
+                        let mut s = format!("INDEX {} {unique}{kind} ({})", quote(&ix.name), ix.columns.iter().map(|c| format!("{}{}", quote(&c.name), if c.descending { " DESC" } else { "" })).collect::<Vec<_>>().join(", "));
+                        if let Some(b) = ix.bucket_count {
+                            s.push_str(&format!(" WITH (BUCKET_COUNT={b})"));
+                        }
+                        lines.push(s);
+                    }
                 }
             }
-            for ck in &t.check_constraints {
-                let named = if ck.system_named { String::new() } else { format!("CONSTRAINT {} ", quote(&ck.name)) };
-                lines.push(format!("{named}CHECK ({})", super::expr::rewrite(&ck.definition)));
+            if !o.has(Opt::IgnoreChecks) {
+                let mut checks: Vec<String> = t.check_constraints.iter().map(|ck| super::expr::rewrite(&ck.definition)).collect();
+                checks.sort();
+                lines.extend(checks.into_iter().map(|c| format!("CHECK ({c})")));
             }
             let mut s = format!("CREATE TYPE {name} AS TABLE\n(\n{}\n)", lines.join(",\n"));
             if t.memory_optimized {
-                s.push_str("\nWITH (MEMORY_OPTIMIZED = ON)");
+                s.push_str("\nWITH\n(\nMEMORY_OPTIMIZED = ON\n)");
             }
             out.batch(&s);
         }
@@ -739,7 +893,7 @@ pub fn user_type(db: &Database, t: &UserType, o: &Options) -> String {
     if let Some(a) = authorization(Some("TYPE"), &t.schema, &t.name, t.owner.as_deref(), o) {
         out.batch(&a);
     }
-    permissions(&mut out, db, "TYPE", &t.schema, Some(&t.name), o);
+    permissions(&mut out, db, "TYPE", &t.schema, Some(&t.name), &[], o);
     xprops(&mut out, db, "TYPE", &t.schema, Some(&t.name), o);
     if !o.has(Opt::IgnoreBindings) {
         if let Some(r) = &t.bound_rule {
@@ -757,7 +911,10 @@ pub fn sequence(db: &Database, s: &Sequence, o: &Options) -> String {
     out.batch(&format!(
         "CREATE SEQUENCE {}\nAS {}\nSTART WITH {}\nINCREMENT BY {}\nMINVALUE {}\nMAXVALUE {}\n{}\n{}",
         qname(&s.schema, &s.name),
-        s.data_type.sql(),
+        match s.data_type.name.to_ascii_lowercase().as_str() {
+            "decimal" | "numeric" => format!("{}({},{})", s.data_type.name, s.data_type.precision.unwrap_or(18), s.data_type.scale.unwrap_or(0)),
+            _ => s.data_type.name.clone(),
+        },
         s.start,
         s.increment,
         s.minimum,
@@ -766,13 +923,13 @@ pub fn sequence(db: &Database, s: &Sequence, o: &Options) -> String {
         match (s.cached, s.cache_size) {
             (false, _) => "NO CACHE".to_string(),
             (true, Some(n)) => format!("CACHE {n}"),
-            (true, None) => "CACHE".to_string(),
+            (true, None) => "CACHE ".to_string(),
         }
     ));
     if let Some(a) = authorization(None, &s.schema, &s.name, s.owner.as_deref(), o) {
         out.batch(&a);
     }
-    permissions(&mut out, db, "OBJECT", &s.schema, Some(&s.name), o);
+    permissions(&mut out, db, "OBJECT", &s.schema, Some(&s.name), &[], o);
     xprops(&mut out, db, "SEQUENCE", &s.schema, Some(&s.name), o);
     out.s
 }
@@ -783,15 +940,18 @@ pub fn synonym(db: &Database, s: &Synonym, o: &Options) -> String {
     if let Some(a) = authorization(None, &s.schema, &s.name, s.owner.as_deref(), o) {
         out.batch(&a);
     }
-    permissions(&mut out, db, "OBJECT", &s.schema, Some(&s.name), o);
+    permissions(&mut out, db, "OBJECT", &s.schema, Some(&s.name), &[], o);
     xprops(&mut out, db, "SYNONYM", &s.schema, Some(&s.name), o);
     out.s
 }
 
 pub fn schema(db: &Database, s: &Schema, o: &Options) -> String {
     let mut out = Out::default();
-    out.batch(&format!("CREATE SCHEMA {}\nAUTHORIZATION {}", quote(&s.name), quote(&s.owner)));
-    permissions(&mut out, db, "SCHEMA", &s.name, None, o);
+    // dbo exists in every database: its file holds only its permissions and properties.
+    if s.name != "dbo" {
+        out.batch(&format!("CREATE SCHEMA {}\nAUTHORIZATION {}", quote(&s.name), quote(&s.owner)));
+    }
+    permissions(&mut out, db, "SCHEMA", &s.name, None, &[], o);
     if !o.has(Opt::IgnoreExtendedProperties) {
         for p in db.extended_properties.iter().filter(|p| p.class == "SCHEMA" && p.schema.as_deref() == Some(s.name.as_str())) {
             out.batch(&xprop_sql(p));
@@ -826,7 +986,7 @@ pub fn role(db: &Database, p: &Principal, o: &Options) -> String {
     match p.kind.as_str() {
         "APPLICATION_ROLE" => {
             let schema = p.default_schema.as_deref().map(|s| format!(", DEFAULT_SCHEMA = {}", quote(s))).unwrap_or_default();
-            out.batch(&format!("CREATE APPLICATION ROLE {} WITH PASSWORD = N''{schema}", quote(&p.name)))
+            out.batch(&format!("CREATE APPLICATION ROLE {} WITH PASSWORD = 'p@ssw0rd'{schema}", quote(&p.name)))
         }
         _ => out.batch(&format!("CREATE ROLE {}\nAUTHORIZATION {}", quote(&p.name), quote(p.owner.as_deref().unwrap_or("dbo")))),
     }
@@ -904,9 +1064,173 @@ pub fn ddl_trigger(t: &DdlTrigger) -> String {
     out.set_options(&ModuleSettings::default());
     out.module(&module_sql(&t.definition, "CREATE", &quote(&t.name)));
     if t.disabled {
-        out.batch(&format!("DISABLE TRIGGER {} ON DATABASE", quote(&t.name)));
+        // SQL Compare writes the name as it is here, without brackets.
+        out.batch(&format!("DISABLE TRIGGER {} ON DATABASE", t.name));
     }
     out.s
+}
+
+/// A default's or rule's file head: its stored text as it is (a default after
+/// `SET QUOTED_IDENTIFIER OFF`), then `GO`.
+pub fn bindable(b: &BindableObject, default: bool) -> String {
+    let mut out = Out::default();
+    if default {
+        out.batch("SET QUOTED_IDENTIFIER OFF");
+    }
+    out.module(&crate::schema::ddl_objects::create_bindable(b));
+    out.s
+}
+
+/// A security policy as SQL Compare writes it in a folder, line breaks included: LF between
+/// a predicate and its ON, CRLF elsewhere, and a batch end of LF, `GO`, LF.
+pub fn security_policy(p: &SecurityPolicy) -> String {
+    let predicates: Vec<String> = p
+        .predicates
+        .iter()
+        .map(|x| {
+            let op = x.operation.as_ref().map(|o| format!(" {o}")).unwrap_or_default();
+            format!("ADD {} PREDICATE {}{}\nON {}{op}", x.kind, x.function, x.arguments, x.table)
+        })
+        .collect();
+    let binding = if p.schema_bound { "" } else { ", SCHEMABINDING = OFF" };
+    let nfr = if p.not_for_replication { "NOT FOR REPLICATION\r\n" } else { "" };
+    format!(
+        "CREATE SECURITY POLICY {}\r\n{}\r\nWITH (STATE = {}{binding})\r\n{nfr}\nGO\n",
+        qname(&p.schema, &p.name),
+        predicates.join(",\r\n"),
+        on_off(p.enabled)
+    )
+}
+
+/// CREATE XML SCHEMA COLLECTION with the schemas indented as SQL Compare writes them.
+pub fn xml_schema_collection(x: &XmlSchemaCollection) -> String {
+    format!("CREATE XML SCHEMA COLLECTION {}\r\nAS {}", qname(&x.schema, &x.name), crate::schema::ddl::sql_string(&indent_xml(&x.definition)))
+}
+
+/// XML laid out the way .NET's indenting XML writer does it: each element on its own line,
+/// two spaces per level, `<e />` for empty elements, an element holding text kept on one
+/// line; comments, processing instructions and whitespace between tags dropped.
+pub fn indent_xml(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len() * 2);
+    // Per open element: whether it holds text (then its contents are not indented), and
+    // whether it has child elements.
+    let mut stack: Vec<(bool, bool)> = Vec::new();
+    let mut rest = xml;
+    let newline = |out: &mut String, depth: usize| {
+        if !out.is_empty() {
+            out.push_str("\r\n");
+        }
+        out.push_str(&"  ".repeat(depth));
+    };
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("<!--") {
+            rest = r.find("-->").map(|i| &r[i + 3..]).unwrap_or("");
+        } else if let Some(r) = rest.strip_prefix("<?") {
+            rest = r.find("?>").map(|i| &r[i + 2..]).unwrap_or("");
+        } else if rest.starts_with("<![CDATA[") {
+            let end = rest.find("]]>").map(|i| i + 3).unwrap_or(rest.len());
+            if let Some(top) = stack.last_mut() {
+                top.0 = true;
+            }
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+        } else if let Some(r) = rest.strip_prefix("</") {
+            let end = r.find('>').unwrap_or(r.len());
+            let (text, children) = stack.pop().unwrap_or((false, false));
+            if children && !text {
+                newline(&mut out, stack.len());
+            }
+            out.push_str("</");
+            out.push_str(r[..end].trim());
+            out.push('>');
+            rest = r.get(end + 1..).unwrap_or("");
+        } else if rest.starts_with('<') {
+            // Find the end of the tag outside attribute values.
+            let mut quote = None;
+            let mut end = rest.len();
+            for (i, c) in rest.char_indices().skip(1) {
+                match (quote, c) {
+                    (None, '"' | '\'') => quote = Some(c),
+                    (Some(q), c) if c == q => quote = None,
+                    (None, '>') => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let mut tag = rest[1..end].trim_end();
+            let empty = tag.ends_with('/');
+            if empty {
+                tag = tag[..tag.len() - 1].trim_end();
+            }
+            let mixed = stack.last().is_some_and(|t| t.0);
+            if let Some(top) = stack.last_mut() {
+                top.1 = true;
+            }
+            if !mixed {
+                newline(&mut out, stack.len());
+            }
+            out.push('<');
+            out.push_str(&normalize_tag(tag));
+            if empty {
+                out.push_str(" />");
+            } else {
+                out.push('>');
+                stack.push((false, false));
+            }
+            rest = rest.get(end + 1..).unwrap_or("");
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            let text = &rest[..end];
+            if !text.trim().is_empty() {
+                if let Some(top) = stack.last_mut() {
+                    top.0 = true;
+                }
+                out.push_str(text);
+            }
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+/// A start tag's name and attributes with single spaces between them and double quotes.
+fn normalize_tag(tag: &str) -> String {
+    let mut out = String::new();
+    let mut chars = tag.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut space = false;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                out.push('"');
+            }
+            (Some(q), c) if c == q => {
+                quote = None;
+                out.push('"');
+            }
+            (Some('\''), '"') => out.push_str("&quot;"),
+            (None, c) if c.is_whitespace() => space = true,
+            (None, '=') => {
+                space = false;
+                out.push('=');
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            (None, c) => {
+                if space && !out.ends_with('=') {
+                    out.push(' ');
+                }
+                space = false;
+                out.push(c);
+            }
+            (Some(_), c) => out.push(c),
+        }
+    }
+    out
 }
 
 /// A database-level extended property, in its own file.

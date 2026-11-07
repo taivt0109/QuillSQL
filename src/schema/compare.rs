@@ -870,7 +870,8 @@ impl<'a> Comparer<'a> {
             }
             (x, y) => d.opt_prop("Filter", x.as_deref(), y.as_deref()),
         }
-        if !o.has(Opt::IgnoreDataCompression) && !(o.has(Opt::IgnoreFileGroups) && a.storage.partition_column.is_some()) {
+        let partitioned = a.storage.partition_column.is_some() || b.storage.partition_column.is_some();
+        if !o.has(Opt::IgnoreDataCompression) && !(o.has(Opt::IgnoreFileGroups) && partitioned) {
             d.prop("Data compression", compression(&a.storage), compression(&b.storage));
         }
         if let (Some(x), Some(y)) = (&a.xml, &b.xml) {

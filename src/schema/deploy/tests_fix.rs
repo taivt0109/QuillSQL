@@ -287,7 +287,7 @@ fn compression_rebuild_keeps_partition_groups() {
         PartitionCompression { partition: 2, compression: "ROW".into() },
     ];
     let s = script(&db(vec![t]), &tgt, &Options::default_set().without(Opt::IgnoreFileGroups));
-    assert!(s.sql.contains("REBUILD PARTITION = ALL\r\nWITH (DATA_COMPRESSION = PAGE ON PARTITIONS (1), DATA_COMPRESSION = ROW ON PARTITIONS (2))"), "{}", s.sql);
+    assert!(s.sql.contains("REBUILD PARTITION = ALL\r\nWITH (DATA_COMPRESSION = ROW ON PARTITIONS (2), DATA_COMPRESSION = PAGE ON PARTITIONS (1))"), "{}", s.sql);
 }
 
 #[test]

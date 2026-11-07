@@ -616,8 +616,11 @@ pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(Obj
     let fg = info.default_filegroup.as_str();
     let mut out: Vec<(ObjectKey, String)> = Vec::new();
     let key = |ty, s: &str, n: &str| (FileKind::Object(ty), s.to_string(), n.to_string());
-    for s in db.schemas.iter().filter(|s| s.name != "dbo") {
-        out.push((key(ObjectType::Schema, "", &s.name), script::schema(db, s, o)));
+    for s in &db.schemas {
+        let text = script::schema(db, s, o);
+        if !text.is_empty() {
+            out.push((key(ObjectType::Schema, "", &s.name), text));
+        }
     }
     let roles: Vec<&Principal> = db.principals.iter().filter(|p| p.is_role()).collect();
     for p in &roles {

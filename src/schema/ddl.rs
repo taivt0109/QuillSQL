@@ -210,18 +210,32 @@ pub fn compression_option(st: &Storage, r: &Render) -> Option<String> {
     if r.has(Opt::IgnoreDataCompression) {
         return None;
     }
+    let partitioned = st.partition_column.is_some() || st.compression.iter().any(|p| p.partition > 0);
+    // NONE and COLUMNSTORE (a columnstore index's own) are not written.
+    let written = |c: &str| !c.eq_ignore_ascii_case("NONE") && !c.eq_ignore_ascii_case("COLUMNSTORE");
     match st.compression.as_slice() {
         [] => None,
-        [one] if one.partition == 0 => (one.compression != "NONE").then(|| format!("DATA_COMPRESSION = {}", one.compression)),
-        many if r.has(Opt::IgnoreFileGroups) => {
-            many.first().filter(|p| p.compression != "NONE").map(|p| format!("DATA_COMPRESSION = {}", p.compression))
+        // Partitioned storage has no compression clause when filegroups are ignored.
+        _ if partitioned && r.has(Opt::IgnoreFileGroups) => None,
+        [one, ..] if !partitioned || st.compression.iter().all(|p| p.compression == one.compression) => {
+            written(&one.compression).then(|| format!("DATA_COMPRESSION = {}", one.compression))
         }
-        many => Some(
-            many.iter()
-                .map(|p| format!("DATA_COMPRESSION = {} ON PARTITIONS ({})", p.compression, p.partition))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
+        // One item per kind of compression (NONE, ROW, PAGE, COLUMNSTORE, COLUMNSTORE_ARCHIVE),
+        // with its partitions: `DATA_COMPRESSION = PAGE ON PARTITIONS (1,3)`.
+        many => {
+            let order = |c: &str| ["NONE", "ROW", "PAGE", "COLUMNSTORE", "COLUMNSTORE_ARCHIVE"].iter().position(|x| x.eq_ignore_ascii_case(c)).unwrap_or(9);
+            let mut kinds: Vec<&str> = many.iter().map(|p| p.compression.as_str()).collect();
+            kinds.sort_by_key(|c| order(c));
+            kinds.dedup();
+            let items: Vec<String> = kinds
+                .iter()
+                .map(|k| {
+                    let parts: Vec<String> = many.iter().filter(|p| p.compression == *k).map(|p| p.partition.to_string()).collect();
+                    format!("DATA_COMPRESSION = {k} ON PARTITIONS ({})", parts.join(","))
+                })
+                .collect();
+            many.iter().any(|p| written(&p.compression)).then(|| items.join(", "))
+        }
     }
 }
 

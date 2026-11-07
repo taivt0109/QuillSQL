@@ -661,7 +661,7 @@ impl Reader {
              LEFT JOIN sys.service_contract_message_usages AS u ON u.service_contract_id = c.service_contract_id
              LEFT JOIN sys.service_message_types AS mt ON mt.message_type_id = u.message_type_id
              WHERE c.name <> N'DEFAULT' AND c.name NOT LIKE N'http://schemas.microsoft.com/SQL/%'
-             ORDER BY c.name, mt.name",
+             ORDER BY c.name, u.message_type_id",
         )
         .await?;
         for r in rows {
