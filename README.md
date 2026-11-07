@@ -438,9 +438,10 @@ installed copies offer the update within a day.
   colors and history still work.
 - `insertSemicolons` skips ambiguous places, for example before `THROW`.
 - Smart Rename of database objects produces a script; it does not change other objects for you.
-- Compare does not yet script: turning system versioning on or off, changing a user-defined type
-  that columns use, CLR assemblies, full-text indexes, partition functions and schemes, column-level
-  permissions, and `sql_variant` data. It warns where this matters.
+- Compare writes certificates and keys as comments only (their private keys can't be read), as SQL
+  Compare does. Full-text and PolyBase objects, and files written by Redgate SQL Backup (`.sqb`),
+  are covered by unit tests but have not been checked against a live server or real SQL Backup
+  files.
 - The Compare windows are in English only for now.
 - Tab colors depend on the layout of SSMS 21's document tabs and may need an update for a future
   SSMS.
