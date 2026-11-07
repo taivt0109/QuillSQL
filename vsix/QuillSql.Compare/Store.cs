@@ -112,6 +112,23 @@ namespace QuillSql.Compare
         /// <summary>Data deployments: split the transaction into batches of this many MB.</summary>
         public bool SplitTransactions { get; set; }
         public int MaxTransactionSizeMB { get; set; } = 10;
+        /// <summary>Where deployment scripts are saved, and whether the last folder used becomes it.</summary>
+        public string ScriptFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare", "Scripts");
+        public bool UpdateScriptFolder { get; set; } = true;
+        /// <summary>Encoding of saved deployment scripts and of CSV exports: utf8, utf8bom, unicode or ascii.</summary>
+        public string ScriptEncoding { get; set; } = "utf8bom";
+        public string CsvEncoding { get; set; } = "utf8bom";
+        /// <summary>Where filter files are opened and saved.</summary>
+        public string FilterFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare", "Filters");
+        /// <summary>The program deployment scripts open in (QuillCompare.exe): "" = the program for .sql files, a path to Ssms.exe, or "custom".</summary>
+        public string SqlEditor { get; set; } = "";
+        public string CustomEditor { get; set; } = "";
+        public string CustomEditorArguments { get; set; } = "\"%SF%\"";
+        /// <summary>The deployment wizard's last choices.</summary>
+        public JsonObject Wizard { get; set; } = new JsonObject();
+        public List<string> RecentFolders { get; } = new List<string>();
+        public List<string> RecentSnapshots { get; } = new List<string>();
+        public List<string> RecentFilters { get; } = new List<string>();
 
         public static CompareSettings Load()
         {
@@ -131,6 +148,18 @@ namespace QuillSql.Compare
                     if (o.Str("isolationLevel") != null) s.IsolationLevel = o.Str("isolationLevel");
                     s.SplitTransactions = o.Bool("splitTransactions");
                     if (o.Long("maxTransactionSizeMB") > 0) s.MaxTransactionSizeMB = (int)o.Long("maxTransactionSizeMB");
+                    if (o.Str("scriptFolder") != null) s.ScriptFolder = o.Str("scriptFolder");
+                    if (o.ContainsKey("updateScriptFolder")) s.UpdateScriptFolder = o.Bool("updateScriptFolder");
+                    if (o.Str("scriptEncoding") != null) s.ScriptEncoding = o.Str("scriptEncoding");
+                    if (o.Str("csvEncoding") != null) s.CsvEncoding = o.Str("csvEncoding");
+                    if (o.Str("filterFolder") != null) s.FilterFolder = o.Str("filterFolder");
+                    s.SqlEditor = o.Str("sqlEditor") ?? "";
+                    s.CustomEditor = o.Str("customEditor") ?? "";
+                    if (o.Str("customEditorArguments") != null) s.CustomEditorArguments = o.Str("customEditorArguments");
+                    s.Wizard = o.Obj("wizard") ?? new JsonObject();
+                    s.RecentFolders.AddRange(o.Strings("recentFolders"));
+                    s.RecentSnapshots.AddRange(o.Strings("recentSnapshots"));
+                    s.RecentFilters.AddRange(o.Strings("recentFilters"));
                 }
             }
             catch (Exception ex) when (ex is IOException || ex is FormatException || ex is UnauthorizedAccessException)
@@ -154,6 +183,18 @@ namespace QuillSql.Compare
                     ["isolationLevel"] = IsolationLevel,
                     ["splitTransactions"] = SplitTransactions,
                     ["maxTransactionSizeMB"] = MaxTransactionSizeMB,
+                    ["scriptFolder"] = ScriptFolder,
+                    ["updateScriptFolder"] = UpdateScriptFolder,
+                    ["scriptEncoding"] = ScriptEncoding,
+                    ["csvEncoding"] = CsvEncoding,
+                    ["filterFolder"] = FilterFolder,
+                    ["sqlEditor"] = SqlEditor,
+                    ["customEditor"] = CustomEditor,
+                    ["customEditorArguments"] = CustomEditorArguments,
+                    ["wizard"] = Wizard,
+                    ["recentFolders"] = RecentFolders,
+                    ["recentSnapshots"] = RecentSnapshots,
+                    ["recentFilters"] = RecentFilters,
                 };
                 if (MySchemaDefaults != null) o["mySchemaDefaults"] = MySchemaDefaults;
                 if (MyDataDefaults != null) o["myDataDefaults"] = MyDataDefaults;
@@ -171,6 +212,28 @@ namespace QuillSql.Compare
             Recent.Insert(0, path);
             if (Recent.Count > MaxRecent) Recent.RemoveRange(MaxRecent, Recent.Count - MaxRecent);
             Save();
+        }
+
+        /// <summary>Puts a path first in one of the recent lists (scripts folders, snapshots, filters).</summary>
+        public void AddRecent(List<string> list, string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            list.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+            list.Insert(0, path);
+            if (list.Count > MaxRecent) list.RemoveRange(MaxRecent, list.Count - MaxRecent);
+            Save();
+        }
+
+        /// <summary>The encoding chosen for scripts or CSV files.</summary>
+        public static Encoding EncodingOf(string name)
+        {
+            switch (name)
+            {
+                case "utf8": return new UTF8Encoding(false);
+                case "unicode": return new UnicodeEncoding(false, true);
+                case "ascii": return Encoding.ASCII;
+                default: return new UTF8Encoding(true);
+            }
         }
 
         public void AddServer(string server)

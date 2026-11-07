@@ -45,6 +45,10 @@ namespace QuillSql.Compare
             public JsonObject Script;
             /// <summary>The backup settings chosen (without the password), for the project; null when not backing up.</summary>
             public JsonObject Backup;
+            /// <summary>A snapshot of the target to write before deploying, or null.</summary>
+            public string SnapshotPath;
+            /// <summary>Open the scripts folder's changed files in Explorer afterwards.</summary>
+            public bool ShowFiles;
         }
 
         private readonly ICompareHost _host;
@@ -81,6 +85,19 @@ namespace QuillSql.Compare
         /// <summary>The project's backup settings, to start from.</summary>
         public JsonObject BackupSettings { get; set; }
 
+        /// <summary>The files deploying would write and delete in a scripts folder target; null for other targets.</summary>
+        public Func<Task<JsonObject>> FolderPreview { get; set; }
+
+        /// <summary>Shows the differences of a dependency (by difference index); null when there is no viewer.</summary>
+        public Func<int, Task> ShowDependency { get; set; }
+
+        /// <summary>A snapshot of the target can be written before deploying (schema, live or folder target).</summary>
+        public string SnapshotName { get; set; }
+
+        /// <summary>Where "Create a deployment script" opens it, and how to change that; null when it is fixed.</summary>
+        public string EditorName { get; set; }
+        public Action ChangeEditor { get; set; }
+
         public Outcome Run()
         {
             var outcome = new Outcome();
@@ -89,26 +106,59 @@ namespace QuillSql.Compare
             var page = 0;
 
             // Page 1: deployment method.
-            var deploy = new RadioButton { Content = DeployLabel, IsChecked = _target != null, IsEnabled = _target != null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
-            var recompare = Ui.Check("Recompare after deployment", true);
+            // The choices of the last deployment come back (method, recompare, save a copy, show files, snapshot).
+            var settings = CompareSettings.Load();
+            var remembered = settings.Wizard ?? new JsonObject();
+            bool recall(string key, bool fallback) => remembered.ContainsKey(key) ? remembered.Bool(key) : fallback;
+            var scriptOnly = _target == null || remembered.Str("method") == "script";
+            var deploy = new RadioButton { Content = DeployLabel, IsChecked = !scriptOnly, IsEnabled = _target != null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
+            var recompare = Ui.Check("Recompare after deployment", recall("recompare", true));
             var saved = BackupSettings ?? new JsonObject();
             var backup = Ui.Check("Back up target before deployment", BackupDefaults != null && saved.Bool("enabled"));
             backup.IsEnabled = BackupDefaults != null;
             backup.ToolTip = BackupDefaults != null ? "The backup is the first statement of the deployment script" : "Not available for this target";
-            var saveCopy = Ui.Check("Save a copy of the deployment script:", false);
-            var copyPath = new TextBox { Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare", "Scripts", "deploy_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".sql"), Width = 460, IsEnabled = false };
+            var saveCopy = Ui.Check("Save a copy of the deployment script:", recall("saveCopy", false));
+            var showFiles = Ui.Check("Show the changed files in Explorer afterwards", recall("showFiles", false));
+            showFiles.Visibility = FolderPreview != null ? Visibility.Visible : Visibility.Collapsed;
+            var copyPath = new TextBox { Text = Path.Combine(settings.ScriptFolder, "deploy_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".sql"), Width = 460, IsEnabled = saveCopy.IsChecked == true };
             var browse = Ui.Button("Browse…", () =>
             {
                 var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = Path.GetFileName(copyPath.Text) };
                 if (Dialogs.Show(d, window) == true) copyPath.Text = d.FileName;
             });
-            browse.IsEnabled = false;
+            browse.IsEnabled = saveCopy.IsChecked == true;
             saveCopy.Checked += (s, e) => { copyPath.IsEnabled = browse.IsEnabled = true; };
             saveCopy.Unchecked += (s, e) => { copyPath.IsEnabled = browse.IsEnabled = false; };
-            var deployOptions = Ui.Column(recompare, saveCopy, Ui.Row(copyPath, browse));
+            // A snapshot of the target, to compare with or roll back to later (schema).
+            var snapshot = Ui.Check("Create a snapshot of the target before deployment:", SnapshotName != null && recall("snapshot", false));
+            var snapshotPath = new TextBox { Text = SnapshotName ?? "", Width = 460, IsEnabled = snapshot.IsChecked == true };
+            var snapshotBrowse = Ui.Button("Browse…", () =>
+            {
+                var d = new SaveFileDialog { Filter = "SQL Compare snapshot (*.snp)|*.snp|QuillSQL snapshot (*.json)|*.json", FileName = Path.GetFileName(snapshotPath.Text), InitialDirectory = Directory.Exists(Path.GetDirectoryName(snapshotPath.Text)) ? Path.GetDirectoryName(snapshotPath.Text) : null };
+                if (Dialogs.Show(d, window) == true) snapshotPath.Text = d.FileName;
+            });
+            snapshotBrowse.IsEnabled = snapshot.IsChecked == true;
+            snapshot.Checked += (s, e) => snapshotPath.IsEnabled = snapshotBrowse.IsEnabled = true;
+            snapshot.Unchecked += (s, e) => snapshotPath.IsEnabled = snapshotBrowse.IsEnabled = false;
+            var snapshotRow = Ui.Column(snapshot, Ui.Row(snapshotPath, snapshotBrowse));
+            snapshotRow.Visibility = SnapshotName != null ? Visibility.Visible : Visibility.Collapsed;
+            var deployOptions = Ui.Column(recompare, showFiles, saveCopy, Ui.Row(copyPath, browse), snapshotRow);
             deployOptions.Margin = new Thickness(26, 0, 0, 18);
-            var script = new RadioButton { Content = "Create a deployment script", IsChecked = _target == null, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
-            var scriptNote = Ui.Text("The script opens in " + (_host is Window ? "the program registered for .sql files" : "a new query window") + "; nothing is changed on the target.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            var script = new RadioButton { Content = "Create a deployment script", IsChecked = scriptOnly, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) };
+            var openIn = EditorName ?? (_host is Window ? "the program registered for .sql files" : "a new query window connected to the target");
+            var scriptNote = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = CompareTheme.Muted };
+            scriptNote.Inlines.Add(new Run("Open deployment script in: " + openIn + ". Nothing is changed on the target. "));
+            if (ChangeEditor != null)
+            {
+                var change = new Hyperlink(new Run("Change…"));
+                change.Click += (s, e) =>
+                {
+                    ChangeEditor();
+                    scriptNote.Inlines.Clear();
+                    scriptNote.Inlines.Add(new Run("The script opens in the editor chosen in Application options. "));
+                };
+                scriptNote.Inlines.Add(change);
+            }
             scriptNote.Margin = new Thickness(26, 0, 0, 0);
             deploy.Checked += (s, e) => deployOptions.IsEnabled = true;
             script.Checked += (s, e) => deployOptions.IsEnabled = false;
@@ -130,6 +180,12 @@ namespace QuillSql.Compare
             depGrid.Columns.Add(new DataGridTextColumn { Header = "Dependencies", Binding = new System.Windows.Data.Binding("Name"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
             depGrid.Columns.Add(new DataGridTextColumn { Header = "Type", Binding = new System.Windows.Data.Binding("Type"), IsReadOnly = true, Width = 130 });
             depGrid.Columns.Add(new DataGridTextColumn { Header = "Referencing or referenced by", Binding = new System.Windows.Data.Binding("ReferencedBy"), IsReadOnly = true, Width = 280 });
+            if (ShowDependency != null)
+            {
+                // Double-click a dependency to see how it differs.
+                depGrid.MouseDoubleClick += async (s, e) => { if (depGrid.SelectedItem is DependencyRow r) await ShowDependency(r.Source.Index); };
+                depGrid.ToolTip = "Double-click a dependency to see its differences";
+            }
             void syncDeps()
             {
                 var all = allDeps.IsChecked == true;
@@ -346,7 +402,20 @@ namespace QuillSql.Compare
                         outcome.Recompare = recompare.IsChecked == true;
 
                         if (saveCopy.IsChecked == true && copyPath.Text.Trim().Length > 0) outcome.SaveCopyTo = copyPath.Text.Trim();
+                        if (snapshot.IsChecked == true && SnapshotName != null && snapshotPath.Text.Trim().Length > 0) outcome.SnapshotPath = snapshotPath.Text.Trim();
+                        outcome.ShowFiles = FolderPreview != null && showFiles.IsChecked == true;
                     }
+                    var st = CompareSettings.Load();
+                    st.Wizard = new JsonObject
+                    {
+                        ["method"] = script.IsChecked == true ? "script" : "deploy",
+                        ["recompare"] = recompare.IsChecked == true,
+                        ["saveCopy"] = saveCopy.IsChecked == true,
+                        ["showFiles"] = showFiles.IsChecked == true,
+                        ["snapshot"] = snapshot.IsChecked == true,
+                    };
+                    if (outcome.SaveCopyTo != null && st.UpdateScriptFolder) st.ScriptFolder = Path.GetDirectoryName(outcome.SaveCopyTo);
+                    st.Save();
                     outcome.Script = made;
                     if (BackupDefaults != null)
                     {
@@ -381,7 +450,8 @@ namespace QuillSql.Compare
                         next.IsEnabled = true;
                         return;
                     }
-                    FillReview(review, made, extra);
+                    var files = FolderPreview != null && deploy.IsChecked == true ? await FolderPreview() : null;
+                    FillReview(review, made, extra, files);
                 }
                 show();
             }
@@ -408,18 +478,61 @@ namespace QuillSql.Compare
             public string ReferencedBy => Source.ReferencedBy;
         }
 
-        private void FillReview(TabControl tabs, JsonObject made, List<int> extra)
+        /// <summary>What a script action reads as in the summary: "Drop constraint [FK_x] from [dbo].[T]".</summary>
+        private static string ActionText(JsonObject a)
+        {
+            var action = a.Str("action") ?? "";
+            var text = action.Length > 0 ? char.ToUpperInvariant(action[0]) + action.Substring(1) : action;
+            var obj = a.Str("object") ?? "";
+            var detail = a.Str("detail") ?? "";
+            switch (action)
+            {
+                case "rename": return "Rename " + obj + " to " + detail;
+                case "create index": case "alter index": return text + " " + detail + " on " + obj;
+                case "drop index": return "Drop index " + detail + " from " + obj;
+                case "drop constraint": case "drop column": return text + " " + detail + " from " + obj;
+                case "alter column": return "Alter column " + detail + " on " + obj;
+                case "role membership": return "Role membership: " + detail + " in " + obj;
+                default:
+                    if (action.StartsWith("add ", StringComparison.Ordinal)) return text + (detail.Length > 0 ? " " + detail : "") + " to " + obj;
+                    if (action.EndsWith(" permissions", StringComparison.Ordinal)) return text + " (" + detail + ") on " + obj;
+                    return (text + " " + obj).Trim();
+            }
+        }
+
+        private void FillReview(TabControl tabs, JsonObject made, List<int> extra, JsonObject files = null)
         {
             tabs.Items.Clear();
             var changes = _changes.Concat(_dependencies.Where(d => d.Deploy && extra.Contains(d.Index)).Select(d => new Change { Object = d.Name, Type = d.Type, Action = d.Action, Index = d.Index })).ToList();
+            // A schema script lists what each statement does, side effects included (dependent
+            // objects dropped and created again, tables rebuilt); a data script is summed up by table.
+            var actions = made.List("actions").OfType<JsonObject>().ToList();
 
-            // Summary: by object, or by what is done.
-            var viewBy = new ComboBox { Width = 200, ItemsSource = new[] { "Object", "Modification" }, SelectedIndex = 0 };
+            // Summary: by object, or by modification in the order the script makes them.
+            var viewBy = new ComboBox { Width = 220, ItemsSource = actions.Count > 0 ? new[] { "Object", "Modification (in order)" } : new[] { "Object", "Modification" }, SelectedIndex = 0 };
             var tree = new TreeView();
             void fill()
             {
                 tree.Items.Clear();
                 var byObject = viewBy.SelectedIndex == 0;
+                if (actions.Count > 0)
+                {
+                    if (!byObject)
+                    {
+                        var n = 0;
+                        foreach (var a in actions) tree.Items.Add(new TreeViewItem { Header = ++n + ".  " + ActionText(a) });
+                        return;
+                    }
+                    var selected = new HashSet<string>(changes.Select(c => c.Object), StringComparer.OrdinalIgnoreCase);
+                    foreach (var g in actions.GroupBy(a => a.Str("object") ?? "").OrderBy(g => selected.Contains(g.Key) ? 0 : 1).ThenBy(g => g.Key))
+                    {
+                        var header = (g.Key.Length == 0 ? "Database" : g.Key) + (selected.Contains(g.Key) || g.Key.Length == 0 ? "" : "  (affected)");
+                        var node = new TreeViewItem { Header = header + " (" + g.Count() + ")", IsExpanded = true, FontWeight = FontWeights.SemiBold };
+                        foreach (var a in g) node.Items.Add(new TreeViewItem { Header = ActionText(a), FontWeight = FontWeights.Normal });
+                        tree.Items.Add(node);
+                    }
+                    return;
+                }
                 foreach (var g in changes.GroupBy(c => byObject ? c.Type : c.Action).OrderBy(g => g.Key))
                 {
                     var node = new TreeViewItem { Header = g.Key + " (" + g.Count() + ")", IsExpanded = true, FontWeight = FontWeights.SemiBold };
@@ -431,7 +544,12 @@ namespace QuillSql.Compare
             fill();
             var viewLabel = Ui.Text("View by", brush: CompareTheme.Muted);
             viewLabel.Margin = new Thickness(0, 0, 8, 0);
-            var summaryTop = Ui.Row(viewLabel, viewBy);
+            var copyActions = Ui.Command(Glyph.Copy, "Copy", () =>
+            {
+                var lines = actions.Count > 0 ? actions.Select(ActionText) : changes.Select(c => c.Action + " " + c.Object + " (" + c.Type + ")");
+                Clipboard.SetText(string.Join(Environment.NewLine, lines));
+            }, "Copy the actions to the clipboard");
+            var summaryTop = Ui.Row(viewLabel, viewBy, new Border { Width = 12 }, copyActions);
             summaryTop.Margin = new Thickness(12, 8, 12, 4);
             var summary = new DockPanel();
             DockPanel.SetDock(summaryTop, Dock.Top);
@@ -459,8 +577,32 @@ namespace QuillSql.Compare
                 list.Children.Add(item);
             }
             if (warnings.Count == 0) list.Children.Add(Ui.Text("No warnings", brush: CompareTheme.Muted));
-            var warningTab = new TabItem { Header = Ui.IconText(Glyph.Warning, "Warnings (" + warnings.Count + ")"), Content = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto } };
+            var copyWarnings = Ui.Command(Glyph.Copy, "Copy", () => Clipboard.SetText(string.Join(Environment.NewLine, warnings.Select(w => w.Str("severity") + "\t" + w.Str("object") + "\t" + w.Str("message")))), "Copy the warnings to the clipboard");
+            copyWarnings.HorizontalAlignment = HorizontalAlignment.Left;
+            copyWarnings.Margin = new Thickness(12, 6, 12, 0);
+            copyWarnings.IsEnabled = warnings.Count > 0;
+            var warningPanel = new DockPanel();
+            DockPanel.SetDock(copyWarnings, Dock.Top);
+            warningPanel.Children.Add(copyWarnings);
+            warningPanel.Children.Add(new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+            var warningTab = new TabItem { Header = Ui.IconText(Glyph.Warning, "Warnings (" + warnings.Count + ")"), Content = warningPanel };
             tabs.Items.Add(warningTab);
+            if (files != null)
+            {
+                // The files of the scripts folder that deploying writes or deletes.
+                var rows = files.Strings("written").Select(f => new { File = f, Change = "Write" }).Concat(files.Strings("deleted").Select(f => new { File = f, Change = "Delete" })).ToList();
+                var fileGrid = new DataGrid { ItemsSource = rows, AutoGenerateColumns = false, IsReadOnly = true, HeadersVisibility = DataGridHeadersVisibility.Column };
+                fileGrid.Columns.Add(new DataGridTextColumn { Header = "Change", Binding = new System.Windows.Data.Binding("Change"), Width = 90 });
+                fileGrid.Columns.Add(new DataGridTextColumn { Header = "File", Binding = new System.Windows.Data.Binding("File"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+                var copyFiles = Ui.Command(Glyph.Copy, "Copy files", () => Clipboard.SetText(string.Join(Environment.NewLine, rows.Select(r => r.Change + "\t" + r.File))), "Copy the list of files");
+                copyFiles.HorizontalAlignment = HorizontalAlignment.Left;
+                copyFiles.Margin = new Thickness(12, 6, 12, 4);
+                var filePanel = new DockPanel();
+                DockPanel.SetDock(copyFiles, Dock.Top);
+                filePanel.Children.Add(copyFiles);
+                filePanel.Children.Add(rows.Count == 0 ? (UIElement)Ui.Text("No files change.", brush: CompareTheme.Muted) : fileGrid);
+                tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Folder, "Affected files (" + rows.Count + ")"), Content = filePanel });
+            }
 
             var sql = made.Str("sql") ?? "";
             var code = Ui.Code();
@@ -486,7 +628,7 @@ namespace QuillSql.Compare
                 Ui.Command(Glyph.Save, "Save script…", () =>
                 {
                     var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = "deploy.sql" };
-                    if (Dialogs.Show(d, _host.Owner) == true) File.WriteAllText(d.FileName, sql, new System.Text.UTF8Encoding(true));
+                    if (Dialogs.Show(d, _host.Owner) == true) File.WriteAllText(d.FileName, sql, CompareSettings.EncodingOf(CompareSettings.Load().ScriptEncoding));
                 }));
             scriptTools.Margin = new Thickness(12, 6, 12, 4);
             var scriptPanel = new DockPanel();

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Specialized;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows;
 using Microsoft.VisualStudio.PlatformUI;
@@ -12,7 +14,7 @@ namespace QuillSql.Vsix
 {
     /// <summary>A Schema or Data Compare window, opened as a document tab. Several can be open.</summary>
     [Guid("2d8a5f1e-3c47-4b6a-9e12-7f0c4d8b2a61")]
-    public sealed class ComparePane : ToolWindowPane, ICompareHost
+    public sealed class ComparePane : ToolWindowPane, ICompareHost, IConnectedScriptHost
     {
         private static Engine _engine;
         private static int _next;
@@ -35,6 +37,74 @@ namespace QuillSql.Vsix
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             EditorContext.OpenInNewQuery(sql);
+        }
+
+        /// <summary>
+        /// The script goes to a new query window connected to the target's server and database, so
+        /// it cannot run on the source by mistake. When SSMS cannot be asked for one, the window
+        /// opens on the current connection and the status bar says so.
+        /// </summary>
+        public void OpenScript(string sql, string title, JsonObject target)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (target != null && OpenConnected(sql, target)) return;
+            EditorContext.OpenInNewQuery(sql);
+            if (target != null) EditorContext.Status("the script's query window could not be connected to " + target.Str("server") + "; check the connection before running it");
+        }
+
+        private const BindingFlags Static = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+        private const BindingFlags Instance = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        private static Type FindType(string fullName) =>
+            AppDomain.CurrentDomain.GetAssemblies().Select(a => { try { return a.GetType(fullName, false); } catch (Exception) { return null; } }).FirstOrDefault(t => t != null);
+
+        /// <summary>SSMS's sign-in kinds (UIConnectionInfo.AuthenticationType) for our authentication values.</summary>
+        private static int SsmsAuthentication(string auth)
+        {
+            switch (auth)
+            {
+                case "sql": return 1;
+                case "entraInteractive": case "entra": return 2;
+                case "entraPassword": return 3;
+                case "entraIntegrated": return 4;
+                default: return 0;
+            }
+        }
+
+        /// <summary>Opens a blank query through SSMS's script factory with a connection to the target, then fills it.</summary>
+        private static bool OpenConnected(string sql, JsonObject target)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                var factory = FindType("Microsoft.SqlServer.Management.UI.VSIntegration.ServiceCache")?.GetProperty("ScriptFactory", Static)?.GetValue(null);
+                var infoType = FindType("Microsoft.SqlServer.Management.Smo.RegSvrEnum.UIConnectionInfo");
+                var scriptType = FindType("Microsoft.SqlServer.Management.UI.VSIntegration.Editors.ScriptType");
+                if (factory == null || infoType == null || scriptType == null) return false;
+                var info = Activator.CreateInstance(infoType);
+                void set(string name, object value) => infoType.GetProperty(name, Instance)?.SetValue(info, value);
+                set("ServerName", target.Str("server"));
+                // The database engine's server type.
+                set("ServerType", new Guid("8c91a03d-f9b4-46c0-a305-b5dcc79ff907"));
+                set("AuthenticationType", SsmsAuthentication(target.Str("authentication")));
+                if (!string.IsNullOrEmpty(target.Str("user"))) set("UserName", target.Str("user"));
+                if (!string.IsNullOrEmpty(target.Str("password"))) set("Password", target.Str("password"));
+                if (infoType.GetProperty("AdvancedOptions", Instance)?.GetValue(info) is NameValueCollection options)
+                {
+                    options["DATABASE"] = target.Str("database");
+                    options["ENCRYPT_CONNECTION"] = target.Bool("encrypt") ? "True" : "False";
+                    options["TRUST_SERVER_CERTIFICATE"] = target.Bool("trustServerCertificate") ? "True" : "False";
+                }
+                var create = factory.GetType().GetMethods(Instance).FirstOrDefault(m => m.Name == "CreateNewBlankScript" && m.GetParameters().Length == 3);
+                if (create == null) return false;
+                create.Invoke(factory, new[] { Enum.Parse(scriptType, "Sql"), info, null });
+                return EditorContext.InsertInActive(sql);
+            }
+            catch (Exception ex) when (ex is TargetInvocationException || ex is ArgumentException || ex is InvalidOperationException || ex is MissingMethodException || ex is COMException)
+            {
+                Log.Error("opening a connected query window", ex);
+                return false;
+            }
         }
 
         /// <summary>The Compare windows follow the SSMS color theme.</summary>
@@ -88,17 +158,20 @@ namespace QuillSql.Vsix
             if (string.IsNullOrEmpty(server)) return null;
             var auth = Convert.ToInt32(ConnectionResolver.Get(connectionInfo, "AuthenticationType") ?? 0);
             var options = ConnectionResolver.Get(connectionInfo, "AdvancedOptions") as NameValueCollection;
+            // SSMS's sign-in kinds: 0 Windows, 1 SQL Server, 2 Microsoft Entra with MFA, 3 Entra
+            // password, 4 Entra integrated; newer kinds sign in as with MFA.
+            var authentication = auth == 0 ? "windows" : auth == 1 ? "sql" : auth == 3 ? "entraPassword" : auth == 4 ? "entraIntegrated" : "entraInteractive";
             var side = new JsonObject
             {
                 ["type"] = "database",
                 ["server"] = server,
                 ["database"] = database ?? "",
-                ["authentication"] = auth == 1 ? "sql" : auth == 0 ? "windows" : "entra",
-                ["user"] = auth == 1 ? ConnectionResolver.Get(connectionInfo, "UserName") as string ?? "" : "",
+                ["authentication"] = authentication,
+                ["user"] = auth == 0 || auth == 4 ? "" : ConnectionResolver.Get(connectionInfo, "UserName") as string ?? "",
                 ["encrypt"] = !string.Equals(options?["ENCRYPT_CONNECTION"], "False", StringComparison.OrdinalIgnoreCase),
                 ["trustServerCertificate"] = string.Equals(options?["TRUST_SERVER_CERTIFICATE"], "True", StringComparison.OrdinalIgnoreCase),
             };
-            if (auth == 1) password = ConnectionResolver.Get(connectionInfo, "Password") as string;
+            if (auth == 1 || auth == 3) password = ConnectionResolver.Get(connectionInfo, "Password") as string;
             return side;
         }
     }

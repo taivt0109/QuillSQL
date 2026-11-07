@@ -22,7 +22,7 @@ namespace QuillCompare
         }
     }
 
-    internal sealed class MainWindow : Window, ICompareHost
+    internal sealed class MainWindow : Window, ICompareHost, IConnectedScriptHost
     {
         private readonly CompareView _view;
 
@@ -49,14 +49,46 @@ namespace QuillCompare
 
         Window ICompareHost.Owner => this;
 
-        /// <summary>Without SSMS, a script opens in the program registered for .sql files, or Notepad.</summary>
-        public void OpenScript(string sql, string title)
+        public void OpenScript(string sql, string title) => OpenScript(sql, title, null);
+
+        /// <summary>
+        /// Without SSMS, a script opens in the editor chosen in Application options: SSMS connected
+        /// to the target (-S server -d database), a custom program (%SF% file, %SN% server,
+        /// %DN% database, %UN% user), or the program registered for .sql files (else Notepad).
+        /// </summary>
+        public void OpenScript(string sql, string title, JsonObject target)
         {
+            var settings = CompareSettings.Load();
             var path = Path.Combine(Path.GetTempPath(), "QuillSQL", (title ?? "script").Replace(' ', '_') + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".sql");
             Directory.CreateDirectory(Path.GetDirectoryName(path));
-            File.WriteAllText(path, sql, new System.Text.UTF8Encoding(true));
+            File.WriteAllText(path, sql, CompareSettings.EncodingOf(settings.ScriptEncoding));
+            string q(string v) => "\"" + (v ?? "").Replace("\"", "\\\"") + "\"";
             try
             {
+                if (settings.SqlEditor == "custom" && File.Exists(settings.CustomEditor))
+                {
+                    var args = (settings.CustomEditorArguments ?? "\"%SF%\"")
+                        .Replace("%SF%", path)
+                        .Replace("%SN%", target?.Str("server") ?? "")
+                        .Replace("%DN%", target?.Str("database") ?? "")
+                        .Replace("%UN%", target?.Str("user") ?? "");
+                    System.Diagnostics.Process.Start(settings.CustomEditor, args);
+                    return;
+                }
+                if (settings.SqlEditor.Length > 0 && File.Exists(settings.SqlEditor))
+                {
+                    var args = q(path);
+                    if (target != null)
+                    {
+                        args = "-S " + q(target.Str("server")) + " -d " + q(target.Str("database")) + " " + args;
+                        var auth = target.Str("authentication");
+                        if (auth == "sql") args = "-U " + q(target.Str("user")) + " " + args;
+                        else if (auth == "windows") args = "-E " + args;
+                        else if (!string.IsNullOrEmpty(target.Str("user"))) args = "-U " + q(target.Str("user")) + " " + args;
+                    }
+                    System.Diagnostics.Process.Start(settings.SqlEditor, args);
+                    return;
+                }
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
             }
             catch (System.ComponentModel.Win32Exception)

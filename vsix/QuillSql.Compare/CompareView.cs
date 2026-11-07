@@ -49,6 +49,13 @@ namespace QuillSql.Compare
             return p;
         }
 
+        /// <summary>The target with its password when it is a live database (to open scripts connected to it), else null.</summary>
+        public JsonObject LiveTarget()
+        {
+            var t = WithPasswords().Obj("target");
+            return t != null && (t.Str("type") ?? "database") == "database" ? t : null;
+        }
+
         /// <summary>A new, empty project of a kind, with "my defaults" options when set.</summary>
         public static JsonObject NewProject(bool data, JsonObject optionDefinitions)
         {
@@ -107,8 +114,8 @@ namespace QuillSql.Compare
             _cancel.Visibility = Visibility.Collapsed;
 
             var newMenu = new ContextMenu();
-            newMenu.Items.Add(Ui.MenuItem("Schema comparison", () => New(false), Glyph.List));
-            newMenu.Items.Add(Ui.MenuItem("Data comparison", () => New(true), Glyph.Document));
+            newMenu.Items.Add(Ui.MenuItem("Schema comparison", async () => { if (await ConfirmClose()) New(false); }, Glyph.List, "Ctrl+N"));
+            newMenu.Items.Add(Ui.MenuItem("Data comparison", async () => { if (await ConfirmClose()) New(true); }, Glyph.Document, "Ctrl+N"));
             _openMenu.Opened += (s, e) => FillOpenMenu();
             _switch = Ui.Command(Glyph.Switch, "Switch direction", async () => await SwitchDirection(), "Switch deployment direction (Ctrl+D): the target becomes the source");
             _toolsMenu.Opened += (s, e) => FillToolsMenu();
@@ -154,7 +161,50 @@ namespace QuillSql.Compare
             InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await MyProjects()), System.Windows.Input.Key.M, System.Windows.Input.ModifierKeys.Control));
             InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await Deploy()), System.Windows.Input.Key.F8, System.Windows.Input.ModifierKeys.None));
             InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(() => { if (_session != null) ShowEditor(); }), System.Windows.Input.Key.E, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => { if (await ConfirmClose()) New(_session?.IsData == true); }), System.Windows.Input.Key.N, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await CloseProject()), System.Windows.Input.Key.F4, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(() => _schemaResults?.ToggleFilterPane()), System.Windows.Input.Key.L, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(async () => await CreateReport()), System.Windows.Input.Key.R, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(() => { if (_session != null) { ShowEditor(); _editor.ShowTab("Options"); } }), System.Windows.Input.Key.J, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(() => IncludeAll(true)), System.Windows.Input.Key.I, System.Windows.Input.ModifierKeys.Control));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(() => IncludeAll(false)), System.Windows.Input.Key.I, System.Windows.Input.ModifierKeys.Control | System.Windows.Input.ModifierKeys.Shift));
+            InputBindings.Add(new System.Windows.Input.KeyBinding(new Relay(() => _schemaResults?.FocusFind()), System.Windows.Input.Key.F, System.Windows.Input.ModifierKeys.Control));
             ShowResultCommands(false);
+            _engine.SignIn += (uri, code, message) => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                // The engine is shared by the Compare tabs in SSMS: the tab on show asks.
+                if (!IsVisible) return;
+                _signIn?.Close();
+                _signIn = Dialogs.DeviceCode(_host.Owner, uri, code, message);
+            }));
+            _engine.Replied += () => Dispatcher.BeginInvoke(new Action(() => { _signIn?.Close(); _signIn = null; }));
+            // The unsaved-changes mark follows the editor as the user types.
+            var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            timer.Tick += (s, e) => { if (IsVisible && _session != null && _compare.IsEnabled) UpdateTitle(); };
+            timer.Start();
+        }
+
+        private Window _signIn;
+
+        private void IncludeAll(bool on)
+        {
+            _schemaResults?.SelectAll(on);
+            _dataResults?.SetAll(on);
+        }
+
+        private async Task CreateReport()
+        {
+            if (_schemaResults != null) await Dialogs.SchemaReport(_session, _schemaResults);
+            else if (_dataResults != null) await Dialogs.DataReport(_session, _dataResults);
+        }
+
+        /// <summary>Close project (Ctrl+F4): after asking to save, a new, empty comparison of the same kind.</summary>
+        private async Task CloseProject()
+        {
+            if (_session == null || !await ConfirmClose()) return;
+            _schemaResults = null;
+            _dataResults = null;
+            New(_session.IsData);
         }
 
         private readonly Button _switch, _tools;
@@ -186,8 +236,48 @@ namespace QuillSql.Compare
                 _toolsMenu.Items.Add(new Separator());
                 _toolsMenu.Items.Add(Ui.MenuItem("Save results…", async () => await SaveResults(), Glyph.Save));
             }
+            if (_session != null)
+            {
+                _toolsMenu.Items.Add(new Separator());
+                var other = _session.IsData ? "New schema comparison with these data sources" : "New data comparison with these data sources";
+                _toolsMenu.Items.Add(Ui.MenuItem(other, async () => await OpenInOtherKind(), _session.IsData ? Glyph.List : Glyph.Document));
+            }
             _toolsMenu.Items.Add(new Separator());
-            _toolsMenu.Items.Add(Ui.MenuItem("Application options…", () => Dialogs.ApplicationOptions(_host.Owner), Glyph.Settings));
+            _toolsMenu.Items.Add(Ui.MenuItem("Application options…", () => Dialogs.ApplicationOptions(_host.Owner, _host is Window), Glyph.Settings));
+        }
+
+        /// <summary>
+        /// Starts a data comparison with the schema comparison's data sources, or the reverse,
+        /// after offering to save the project (snapshots and empty databases have no data).
+        /// </summary>
+        private async Task OpenInOtherKind()
+        {
+            _editor?.Collect();
+            var data = !_session.IsData;
+            var source = _session.Project.Obj("source")?.Clone();
+            var target = _session.Project.Obj("target")?.Clone();
+            if (data && new[] { source, target }.Any(s => s?.Str("type") == "snapshot" || s?.Str("type") == "empty"))
+            {
+                Ui.Error(_host.Owner, "Data can only be compared between databases, backups and scripts folders, not snapshots or an empty database.");
+                return;
+            }
+            if (IsDirty())
+            {
+                var i = Ui.Message(_host.Owner, "QuillSQL Compare", "The project has unsaved changes. Save it before starting the " + (data ? "data" : "schema") + " comparison?", Ui.Tone.Question, "Save and continue", "Don't save and continue", "Cancel");
+                if (i < 0 || i == 2) return;
+                if (i == 0 && !await Save(false)) return;
+            }
+            var passwords = new Dictionary<string, string>(_session.Passwords);
+            var defs = await OptionDefinitions();
+            var project = CompareSession.NewProject(data, defs);
+            if (source != null) project["source"] = source;
+            if (target != null) project["target"] = target;
+            _session = new CompareSession(_engine, _host, project) { OptionDefinitions = defs };
+            foreach (var kv in passwords) _session.Passwords[kv.Key] = kv.Value;
+            _schemaResults = null;
+            _dataResults = null;
+            ShowEditor();
+            Baseline();
         }
 
         private static UIElement Separator()
@@ -237,6 +327,8 @@ namespace QuillSql.Compare
         public async void New(bool data, JsonObject source = null, string sourcePassword = null)
         {
             var defs = await OptionDefinitions();
+            _schemaResults = null;
+            _dataResults = null;
             var project = CompareSession.NewProject(data, defs);
             if (source != null)
             {
@@ -254,6 +346,7 @@ namespace QuillSql.Compare
             }
             _dirty = false;
             ShowEditor();
+            Baseline();
         }
 
         /// <summary>Opens the last project, or a new schema comparison.</summary>
@@ -268,14 +361,18 @@ namespace QuillSql.Compare
 
         public async Task Open(string path)
         {
+            if (!await ConfirmClose()) return;
             var defs = await OptionDefinitions();
             var project = await Ui.Try(_host.Owner, () => _engine.RequestObject("project_load", new JsonObject { ["path"] = path }));
             if (project == null) return;
             var imported = path.EndsWith(".scp", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".sdc", StringComparison.OrdinalIgnoreCase);
             _session = new CompareSession(_engine, _host, project) { OptionDefinitions = defs, FilePath = imported ? null : path };
             if (!imported) CompareSettings.Load().AddRecent(path);
-            _dirty = imported;
+            _schemaResults = null;
+            _dataResults = null;
             ShowEditor();
+            Baseline();
+            _dirty = imported;
             if (imported) _status.Text = "Imported from " + Path.GetFileName(path) + ". Passwords are not imported; save as a QuillSQL project.";
         }
 
@@ -288,9 +385,9 @@ namespace QuillSql.Compare
             if (Dialogs.Show(d, _host.Owner) == true) await Open(d.FileName);
         }
 
-        private async Task Save(bool saveAs)
+        private async Task<bool> Save(bool saveAs)
         {
-            if (_session == null) return;
+            if (_session == null) return false;
             _editor?.Collect();
             CollectSelection();
             var path = _session.FilePath;
@@ -305,23 +402,61 @@ namespace QuillSql.Compare
                     DefaultExt = ext,
                     FileName = SuggestedName() + "." + ext,
                 };
-                if (Dialogs.Show(d, _host.Owner) != true) return;
+                if (Dialogs.Show(d, _host.Owner) != true) return false;
                 path = d.FileName;
             }
             // SQL Compare and SQL Data Compare projects are written in their format, without passwords.
             var redgate = path.EndsWith(".scp", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".sdc", StringComparison.OrdinalIgnoreCase);
             var ok = await Ui.Try(_host.Owner, () => _engine.Request(redgate ? "project_export" : "project_save", new JsonObject { ["path"] = path, ["project"] = _session.Project }));
-            if (ok == null) return;
+            if (ok == null) return false;
             if (redgate)
             {
                 _status.Text = "Saved " + path + " for SQL Compare. Keep saving as a QuillSQL project to keep every setting.";
-                return;
+                return true;
             }
             _session.FilePath = path;
-            _dirty = false;
+            Baseline();
             CompareSettings.Load().AddRecent(path);
             UpdateTitle();
             _status.Text = "Saved " + path;
+            return true;
+        }
+
+        // ---- Unsaved changes ----
+
+        private string _savedJson;
+
+        /// <summary>The project as it is now counts as saved.</summary>
+        private void Baseline()
+        {
+            _dirty = false;
+            if (_session == null) return;
+            _editor?.Collect(false);
+            CollectSelection();
+            _savedJson = Json.Write(_session.Project);
+        }
+
+        /// <summary>Whether the project differs from its file: any edit in the editor, a deploy check box, the filter.</summary>
+        private bool IsDirty()
+        {
+            if (_session == null) return false;
+            if (_dirty) return true;
+            if (_editor != null && _content.Content == _editor) _editor.Collect(false);
+            CollectSelection();
+            return _savedJson != null && Json.Write(_session.Project) != _savedJson;
+        }
+
+        /// <summary>Asks to save unsaved changes before the project is closed; false when the user cancels.</summary>
+        private async Task<bool> ConfirmClose()
+        {
+            if (!IsDirty()) return true;
+            var name = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : "the new project";
+            switch (Dialogs.AskToSave(_host.Owner, name))
+            {
+                case Dialogs.SaveChoice.Save: return await Save(false);
+                case Dialogs.SaveChoice.DontSave: return true;
+                default: return false;
+            }
         }
 
         private string SuggestedName()
@@ -343,11 +478,16 @@ namespace QuillSql.Compare
             }
             var kind = _session.IsData ? "Data compare" : "Schema compare";
             var file = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : "New project";
-            _title.Text = (_session.FilePath != null ? Path.GetFileNameWithoutExtension(_session.FilePath) : kind) + (_dirty ? " •" : "");
+            var dirty = IsDirty();
+            _title.Text = (_session.FilePath != null ? Path.GetFileNameWithoutExtension(_session.FilePath) : kind) + (dirty ? " •" : "");
             _sourceName.Text = side("source");
             _targetName.Text = side("target");
-            TitleChanged?.Invoke((_dirty ? "*" : "") + file + " - QuillSQL " + kind);
+            var title = (dirty ? "*" : "") + file + " - QuillSQL " + kind;
+            if (title != _lastTitle) TitleChanged?.Invoke(title);
+            _lastTitle = title;
         }
+
+        private string _lastTitle;
 
         private void ShowEditor()
         {
@@ -399,6 +539,7 @@ namespace QuillSql.Compare
                 if (!(_content.Content is ProjectEditor)) ShowEditor();
                 return;
             }
+            var clean = !IsDirty();
             SetBusy(true, "Comparing…");
             var op = _session.IsData ? "data_compare" : "schema_compare";
             var result = await Ui.Try(_host.Owner, () => _engine.RequestObject(op, new JsonObject { ["project"] = _session.WithPasswords() }, Progress));
@@ -412,6 +553,7 @@ namespace QuillSql.Compare
             ShowComparison(result);
             SetBusy(false, "Compared at " + DateTime.Now.ToShortTimeString() + ".");
             ShowResults();
+            if (clean) Baseline();
             UpdateTitle();
         }
 
@@ -443,6 +585,12 @@ namespace QuillSql.Compare
             if (_session.IsData)
             {
                 _dataResults = new DataResults(_session, result);
+                _dataResults.EditTable += (table, tab) =>
+                {
+                    ShowEditor();
+                    if (tab == "Tables & views") _editor.ShowTable(table);
+                    else _editor.ShowTab(tab);
+                };
             }
             else
             {
@@ -528,6 +676,7 @@ namespace QuillSql.Compare
         /// <summary>Opens My projects; true when a project was opened or started from it.</summary>
         private async Task<bool> MyProjects()
         {
+            if (!await ConfirmClose()) return false;
             var choice = Dialogs.MyProjects(_engine, _host.Owner);
             if (choice == null) return false;
             if (choice.NewData.HasValue)
@@ -535,6 +684,9 @@ namespace QuillSql.Compare
                 New(choice.NewData.Value);
                 return true;
             }
+            // Already asked: the open project is left as it is.
+            _dirty = false;
+            _savedJson = null;
             await Open(choice.Path);
             if (choice.CompareNow) await Compare();
             return true;
@@ -554,7 +706,7 @@ namespace QuillSql.Compare
         {
             var d = new OpenFileDialog { Filter = "Saved data comparison (*.qdcr)|*.qdcr|All files|*.*" };
             if (Dialogs.Show(d, _host.Owner) != true) return;
-            if (!CanClose()) return;
+            if (!await ConfirmClose()) return;
             var defs = await OptionDefinitions();
             SetBusy(true, "Opening " + Path.GetFileName(d.FileName) + "…");
             var result = await Ui.Try(_host.Owner, () => _engine.RequestObject("data_session_load", new JsonObject { ["path"] = d.FileName }));
@@ -566,6 +718,7 @@ namespace QuillSql.Compare
             _editor = null;
             ShowComparison(result);
             ShowResults();
+            Baseline();
             UpdateTitle();
         }
 
@@ -649,6 +802,21 @@ namespace QuillSql.Compare
             if (folder) wizard.DeployLabel = "Update the scripts folder";
             else if (live) wizard.BackupDefaults = async () => await Ui.Try(_host.Owner, () => _engine.RequestObject("backup_defaults", new JsonObject { ["session"] = session }));
             wizard.BackupSettings = _session.Project.Obj("backup");
+            if (_schemaResults != null && live)
+            {
+                // A snapshot of the target before it changes (SQL Compare's .snp).
+                var name = (target.Str("type") == "scripts" ? Path.GetFileName((target.Str("path") ?? "").TrimEnd('\\')) : target.Str("database")) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".snp";
+                foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+                wizard.SnapshotName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare", "Snapshots", name);
+                var results = _schemaResults;
+                wizard.ShowDependency = async index => await results.ShowDifference(index);
+            }
+            if (_schemaResults != null && folder && live) wizard.FolderPreview = async () => await Ui.Try(_host.Owner, () => _engine.RequestObject("folder_preview", new JsonObject { ["session"] = session }));
+            if (_host is Window)
+            {
+                wizard.EditorName = EditorName();
+                wizard.ChangeEditor = () => Dialogs.ApplicationOptions(_host.Owner, true);
+            }
             var outcome = wizard.Run();
             if (outcome.Choice == DeployWizard.Choice.None) return;
             // The backup settings belong to the project, as in SQL Compare.
@@ -661,15 +829,25 @@ namespace QuillSql.Compare
             var sql = outcome.Script.Str("sql") ?? "";
             if (outcome.Choice == DeployWizard.Choice.OpenScript)
             {
-                _host.OpenScript(sql, "Deployment script");
+                OpenScript(sql, "Deployment script");
                 return;
+            }
+            if (outcome.SnapshotPath != null)
+            {
+                SetBusy(true, "Creating a snapshot of the target…");
+                Directory.CreateDirectory(Path.GetDirectoryName(outcome.SnapshotPath));
+                var snap = await Ui.Try(_host.Owner, () => _engine.RequestObject("snapshot", new JsonObject { ["source"] = _session.WithPasswords().Obj("target"), ["path"] = outcome.SnapshotPath }, Progress));
+                SetBusy(false, snap == null ? "The snapshot was not created; nothing was deployed." : "Saved a snapshot of the target to " + outcome.SnapshotPath + ".");
+                if (snap == null) return;
+                var st = CompareSettings.Load();
+                st.AddRecent(st.RecentSnapshots, outcome.SnapshotPath);
             }
             if (outcome.SaveCopyTo != null)
             {
                 try
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(outcome.SaveCopyTo));
-                    File.WriteAllText(outcome.SaveCopyTo, sql, new System.Text.UTF8Encoding(true));
+                    File.WriteAllText(outcome.SaveCopyTo, sql, CompareSettings.EncodingOf(CompareSettings.Load().ScriptEncoding));
                 }
                 catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
                 {
@@ -683,11 +861,45 @@ namespace QuillSql.Compare
                 : done.ContainsKey("written") ? "Updated the scripts folder: " + Ui.Plural(done.List("written").Count, "file written", "files written") + ", " + done.List("deleted").Count + " deleted."
                 : "Deployed (" + done.Long("batches") + " batches).");
             if (done == null) return;
+            if (outcome.ShowFiles && target != null) Dialogs.OpenFolder(target.Str("path"));
             if (outcome.Recompare) await Compare();
             Ui.Message(_host.Owner, "QuillSQL Compare", "Deployment was successful.", Ui.Tone.Info, "OK");
         }
 
+        /// <summary>
+        /// Opens a script: in SSMS in a query window connected to the target; in QuillCompare.exe
+        /// in the editor chosen in Application options, with the target's server and database.
+        /// </summary>
+        private void OpenScript(string sql, string title)
+        {
+            Dialogs.OpenScript(_host, sql, title, _session?.LiveTarget());
+        }
+
+        /// <summary>The editor of Application options, as the wizard names it.</summary>
+        private static string EditorName()
+        {
+            var s = CompareSettings.Load();
+            if (s.SqlEditor == "custom") return Path.GetFileNameWithoutExtension(s.CustomEditor);
+            if (s.SqlEditor.Length > 0) return Dialogs.FindSsms().Where(x => string.Equals(x.Path, s.SqlEditor, StringComparison.OrdinalIgnoreCase)).Select(x => x.Label + " (connected to the target)").FirstOrDefault() ?? "SQL Server Management Studio";
+            return "the program registered for .sql files";
+        }
+
         /// <summary>Asks before discarding unsaved project changes.</summary>
-        public bool CanClose() => !_dirty || Ui.Confirm(_host.Owner, "The project has unsaved changes. Close it anyway?");
+        public bool CanClose()
+        {
+            if (!IsDirty()) return true;
+            var name = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : "the new project";
+            switch (Dialogs.AskToSave(_host.Owner, name))
+            {
+                case Dialogs.SaveChoice.DontSave: return true;
+                case Dialogs.SaveChoice.Cancel: return false;
+            }
+            // Closing cannot wait: run the save to its end here.
+            var task = Save(false);
+            var frame = new System.Windows.Threading.DispatcherFrame();
+            task.ContinueWith(_ => frame.Continue = false, TaskScheduler.Default);
+            System.Windows.Threading.Dispatcher.PushFrame(frame);
+            return task.Result;
+        }
     }
 }

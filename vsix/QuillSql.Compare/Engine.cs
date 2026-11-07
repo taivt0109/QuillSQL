@@ -33,6 +33,15 @@ namespace QuillSql.Compare
             public Action<string> Progress;
         }
 
+        /// <summary>
+        /// Microsoft Entra sign-in with MFA waits for the user: raised (on a background thread)
+        /// with the page to open, the code to enter there and Entra's message.
+        /// </summary>
+        public event Action<string, string, string> SignIn;
+
+        /// <summary>Raised (on a background thread) when a request has its reply.</summary>
+        public event Action Replied;
+
         /// <param name="exe">Full path of quill.exe.</param>
         public Engine(string exe) => _exe = exe;
 
@@ -75,12 +84,14 @@ namespace QuillSql.Compare
                     if (!(Json.Parse(line) is JsonObject reply)) continue;
                     var id = reply.Long("id");
                     if (!_pending.TryGetValue(id, out var pending)) continue;
+                    if (reply.Obj("deviceCode") is JsonObject code) SignIn?.Invoke(code.Str("verificationUri"), code.Str("userCode"), reply.Str("progress"));
                     if (reply.ContainsKey("progress"))
                     {
                         pending.Progress?.Invoke(reply.Str("progress"));
                         continue;
                     }
                     _pending.TryRemove(id, out _);
+                    Replied?.Invoke();
                     if (reply.ContainsKey("error")) pending.Reply.TrySetException(new EngineException(reply.Str("error")));
                     else pending.Reply.TrySetResult(reply.TryGetValue("result", out var r) ? r : null);
                 }
