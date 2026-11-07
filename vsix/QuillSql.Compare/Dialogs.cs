@@ -184,6 +184,7 @@ namespace QuillSql.Compare
                     if (choice == 1) foreach (var f in existing) File.Delete(f);
                 }
                 generate.IsEnabled = false;
+                var started = DateTime.UtcNow.AddSeconds(-2);
                 var ok = await Ui.Try(w, async () => (object)await session.Engine.Request("data_export", new JsonObject
                 {
                     ["session"] = results.Session,
@@ -193,6 +194,18 @@ namespace QuillSql.Compare
                 }));
                 generate.IsEnabled = true;
                 if (ok == null) return;
+                // The files written are re-encoded as Application options say.
+                var encoding = CompareSettings.EncodingOf(CompareSettings.Load().CsvEncoding);
+                foreach (var f in Directory.GetFiles(dir, "*.csv").Where(f => File.GetLastWriteTimeUtc(f) >= started))
+                {
+                    try
+                    {
+                        File.WriteAllText(f, File.ReadAllText(f), encoding);
+                    }
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                    {
+                    }
+                }
                 w.Close();
                 OpenFolder(dir);
             };
@@ -202,12 +215,32 @@ namespace QuillSql.Compare
 
         // ---- Application options ----
 
-        /// <summary>"Application options": the transaction settings of deployment scripts.</summary>
-        public static void ApplicationOptions(Window owner)
+        private static readonly (string Label, string Value)[] Encodings = { ("UTF-8 with byte order mark", "utf8bom"), ("UTF-8", "utf8"), ("Unicode (UTF-16)", "unicode"), ("ASCII", "ascii") };
+
+        /// <summary>SQL Server Management Studio installations: (label, Ssms.exe).</summary>
+        public static List<(string Label, string Path)> FindSsms()
+        {
+            var found = new List<(string, string)>();
+            var roots = new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) };
+            foreach (var version in new[] { "22", "21", "20", "19", "18" })
+            {
+                foreach (var root in roots.Where(r => !string.IsNullOrEmpty(r)))
+                {
+                    foreach (var sub in new[] { @"Common7\IDE\Ssms.exe", @"Release\Common7\IDE\SSMS.exe" })
+                    {
+                        var path = System.IO.Path.Combine(root, "Microsoft SQL Server Management Studio " + version, sub);
+                        if (File.Exists(path) && !found.Any(f => string.Equals(f.Item2, path, StringComparison.OrdinalIgnoreCase))) found.Add(("SQL Server Management Studio " + version, path));
+                    }
+                }
+            }
+            return found;
+        }
+
+        /// <summary>"Application options": deployment scripts, the SQL editor, encodings and default folders.</summary>
+        public static void ApplicationOptions(Window owner, bool standalone = true)
         {
             var settings = CompareSettings.Load();
-            var w = Ui.Dialog(owner, "Application options", null, 560, 0);
-            w.SizeToContent = SizeToContent.Height;
+            var w = Ui.Dialog(owner, "Application options", null, 640, 760);
             var levels = new[] { ("Read uncommitted", "READ UNCOMMITTED"), ("Read committed", "READ COMMITTED"), ("Repeatable read", "REPEATABLE READ"), ("Snapshot", "SNAPSHOT"), ("Serializable", "SERIALIZABLE") };
             var level = new ComboBox { ItemsSource = levels.Select(l => l.Item1).ToList(), SelectedIndex = Math.Max(0, Array.FindIndex(levels, l => l.Item2 == settings.IsolationLevel)) };
             var split = Ui.Check("Split transactions / batch operations (data deployments)", settings.SplitTransactions);
@@ -215,11 +248,64 @@ namespace QuillSql.Compare
             split.Checked += (s, e) => size.IsEnabled = true;
             split.Unchecked += (s, e) => size.IsEnabled = false;
             var status = Ui.Text("", brush: CompareTheme.High);
-            var form = Ui.Form(
-                Ui.Field("Transaction isolation level", level),
-                Ui.Field(null, split),
-                Ui.Field("Maximum transaction / batch size (MB)", size),
-                Ui.Field(null, status));
+            DockPanel folderRow(TextBox box, string title)
+            {
+                var b = Ui.Button("Browse…", () => { var f = PickFolder(w, box.Text, title); if (f != null) box.Text = f; });
+                var row = new DockPanel();
+                DockPanel.SetDock(b, Dock.Right);
+                row.Children.Add(b);
+                row.Children.Add(box);
+                return row;
+            }
+            ComboBox encodingBox(string current) => new ComboBox { ItemsSource = Encodings.Select(e => e.Label).ToList(), SelectedIndex = Math.Max(0, Array.FindIndex(Encodings, e => e.Value == current)) };
+            var scriptFolder = new TextBox { Text = settings.ScriptFolder };
+            var updateFolder = Ui.Check("Update the save location to the last folder used", settings.UpdateScriptFolder);
+            var scriptEncoding = encodingBox(settings.ScriptEncoding);
+            var csvEncoding = encodingBox(settings.CsvEncoding);
+            var filterFolder = new TextBox { Text = settings.FilterFolder };
+            // The SQL editor (QuillCompare.exe; in SSMS scripts open in a query window connected to the target).
+            var ssms = FindSsms();
+            var editors = new List<string> { "The program registered for .sql files" };
+            editors.AddRange(ssms.Select(s => s.Label));
+            editors.Add("Custom editor");
+            var editor = new ComboBox { ItemsSource = editors };
+            var at = ssms.FindIndex(s => string.Equals(s.Path, settings.SqlEditor, StringComparison.OrdinalIgnoreCase));
+            editor.SelectedIndex = settings.SqlEditor == "custom" ? editors.Count - 1 : at >= 0 ? at + 1 : 0;
+            var exe = new TextBox { Text = settings.CustomEditor };
+            var exeBrowse = Ui.Button("Browse…", () =>
+            {
+                var d = new OpenFileDialog { Filter = "Programs (*.exe)|*.exe|All files|*.*", FileName = exe.Text };
+                if (Show(d, w) == true) exe.Text = d.FileName;
+            });
+            var exeRow = new DockPanel();
+            DockPanel.SetDock(exeBrowse, Dock.Right);
+            exeRow.Children.Add(exeBrowse);
+            exeRow.Children.Add(exe);
+            var args = new TextBox { Text = settings.CustomEditorArguments };
+            var placeholders = Ui.Text("%SF% script file, %SN% server, %DN% database, %UN% user name of the target.", 12, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+            var custom = Ui.Form(Ui.Field("Executable", exeRow), Ui.Field("Arguments", args), Ui.Field(null, placeholders));
+            void showCustom() => custom.Visibility = editor.SelectedIndex == editors.Count - 1 ? Visibility.Visible : Visibility.Collapsed;
+            editor.SelectionChanged += (s, e) => showCustom();
+            showCustom();
+            var editorPart = Ui.Column(Ui.Form(Ui.Field("Open deployment scripts in", editor)), custom);
+            if (!standalone) editorPart.Visibility = Visibility.Collapsed;
+            var heading = new Func<string, TextBlock>(t => { var h = Ui.Text(t, 15, bold: true); h.Margin = new Thickness(0, 6, 0, 8); return h; });
+            var form = Ui.Column(
+                heading("Deployment scripts"),
+                Ui.Form(
+                    Ui.Field("Transaction isolation level", level),
+                    Ui.Field(null, split),
+                    Ui.Field("Maximum transaction / batch size (MB)", size),
+                    Ui.Field("Save deployment scripts in", folderRow(scriptFolder, "Default deployment script folder")),
+                    Ui.Field(null, updateFolder),
+                    Ui.Field("Deployment script encoding", scriptEncoding)),
+                heading("SQL editor"),
+                editorPart,
+                heading("Files"),
+                Ui.Form(
+                    Ui.Field("Filter files folder", folderRow(filterFolder, "Default filter folder")),
+                    Ui.Field("CSV export encoding", csvEncoding),
+                    Ui.Field(null, status)));
             var ok = Ui.Button("OK", () =>
             {
                 if (!int.TryParse(size.Text.Trim(), out var mb) || mb <= 0)
@@ -227,17 +313,195 @@ namespace QuillSql.Compare
                     status.Text = "The maximum transaction size must be a positive whole number.";
                     return;
                 }
+                if (editor.SelectedIndex == editors.Count - 1 && !File.Exists(exe.Text.Trim()))
+                {
+                    status.Text = "Choose the custom editor's program.";
+                    return;
+                }
                 settings.IsolationLevel = levels[Math.Max(0, level.SelectedIndex)].Item2;
                 settings.SplitTransactions = split.IsChecked == true;
                 settings.MaxTransactionSizeMB = mb;
+                settings.ScriptFolder = scriptFolder.Text.Trim();
+                settings.UpdateScriptFolder = updateFolder.IsChecked == true;
+                settings.ScriptEncoding = Encodings[Math.Max(0, scriptEncoding.SelectedIndex)].Value;
+                settings.CsvEncoding = Encodings[Math.Max(0, csvEncoding.SelectedIndex)].Value;
+                settings.FilterFolder = filterFolder.Text.Trim();
+                settings.SqlEditor = editor.SelectedIndex == 0 ? "" : editor.SelectedIndex == editors.Count - 1 ? "custom" : ssms[editor.SelectedIndex - 1].Path;
+                settings.CustomEditor = exe.Text.Trim();
+                settings.CustomEditorArguments = args.Text;
                 settings.Save();
                 w.Close();
             }, primary: true, minWidth: 100);
             ok.IsDefault = true;
             var cancel = Ui.Button("Cancel", () => w.Close(), minWidth: 90);
             cancel.IsCancel = true;
-            w.Content = Ui.WithFooter(Body("Application options", "How deployment scripts run their changes.", form), Buttons(ok, cancel));
+            var scroll = new ScrollViewer { Content = form, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            w.Content = Ui.WithFooter(Body("Application options", "How deployment scripts are written and opened, and where files go. Kept for you, not in the project.", scroll), Buttons(ok, cancel));
             w.ShowDialog();
+        }
+
+        // ---- New database ----
+
+        public sealed class DatabaseFile
+        {
+            public string Name { get; set; }
+            public string Kind { get; set; }
+            public string Path { get; set; }
+            public int SizeMB { get; set; } = 8;
+            public int GrowthMB { get; set; } = 64;
+        }
+
+        /// <summary>
+        /// "New database": name, collation (the server's default marked) and the data and log files.
+        /// Returns the CREATE DATABASE statement, or null when cancelled.
+        /// </summary>
+        public static string NewDatabase(Window owner, string server, string suggested, JsonObject info, out string name)
+        {
+            name = null;
+            var w = Ui.Dialog(owner, "New database", null, 760, 600);
+            var nameBox = new TextBox { Text = suggested ?? "" };
+            var instanceDefault = info.Str("default") ?? "";
+            var collations = new List<string> { "<instance default: " + instanceDefault + ">" };
+            collations.AddRange(info.Strings("collations"));
+            var collation = new ComboBox { ItemsSource = collations, SelectedIndex = 0, IsEditable = true };
+            var dataPath = info.Str("dataPath") ?? "";
+            var logPath = info.Str("logPath") ?? dataPath;
+            var files = new System.Collections.ObjectModel.ObservableCollection<DatabaseFile>();
+            // The server's folders may be Linux paths.
+            string join(string dir, string file) => dir.EndsWith("/") || dir.EndsWith("\\") ? dir + file : dir + (dir.Contains("/") && !dir.Contains("\\") ? "/" : "\\") + file;
+            void defaults()
+            {
+                files.Clear();
+                var n = nameBox.Text.Trim();
+                if (dataPath.Length == 0) return;
+                files.Add(new DatabaseFile { Name = n, Kind = "Data", Path = join(dataPath, n + ".mdf") });
+                files.Add(new DatabaseFile { Name = n + "_log", Kind = "Log", Path = join(logPath, n + "_log.ldf") });
+            }
+            defaults();
+            var changed = false;
+            nameBox.TextChanged += (s, e) => { if (!changed) defaults(); };
+            var grid = new DataGrid { ItemsSource = files, AutoGenerateColumns = false, CanUserAddRows = false, HeadersVisibility = DataGridHeadersVisibility.Column, MinHeight = 140 };
+            grid.Columns.Add(new DataGridTextColumn { Header = "Logical name", Binding = new Binding("Name"), Width = 150 });
+            grid.Columns.Add(new DataGridComboBoxColumn { Header = "Type", SelectedItemBinding = new Binding("Kind"), ItemsSource = new[] { "Data", "Log", "Filestream" }, Width = 90 });
+            grid.Columns.Add(new DataGridTextColumn { Header = "File name", Binding = new Binding("Path"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+            grid.Columns.Add(new DataGridTextColumn { Header = "Size (MB)", Binding = new Binding("SizeMB"), Width = 80 });
+            grid.Columns.Add(new DataGridTextColumn { Header = "Growth (MB)", Binding = new Binding("GrowthMB"), Width = 90 });
+            grid.CellEditEnding += (s, e) => changed = true;
+            var add = Ui.Button("Add file", () =>
+            {
+                changed = true;
+                var n = nameBox.Text.Trim() + "_" + (files.Count + 1);
+                files.Add(new DatabaseFile { Name = n, Kind = "Data", Path = join(dataPath, n + ".ndf") });
+            }, glyph: Glyph.Add);
+            var remove = Ui.Button("Remove file", () => { if (grid.SelectedItem is DatabaseFile f) { changed = true; files.Remove(f); } }, glyph: Glyph.Delete);
+            var restore = Ui.Button("Restore defaults", () => { changed = false; collation.SelectedIndex = 0; defaults(); });
+            var status = Ui.Text("", brush: CompareTheme.High, wrap: TextWrapping.Wrap);
+            var content = new DockPanel();
+            var top = Ui.Form(Ui.Field("Name", nameBox), Ui.Field("Collation", collation), Ui.Field("Files", Ui.Row(add, remove, restore)));
+            DockPanel.SetDock(top, Dock.Top);
+            DockPanel.SetDock(status, Dock.Bottom);
+            content.Children.Add(top);
+            content.Children.Add(status);
+            content.Children.Add(Ui.Card(grid, 4));
+            string sql = null;
+            var create = Ui.Button("Create", () =>
+            {
+                grid.CommitEdit(DataGridEditingUnit.Row, true);
+                var n = nameBox.Text.Trim();
+                if (n.Length == 0) { status.Text = "Enter a name for the database."; return; }
+                if (files.Count > 0 && (files.All(f => f.Kind != "Data") || files.All(f => f.Kind != "Log"))) { status.Text = "A database needs a data file and a log file."; return; }
+                sql = CreateDatabaseSql(n, collation.SelectedIndex == 0 ? null : collation.Text.Trim(), changed || files.Count == 0 ? files.ToList() : null);
+                w.Close();
+            }, primary: true, minWidth: 100);
+            create.IsDefault = true;
+            var cancel = Ui.Button("Cancel", () => w.Close(), minWidth: 90);
+            cancel.IsCancel = true;
+            w.Content = Ui.WithFooter(Body("New database", "An empty database on " + server + ". The files are on the server, in its folders.", content), Buttons(create, cancel));
+            w.ShowDialog();
+            if (sql != null) name = nameBox.Text.Trim();
+            return sql;
+        }
+
+        /// <summary>CREATE DATABASE with a collation (null: the server's) and files (null: the server's defaults).</summary>
+        public static string CreateDatabaseSql(string name, string collation, List<DatabaseFile> files)
+        {
+            string q(string s) => "[" + s.Replace("]", "]]") + "]";
+            string lit(string s) => "N'" + (s ?? "").Replace("'", "''") + "'";
+            string spec(DatabaseFile f) => "(NAME = " + lit(f.Name) + ", FILENAME = " + lit(f.Path) + (f.Kind == "Filestream" ? "" : ", SIZE = " + Math.Max(1, f.SizeMB) + "MB, FILEGROWTH = " + Math.Max(0, f.GrowthMB) + "MB") + ")";
+            var sql = "CREATE DATABASE " + q(name);
+            if (files != null && files.Count > 0)
+            {
+                var data = files.Where(f => f.Kind == "Data").ToList();
+                var stream = files.Where(f => f.Kind == "Filestream").ToList();
+                var log = files.Where(f => f.Kind == "Log").ToList();
+                sql += "\nON PRIMARY\n" + string.Join(",\n", data.Select(spec));
+                if (stream.Count > 0) sql += ",\nFILEGROUP " + q(name + "_FileStream") + " CONTAINS FILESTREAM\n" + string.Join(",\n", stream.Select(spec));
+                sql += "\nLOG ON\n" + string.Join(",\n", log.Select(spec));
+            }
+            if (!string.IsNullOrEmpty(collation)) sql += "\nCOLLATE " + collation;
+            return sql;
+        }
+
+        // ---- Source control revision ----
+
+        /// <summary>The folder's history in source control; returns the chosen revision, or null.</summary>
+        public static string ChooseRevision(Window owner, string folder, List<JsonObject> revisions)
+        {
+            string chosen = null;
+            var w = Ui.Dialog(owner, "Choose revision", null, 820, 520);
+            var grid = new DataGrid { ItemsSource = revisions.Select(r => new { Revision = r.Str("id"), Date = r.Str("date"), Author = r.Str("author"), Message = r.Str("message") }).ToList(), AutoGenerateColumns = false, IsReadOnly = true, SelectionMode = DataGridSelectionMode.Single, HeadersVisibility = DataGridHeadersVisibility.Column };
+            grid.Columns.Add(new DataGridTextColumn { Header = "Revision", Binding = new Binding("Revision"), Width = 110 });
+            grid.Columns.Add(new DataGridTextColumn { Header = "Date", Binding = new Binding("Date"), Width = 130 });
+            grid.Columns.Add(new DataGridTextColumn { Header = "Author", Binding = new Binding("Author"), Width = 140 });
+            grid.Columns.Add(new DataGridTextColumn { Header = "Message", Binding = new Binding("Message"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+            void pick()
+            {
+                if (grid.SelectedIndex < 0) return;
+                chosen = revisions[grid.SelectedIndex].Str("id");
+                w.Close();
+            }
+            grid.MouseDoubleClick += (s, e) => pick();
+            var latest = Ui.Button("Latest (HEAD)", () => { chosen = "HEAD"; w.Close(); });
+            var ok = Ui.Button("OK", pick, primary: true, minWidth: 100);
+            ok.IsDefault = true;
+            var cancel = Ui.Button("Cancel", () => w.Close(), minWidth: 90);
+            cancel.IsCancel = true;
+            var lead = revisions.Count == 0 ? "The folder has no history yet." : "The latest revisions of " + folder + ", newest first, and its tags.";
+            w.Content = Ui.WithFooter(Body("Choose revision", lead, Ui.Card(grid, 4)), Buttons(latest, ok, cancel));
+            w.ShowDialog();
+            return chosen;
+        }
+
+        // ---- Microsoft Entra sign-in with MFA ----
+
+        /// <summary>The code to enter at Microsoft's sign-in page, shown while the engine waits; close it when the request ends.</summary>
+        public static Window DeviceCode(Window owner, string uri, string code, string message)
+        {
+            var w = Ui.Dialog(owner, "Sign in to Microsoft Entra", null, 520, 0);
+            w.SizeToContent = SizeToContent.Height;
+            var codeText = Ui.Title(code ?? "", 26);
+            codeText.Margin = new Thickness(0, 6, 0, 10);
+            var lead = Ui.Text(message ?? ("Open " + uri + " in a browser and enter the code."), wrap: TextWrapping.Wrap);
+            var copy = Ui.Button("Copy code", () => { try { Clipboard.SetText(code ?? ""); } catch (System.Runtime.InteropServices.COMException) { } }, glyph: Glyph.Copy);
+            var open = Ui.Button("Open sign-in page", () => { try { Clipboard.SetText(code ?? ""); } catch (System.Runtime.InteropServices.COMException) { } OpenFile(uri); }, primary: true, glyph: Glyph.Forward);
+            var close = Ui.Button("Hide", () => w.Close());
+            close.IsCancel = true;
+            var body = Ui.Column(lead, codeText, Ui.Text("QuillSQL Compare goes on once you have signed in.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
+            body.Margin = new Thickness(24, 20, 24, 16);
+            w.Content = Ui.WithFooter(body, Buttons(copy, open, close));
+            w.Show();
+            return w;
+        }
+
+        // ---- Unsaved changes ----
+
+        public enum SaveChoice { Save, DontSave, Cancel }
+
+        /// <summary>"Save project before closing?" Yes, No or Cancel.</summary>
+        public static SaveChoice AskToSave(Window owner, string project, string doing = "closing it")
+        {
+            var i = Ui.Message(owner, "QuillSQL Compare", "Save the changes to " + project + " before " + doing + "?", Ui.Tone.Question, "Save", "Don't save", "Cancel");
+            return i == 0 ? SaveChoice.Save : i == 1 ? SaveChoice.DontSave : SaveChoice.Cancel;
         }
 
         // ---- Create snapshot (schema) ----
@@ -261,7 +525,14 @@ namespace QuillSql.Compare
         }
 
         /// <summary>A script to read, copy, save or open: "View object deployment script".</summary>
-        public static void ShowScript(ICompareHost host, string title, string sql)
+        /// <summary>Opens a script, connected to the target when the host can.</summary>
+        public static void OpenScript(ICompareHost host, string sql, string title, JsonObject target)
+        {
+            if (host is IConnectedScriptHost connected) connected.OpenScript(sql, title, target);
+            else host.OpenScript(sql, title);
+        }
+
+        public static void ShowScript(ICompareHost host, string title, string sql, JsonObject target = null)
         {
             var w = Ui.Dialog(host.Owner, title, null, 900, 620);
             var code = Ui.Code();
@@ -270,9 +541,9 @@ namespace QuillSql.Compare
             var save = Ui.Button("Save script…", () =>
             {
                 var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = "script.sql" };
-                if (Show(d, w) == true) File.WriteAllText(d.FileName, code.Text, new System.Text.UTF8Encoding(true));
+                if (Show(d, w) == true) File.WriteAllText(d.FileName, code.Text, CompareSettings.EncodingOf(CompareSettings.Load().ScriptEncoding));
             }, glyph: Glyph.Save);
-            var open = Ui.Button("Open in editor", () => { host.OpenScript(code.Text, title); w.Close(); }, glyph: Glyph.Edit);
+            var open = Ui.Button("Open in editor", () => { OpenScript(host, code.Text, title, target); w.Close(); }, glyph: Glyph.Edit);
             var close = Ui.Button("Close", () => w.Close(), primary: true);
             close.IsCancel = true;
             w.Content = Ui.WithFooter(Body(title, "The script that deploys this object on its own, with what it needs.", Ui.Card(code, 0)), Buttons(copy, save, open, close));
