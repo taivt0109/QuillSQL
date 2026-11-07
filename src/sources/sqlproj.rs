@@ -33,6 +33,16 @@ pub struct SqlProj {
     /// From `DSP`: 16 for Sql160; `None` when not set.
     pub version: Option<u32>,
     pub azure: bool,
+    /// `Reference` items with a `HintPath`: CLR assemblies the project holds as `.dll` files.
+    pub clr: Vec<ClrReference>,
+}
+
+/// A `Reference` item's `HintPath` (relative, as written) and, when the item has all of
+/// `SqlPermissionSet`, `SqlAssembly` and `SqlOwnerName`, its permission set.
+#[derive(Debug, Clone)]
+pub struct ClrReference {
+    pub hint_path: String,
+    pub permission_set: Option<String>,
 }
 
 fn child_text(doc: &roxmltree::Document, name: &str) -> Option<String> {
@@ -45,6 +55,23 @@ pub fn dsp_version(dsp: &str) -> Option<u32> {
         .and_then(|r| r.strip_suffix("DatabaseSchemaProvider"))
         .and_then(|v| v.strip_suffix('0'))
         .and_then(|v| v.parse::<u32>().ok())
+}
+
+/// The permission set a database project gives an assembly file: from the nearest project in
+/// the file's folder or above, the `Reference` whose `HintPath` is the file's path relative to
+/// the project. One of SAFE, EXTERNAL_ACCESS and UNSAFE (as written); None otherwise.
+pub fn assembly_permission_set(file: &Path) -> Option<String> {
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        if let Some(p) = find(d) {
+            let root = p.path.parent()?;
+            let rel = file.strip_prefix(root).ok()?.to_string_lossy().replace('/', "\\");
+            let set = p.clr.iter().find(|r| r.hint_path == rel)?.permission_set.clone()?;
+            return ["SAFE", "EXTERNAL_ACCESS", "UNSAFE"].contains(&set.as_str()).then_some(set);
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 /// The single `.sqlproj` in `dir`, if there is one.
@@ -68,8 +95,22 @@ pub fn find(dir: &Path) -> Option<SqlProj> {
     };
     let dsp = child_text(&doc, "DSP").unwrap_or_default();
     let version = dsp_version(&dsp);
+    // Item metadata may be child elements or attributes.
+    let meta = |n: roxmltree::Node, key: &str| -> Option<String> {
+        n.attribute(key).map(str::to_string).or_else(|| n.children().find(|c| c.is_element() && c.tag_name().name() == key).map(|c| c.text().unwrap_or_default().trim().to_string()))
+    };
+    let clr = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "Reference")
+        .filter_map(|n| {
+            let hint_path = meta(n, "HintPath")?;
+            let complete = ["SqlPermissionSet", "SqlAssembly", "SqlOwnerName"].iter().all(|k| meta(n, k).is_some());
+            Some(ClrReference { hint_path, permission_set: meta(n, "SqlPermissionSet").filter(|_| complete) })
+        })
+        .collect();
     Some(SqlProj {
         path,
+        clr,
         items: items_of("Build", "Include"),
         removed: items_of("Build", "Remove"),
         sdk,
@@ -101,7 +142,8 @@ impl SqlProj {
         } else {
             Vec::new()
         };
-        for item in self.items.iter().filter(|i| !i.contains('*')) {
+        // The project's CLR assemblies are read with its scripts.
+        for item in self.items.iter().filter(|i| !i.contains('*')).chain(self.clr.iter().map(|r| &r.hint_path)) {
             let p = dir.join(native(item));
             if p.is_file() && !out.contains(&p) {
                 out.push(p);
@@ -154,10 +196,16 @@ impl SqlProj {
 
     /// Adds `Build` items for new files and removes those of deleted files (SDK-style projects
     /// build every file anyway).
-    pub fn update(&self, added: &[PathBuf], removed: &[PathBuf]) -> Result<(), String> {
+    /// `assemblies` gives the assembly behind each `.dll` among them: a `.dll` is a `None` item
+    /// with a `Reference` holding its CLR metadata, as SQL Compare adds it.
+    pub fn update(&self, added: &[PathBuf], removed: &[PathBuf], assemblies: &[(PathBuf, &crate::catalog::Assembly)]) -> Result<(), String> {
         if self.sdk || (added.is_empty() && removed.is_empty()) {
             return Ok(());
         }
+        let dll = |p: &PathBuf| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll"));
+        let (added_dlls, added): (Vec<PathBuf>, Vec<PathBuf>) = added.iter().cloned().partition(dll);
+        let (removed_dlls, removed): (Vec<PathBuf>, Vec<PathBuf>) = removed.iter().cloned().partition(dll);
+        let (added, removed) = (&added[..], &removed[..]);
         let raw = std::fs::read(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
         let bom = raw.starts_with(&[0xEF, 0xBB, 0xBF]);
         let mut text = super::folder::decode(&raw, "UTF8");
@@ -193,6 +241,55 @@ impl SqlProj {
             if !folders.is_empty() {
                 insert_items(&mut text, "Folder", &folders, nl).ok_or_else(|| format!("{} is not an MSBuild project", self.path.display()))?;
             }
+        }
+        for p in &removed_dlls {
+            let item = win(p);
+            let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let lines: Vec<&str> = text.split_inclusive('\n').collect();
+            let mut kept = String::new();
+            let mut in_reference = false;
+            for l in lines {
+                let t = l.trim();
+                if in_reference {
+                    in_reference = !t.starts_with("</Reference>");
+                    continue;
+                }
+                if t.starts_with("<None ") && t.ends_with("/>") && attr(t, "Include").is_some_and(|i| same(&i, &item)) {
+                    continue;
+                }
+                if t.starts_with("<Reference ") && attr(t, "Include").is_some_and(|i| i.eq_ignore_ascii_case(&stem)) {
+                    in_reference = !t.ends_with("/>");
+                    continue;
+                }
+                kept.push_str(l);
+            }
+            text = kept;
+        }
+        let new_dlls: Vec<&PathBuf> = added_dlls.iter().filter(|p| !self.clr.iter().any(|r| same(&r.hint_path, &win(p)))).collect();
+        if !new_dlls.is_empty() {
+            let names: Vec<String> = new_dlls.iter().map(|p| win(p)).collect();
+            insert_items(&mut text, "None", &names, nl).ok_or_else(|| format!("{} is not an MSBuild project", self.path.display()))?;
+            let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;");
+            let mut group = format!("  <ItemGroup>{nl}");
+            for p in new_dlls {
+                let Some((_, a)) = assemblies.iter().find(|(r, _)| r == p) else { continue };
+                let name = a.clr_name.split(',').next().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&a.name).to_string();
+                group.push_str(&format!("    <Reference Include=\"{}\">{nl}", esc(&name)));
+                for (k, v) in [
+                    ("HintPath", win(p)),
+                    ("SqlAssembly", name.clone()),
+                    ("IsModelAware", "True".into()),
+                    ("GenerateSqlClrDdl", "False".into()),
+                    ("SqlOwnerName", a.owner.clone().unwrap_or_else(|| "dbo".into())),
+                    ("SqlPermissionSet", a.permission_set.clone()),
+                ] {
+                    group.push_str(&format!("      <{k}>{}</{k}>{nl}", esc(&v)));
+                }
+                group.push_str(&format!("    </Reference>{nl}"));
+            }
+            group.push_str(&format!("  </ItemGroup>{nl}"));
+            let at = text.rfind("</Project>").ok_or_else(|| format!("{} is not an MSBuild project", self.path.display()))?;
+            text.insert_str(at, &group);
         }
         // MSBuild saves the project without a final line break.
         while text.ends_with('\n') || text.ends_with('\r') {
@@ -261,12 +358,37 @@ mod tests {
         assert_eq!(files, vec![dir.join("dbo").join("Tables").join("T.sql")]);
         let key = (FileKind::Object(ObjectType::View), "Sales".to_string(), "V".to_string());
         assert_eq!(p.ideal_path(&key), Path::new("Sales").join("Views").join("Sales.V.sql"));
-        p.update(&[Path::new("Sales").join("Views").join("Sales.V.sql")], &[Path::new("dbo").join("Tables").join("T.sql")]).unwrap();
+        p.update(&[Path::new("Sales").join("Views").join("Sales.V.sql")], &[Path::new("dbo").join("Tables").join("T.sql")], &[]).unwrap();
         let after = find(&dir).unwrap();
         assert_eq!(after.items, ["Sales\\Views\\Sales.V.sql"]);
         let text = std::fs::read_to_string(dir.join("Db.sqlproj")).unwrap();
         assert!(text.contains("    <Folder Include=\"Sales\\\" />\r\n    <Folder Include=\"Sales\\Views\\\" />"), "{text}");
         assert!(text.ends_with("</Project>"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn assemblies_as_project_references() {
+        let dir = std::env::temp_dir().join(format!("quill-sqlproj-clr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Assemblies")).unwrap();
+        std::fs::write(dir.join("Assemblies").join("Ext.dll"), b"MZ").unwrap();
+        std::fs::write(dir.join("Assemblies").join("Bare.dll"), b"MZ").unwrap();
+        let proj = "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\r\n  <ItemGroup>\r\n    <Reference Include=\"Ext\">\r\n      <HintPath>Assemblies\\Ext.dll</HintPath>\r\n      <SqlAssembly>Ext</SqlAssembly>\r\n      <SqlOwnerName>dbo</SqlOwnerName>\r\n      <SqlPermissionSet>EXTERNAL_ACCESS</SqlPermissionSet>\r\n    </Reference>\r\n    <Reference Include=\"Bare\">\r\n      <HintPath>Assemblies\\Bare.dll</HintPath>\r\n      <SqlPermissionSet>UNSAFE</SqlPermissionSet>\r\n    </Reference>\r\n  </ItemGroup>\r\n</Project>\r\n";
+        std::fs::write(dir.join("Db.sqlproj"), proj).unwrap();
+        // All three of SqlPermissionSet, SqlAssembly and SqlOwnerName, or no permission set.
+        assert_eq!(assembly_permission_set(&dir.join("Assemblies").join("Ext.dll")).as_deref(), Some("EXTERNAL_ACCESS"));
+        assert_eq!(assembly_permission_set(&dir.join("Assemblies").join("Bare.dll")), None);
+        let p = find(&dir).unwrap();
+        assert!(p.sql_files(&dir, Vec::new()).contains(&dir.join("Assemblies").join("Ext.dll")));
+        let a = crate::catalog::Assembly { name: "New".into(), clr_name: "new, version=1.0.0.0".into(), permission_set: "UNSAFE".into(), ..Default::default() };
+        let new = Path::new("Assemblies").join("New.dll");
+        p.update(&[new.clone()], &[Path::new("Assemblies").join("Ext.dll")], &[(new.clone(), &a)]).unwrap();
+        std::fs::write(dir.join(&new), b"MZ").unwrap();
+        let text = std::fs::read_to_string(dir.join("Db.sqlproj")).unwrap();
+        assert!(text.contains("<None Include=\"Assemblies\\New.dll\" />") && !text.contains("Ext"), "{text}");
+        assert!(!text.contains("<Build Include=\"Assemblies"), "{text}");
+        assert_eq!(assembly_permission_set(&dir.join(&new)).as_deref(), Some("UNSAFE"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
