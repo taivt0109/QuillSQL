@@ -387,10 +387,20 @@ fn side_identifier(side: &Side, db: &Database) -> String {
     }
 }
 
-/// `[schema].[name]`; objects without a schema (principals, schemas, DDL triggers…) are named
-/// bare, as SQL Compare writes them: `role-AppReaders`.
+/// `[schema].[name]`. Objects without a schema (principals, schemas, DDL triggers…) are named
+/// bare when the name is a regular identifier, as SQL Compare writes them: `role-AppReaders`,
+/// but `contract-[//app/Contract]`.
 fn full_name(n: &ObjectName) -> String {
-    if n.schema.is_empty() { n.name.clone() } else { format!("[{}].[{}]", n.schema.replace(']', "]]"), n.name.replace(']', "]]")) }
+    let regular = |s: &str| {
+        let mut c = s.chars();
+        c.next().is_some_and(|f| f.is_alphabetic() || matches!(f, '_' | '@' | '#'))
+            && c.all(|x| x.is_alphanumeric() || matches!(x, '_' | '@' | '#' | '$'))
+    };
+    if n.schema.is_empty() && regular(&n.name) {
+        n.name.clone()
+    } else if n.schema.is_empty() {
+        format!("[{}]", n.name.replace(']', "]]"))
+    } else { format!("[{}].[{}]", n.schema.replace(']', "]]"), n.name.replace(']', "]]")) }
 }
 
 /// Text cut to `len - 1` characters when it does not fit, then padded to `len`.

@@ -269,3 +269,15 @@ fn add_with_encryption() {
     // Only the deployment adds the encryption; the pair stays identical.
     assert!(run(&a, &a, &opts().with(Opt::AddWithEncryption)).identical());
 }
+
+#[test]
+fn stretch_state_when_both_servers_have_it() {
+    let db = |on: bool, major: u32| Database {
+        server: ServerInfo { major_version: major, ..Default::default() },
+        tables: vec![Table { remote_data_archive: on, ..table("T") }],
+        ..Default::default()
+    };
+    assert_eq!(props(&run(&db(true, 15), &db(false, 15), &opts()).differences[0]), vec!["Remote data archive state"]);
+    // SQL Server 2014 has no Stretch Database.
+    assert!(run(&db(true, 15), &db(false, 12), &opts()).identical());
+}
