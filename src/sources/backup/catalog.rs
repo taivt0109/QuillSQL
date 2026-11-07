@@ -74,6 +74,8 @@ mod st {
     pub const SEQ_CACHED: i64 = 0x200;
     pub const TRIGGER_DISABLED: i64 = 0x100;
     pub const TRIGGER_INSTEAD_OF: i64 = 0x2;
+    pub const POLICY_ENABLED: i64 = 0x100;
+    pub const POLICY_SCHEMA_BOUND: i64 = 0x100000;
 }
 
 /// Column status bits (syscolpars).
@@ -109,6 +111,12 @@ mod rc {
     pub const ROLE_OWNER: i64 = 51;
     pub const CONSTRAINT_TO_INDEX: i64 = 93;
     pub const TEMPORAL_HISTORY: i64 = 112;
+    pub const SECURITY_PREDICATE: i64 = 11;
+    pub const EDGE_CONSTRAINT: i64 = 28;
+    pub const SCHEME_FUNCTION: i64 = 31;
+    pub const SCHEME_DESTINATION: i64 = 30;
+    pub const XML_USING_INDEX: i64 = 100;
+    pub const SELECTIVE_XML_USING_INDEX: i64 = 110;
 }
 
 /// Value classes (sysobjvalues).
@@ -123,6 +131,15 @@ mod vc {
     pub const MASK: i64 = 120;
     pub const RETENTION: i64 = 123;
     pub const STATS_FILTER: i64 = 67;
+    pub const PARTITION_BOUNDARY: i64 = 30;
+    pub const TESSELLATION: i64 = 92;
+    pub const PREDICATE: i64 = 112;
+    pub const GRAPH_TYPE: i64 = 128;
+    pub const LABEL: i64 = 138;
+    pub const INFORMATION_TYPE: i64 = 139;
+    pub const LABEL_ID: i64 = 140;
+    pub const INFORMATION_TYPE_ID: i64 = 141;
+    pub const RANK: i64 = 146;
 }
 
 struct Builder<'a> {
@@ -186,7 +203,12 @@ pub fn read(cat: &Catalog, info: &DatabaseInfo) -> Result<Database, String> {
     b.synonyms();
     b.bindables();
     b.statistics();
+    b.graph();
+    b.security_policies();
+    b.partitioning();
+    b.xml_and_spatial_indexes();
     b.extended_properties();
+    b.sensitivity();
     b.principals_and_roles();
     b.permissions();
     b.dependencies();
@@ -386,6 +408,11 @@ impl Builder<'_> {
                 t.filestream_filegroup = self.data_spaces.get(&r.int("indepid")).cloned();
             }
             t.memory_optimized = o.status2 & 0x8 != 0;
+            if o.status2 & 0x100 != 0 {
+                t.graph = Some("NODE".into());
+            } else if o.status2 & 0x200 != 0 {
+                t.graph = Some("EDGE".into());
+            }
             if t.memory_optimized {
                 t.storage.data_space = None;
             }
@@ -467,7 +494,9 @@ impl Builder<'_> {
             let (seed, increment) = identity_values(&c.bytes("idtval"), xtype as u8);
             Identity { seed, increment, not_for_replication: status & cs::ID_NOT_FOR_REPLICATION != 0 }
         });
-        let computed = (status & cs::COMPUTED != 0).then(|| Computed {
+        // Graph columns are computed internally but not shown as computed.
+        let graph = self.value(vc::GRAPH_TYPE, object as i64, colid, 0).is_some();
+        let computed = (status & cs::COMPUTED != 0 && !graph).then(|| Computed {
             definition: self.value(vc::COMPUTED, object as i64, colid, 0).map(stored_text).unwrap_or_default(),
             persisted: status & cs::PERSISTED != 0,
         });
@@ -523,7 +552,7 @@ impl Builder<'_> {
     }
 
     fn xml_collection_name(&self, id: i64) -> Option<String> {
-        let r = self.cat.system("sysxmlcomponent").into_iter().find(|r| r.int("id") == id && r.int("kind") == 0)?;
+        let r = self.cat.system("sysnsobjs").into_iter().find(|r| r.int("class") == 27 && r.int("id") == id)?;
         let schema = self.schema_names.get(&(r.int("nsid") as i32)).cloned().unwrap_or_default();
         Some(ObjectName::new(&schema, &r.str("name")).quoted())
     }
@@ -947,6 +976,256 @@ impl Builder<'_> {
         }
     }
 
+    fn graph(&mut self) {
+        for t in &mut self.db.tables {
+            if t.graph.is_some() {
+                crate::catalog::read::graph_indexes(t);
+            }
+        }
+        let mut edges: Vec<Obj> = self.objects.values().filter(|o| o.kind == "EC").cloned().collect();
+        edges.sort_by_key(|o| (o.parent, o.name.clone()));
+        for o in edges {
+            let Some(Owner::Table(t)) = self.owners.get(&o.parent).copied() else { continue };
+            // Each clause: (number, from table, to table).
+            let mut clauses: Vec<(i64, i64, i64)> = Vec::new();
+            for r in self.multi.get(&rc::EDGE_CONSTRAINT).into_iter().flatten().filter(|r| r.int("depid") == o.id as i64) {
+                let clause = r.int("depsubid");
+                let at = match clauses.iter().position(|c| c.0 == clause) {
+                    Some(at) => at,
+                    None => {
+                        clauses.push((clause, 0, 0));
+                        clauses.len() - 1
+                    }
+                };
+                if r.int("indepsubid") == 0 {
+                    clauses[at].1 = r.int("indepid");
+                } else {
+                    clauses[at].2 = r.int("indepid");
+                }
+            }
+            clauses.sort();
+            let connections = clauses.iter().filter_map(|&(_, from, to)| Some((self.name_of(from as i32)?, self.name_of(to as i32)?))).collect();
+            self.db.tables[t].edge_constraints.push(EdgeConstraint {
+                name: o.name.clone(),
+                system_named: o.flag(st::SYSTEM_NAMED),
+                connections,
+                on_delete_cascade: (o.status >> 14) & 3 == 1,
+                disabled: o.flag(st::DISABLED),
+                not_trusted: o.flag(st::NOT_TRUSTED),
+            });
+        }
+    }
+
+    fn security_policies(&mut self) {
+        for o in self.sorted_objects(&["SP"]) {
+            let mut rows: Vec<&SysRow> = self.multi.get(&rc::SECURITY_PREDICATE).into_iter().flatten().filter(|r| r.int("depid") == o.id as i64).collect();
+            rows.sort_by_key(|r| r.int("depsubid"));
+            let predicates = rows
+                .into_iter()
+                .filter_map(|r| {
+                    let definition = self.value(vc::PREDICATE, o.id as i64, r.int("depsubid"), 0).map(stored_text)?;
+                    let (function, arguments) = crate::catalog::split_predicate(&definition);
+                    let status = r.int("status");
+                    Some(SecurityPredicate {
+                        kind: if status % 16 == 1 { "BLOCK" } else { "FILTER" }.into(),
+                        function,
+                        arguments,
+                        table: self.name_of(r.int("indepid") as i32)?,
+                        operation: match status / 16 % 16 {
+                            1 => Some("AFTER INSERT".into()),
+                            2 => Some("AFTER UPDATE".into()),
+                            3 => Some("BEFORE UPDATE".into()),
+                            4 => Some("BEFORE DELETE".into()),
+                            _ => None,
+                        },
+                    })
+                })
+                .collect();
+            self.db.security_policies.push(SecurityPolicy {
+                schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(),
+                name: o.name.clone(),
+                enabled: o.flag(st::POLICY_ENABLED),
+                schema_bound: o.flag(st::POLICY_SCHEMA_BOUND),
+                not_for_replication: o.flag(st::NOT_FOR_REPLICATION),
+                predicates,
+            });
+        }
+    }
+
+    fn partitioning(&mut self) {
+        let classes = self.cat.system("sysclsobjs");
+        let typed = self.cat.system("systypedsubobjs");
+        let mut functions: Vec<&SysRow> = classes.iter().filter(|r| r.int("class") == 30 && r.int("status") & 2 == 0).collect();
+        functions.sort_by_key(|r| self.key(&r.str("name")));
+        let mut names = HashMap::new();
+        for f in functions {
+            let id = f.int("id");
+            names.insert(id, f.str("name"));
+            let Some(p) = typed.iter().find(|t| t.int("class") == 30 && t.int("idmajor") == id && t.int("subid") == 1) else { continue };
+            let data_type = self.data_type(p.int("xtype"), p.int("xtype"), p.int("length"), p.int("prec"), p.int("scale"));
+            let mut bounds: Vec<&SysRow> = self.values.get(&(vc::PARTITION_BOUNDARY, id)).into_iter().flatten().filter(|r| r.int("valnum") == 1).collect();
+            bounds.sort_by_key(|r| r.int("subobjid"));
+            self.db.partition_functions.push(PartitionFunction {
+                name: f.str("name"),
+                data_type,
+                range_right: f.int("status") & 1 != 0,
+                boundaries: bounds.iter().map(|r| variant_literal(r.get("value"))).collect(),
+            });
+        }
+        let mut schemes: Vec<&SysRow> = classes.iter().filter(|r| r.int("class") == 31 && r.str("type").trim() == "PS" && r.int("status") & 4 == 0).collect();
+        schemes.sort_by_key(|r| self.key(&r.str("name")));
+        for s in schemes {
+            let id = s.int("id");
+            let Some(function) = self.single_ref(rc::SCHEME_FUNCTION, id, 0).and_then(|r| names.get(&r.int("indepid"))).cloned() else { continue };
+            let mut dest: Vec<&SysRow> = self.single.get(&rc::SCHEME_DESTINATION).into_iter().flatten().filter(|r| r.int("depid") == id && r.int("indepsubid") == 0).collect();
+            dest.sort_by_key(|r| r.int("depsubid"));
+            let filegroups = dest.iter().filter_map(|r| self.data_spaces.get(&r.int("indepid")).cloned()).collect();
+            self.db.partition_schemes.push(PartitionScheme { name: s.str("name"), function, filegroups });
+        }
+    }
+
+    fn xml_and_spatial_indexes(&mut self) {
+        let stats = self.cat.system("sysidxstats");
+        let index_name = |object: i64, id: i64| stats.iter().find(|r| r.int("id") == object && r.int("indid") == id).map(|r| r.str("name"));
+        for r in &stats {
+            let (object, index_id) = (r.int("id"), r.int("indid"));
+            let Some(&(owner, slot)) = self.index_slots.get(&(object as i32, index_id as i32)) else { continue };
+            match r.int("type") {
+                3 => {
+                    let using = [rc::XML_USING_INDEX, rc::SELECTIVE_XML_USING_INDEX]
+                        .iter()
+                        .filter_map(|c| self.single_ref(*c, object, index_id))
+                        .next()
+                        .and_then(|u| index_name(object, u.int("indepsubid")));
+                    let tiny = r.int("tinyprop");
+                    let kind = match tiny {
+                        76 => XmlIndexKind::Selective,
+                        83 => XmlIndexKind::SecondarySelective,
+                        80 | 82 | 86 => XmlIndexKind::Secondary,
+                        _ => XmlIndexKind::Primary,
+                    };
+                    let secondary_type = match tiny {
+                        80 => Some("PATH".to_string()),
+                        82 => Some("PROPERTY".to_string()),
+                        86 => Some("VALUE".to_string()),
+                        _ => None,
+                    };
+                    self.indexes_of(owner)[slot].xml = Some(XmlIndex { kind, secondary_type, using_index: using, ..Default::default() });
+                }
+                4 => {
+                    let scheme = r.int("intprop");
+                    let geography = matches!(scheme, 2 | 4);
+                    let v = |n: i64| self.value(vc::TESSELLATION, object, index_id, n);
+                    let float = |n: i64| {
+                        v(n).map(|x| match x.get("value") {
+                            Value::Variant(var) => var.text.parse::<f64>().unwrap_or(0.0),
+                            other => text_of(other).and_then(|t| t.parse().ok()).unwrap_or(0.0),
+                        })
+                    };
+                    let grid = |n: i64| {
+                        match v(n).map(|x| x.int("value")) {
+                            Some(2) => "LOW",
+                            Some(4) => "HIGH",
+                            _ => "MEDIUM",
+                        }
+                        .to_string()
+                    };
+                    // Values by scheme: the bounding box (geometry), the four grids (manual grids),
+                    // then the cells per object.
+                    let (grids, cells): (Vec<String>, i64) = match scheme {
+                        1 => ((6..10).map(grid).collect(), 10),
+                        2 => ((2..6).map(grid).collect(), 6),
+                        3 => (vec!["MEDIUM".into(); 4], 6),
+                        _ => (vec!["MEDIUM".into(); 4], 2),
+                    };
+                    let spatial = SpatialIndex {
+                        geography,
+                        tessellation: match scheme {
+                            1 => "GEOMETRY_GRID",
+                            2 => "GEOGRAPHY_GRID",
+                            3 => "GEOMETRY_AUTO_GRID",
+                            _ => "GEOGRAPHY_AUTO_GRID",
+                        }
+                        .into(),
+                        bounding_box: if geography { Vec::new() } else { (2..6).filter_map(float).map(|f| f.to_string()).collect() },
+                        grids,
+                        cells_per_object: v(cells).map(|x| x.int("value") as i32).unwrap_or(16),
+                    };
+                    self.indexes_of(owner)[slot].spatial = Some(spatial);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Sensitivity classification of columns (and the extended properties older tools wrote).
+    fn sensitivity(&mut self) {
+        const PROPERTIES: [&str; 4] = ["sys_sensitivity_label_name", "sys_sensitivity_label_id", "sys_information_type_name", "sys_information_type_id"];
+        let mut found: Vec<(i64, i64, Sensitivity)> = Vec::new();
+        let entry = |found: &mut Vec<(i64, i64, Sensitivity)>, major: i64, minor: i64| -> usize {
+            match found.iter().position(|(a, b, _)| *a == major && *b == minor) {
+                Some(at) => at,
+                None => {
+                    found.push((major, minor, Sensitivity::default()));
+                    found.len() - 1
+                }
+            }
+        };
+        let mut rows: Vec<&SysRow> = self.values.iter().filter(|((c, _), _)| matches!(*c, vc::LABEL..=vc::INFORMATION_TYPE_ID | vc::RANK)).flat_map(|(_, v)| v).collect();
+        rows.sort_by_key(|r| (r.int("objid"), r.int("subobjid"), r.int("valclass")));
+        for r in rows {
+            let (major, minor) = (r.int("objid"), r.int("subobjid"));
+            if minor <= 0 {
+                continue;
+            }
+            let at = entry(&mut found, major, minor);
+            let e = &mut found[at].2;
+            let text = text_of(r.get("value"));
+            match r.int("valclass") {
+                vc::LABEL => e.label = text,
+                vc::INFORMATION_TYPE => e.information_type = text,
+                vc::LABEL_ID => e.label_id = text,
+                vc::INFORMATION_TYPE_ID => e.information_type_id = text,
+                _ => {
+                    e.rank = match r.int("value") {
+                        10 => Some("LOW".into()),
+                        20 => Some("MEDIUM".into()),
+                        30 => Some("HIGH".into()),
+                        40 => Some("CRITICAL".into()),
+                        _ => None,
+                    }
+                }
+            }
+        }
+        for x in &self.xprops {
+            let (major, minor, name) = (x.int("id"), x.int("subid"), x.str("name"));
+            if x.int("class") != 1 || minor <= 0 || !PROPERTIES.contains(&name.as_str()) {
+                continue;
+            }
+            let at = entry(&mut found, major, minor);
+            let e = &mut found[at].2;
+            let slot = match name.as_str() {
+                "sys_sensitivity_label_name" => &mut e.label,
+                "sys_sensitivity_label_id" => &mut e.label_id,
+                "sys_information_type_name" => &mut e.information_type,
+                _ => &mut e.information_type_id,
+            };
+            if slot.is_none() {
+                *slot = text_of(x.get("value"));
+            }
+        }
+        self.db.extended_properties.retain(|p| !(p.minor_type.as_deref() == Some("COLUMN") && PROPERTIES.contains(&p.name.as_str())));
+        for (major, minor, s) in found {
+            let Some(owner) = self.owners.get(&(major as i32)).copied() else { continue };
+            if matches!(owner, Owner::TableType(_)) {
+                continue;
+            }
+            if let Some(c) = self.columns_of(owner).iter_mut().find(|c| c.ordinal == minor as u32) {
+                c.sensitivity = Some(s);
+            }
+        }
+    }
+
     fn parent_of(&self, id: i32) -> Option<&Obj> {
         let o = self.objects.get(&id)?;
         (o.parent != 0).then(|| self.objects.get(&o.parent)).flatten()
@@ -1241,6 +1520,18 @@ fn variant_binary(r: &SysRow, column: &str) -> Vec<u8> {
             if matches!(raw.first(), Some(165 | 173)) { raw.get(4..).unwrap_or_default().to_vec() } else { raw }
         }
         _ => Vec::new(),
+    }
+}
+
+/// A boundary value or parameter default as a T-SQL literal (strings and dates quoted N'...').
+fn variant_literal(v: &Value) -> String {
+    let Value::Variant(var) = v else { return text_of(v).unwrap_or_else(|| "NULL".into()) };
+    let quoted = |s: &str| format!("N'{}'", s.replace('\'', "''"));
+    match var.base_type.as_str() {
+        "char" | "varchar" | "nchar" | "nvarchar" => quoted(&var.text),
+        "date" | "datetime" | "smalldatetime" | "datetime2" | "time" | "datetimeoffset" => quoted(&var.text),
+        "uniqueidentifier" => format!("'{{{}}}'", var.text.to_lowercase()),
+        _ => var.text.clone(),
     }
 }
 
