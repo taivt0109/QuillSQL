@@ -53,6 +53,7 @@ const OT_MESSAGE_TYPE: u8 = 16;
 const OT_CONTRACT: u8 = 17;
 const OT_CHECK: u8 = 31;
 const OT_SEQUENCE: u8 = 35;
+const OT_ASSEMBLY: u8 = 13;
 
 const SB: &str = "http://schemas.microsoft.com/SQL/ServiceBroker/";
 const SN: &str = "http://schemas.microsoft.com/SQL/Notifications/";
@@ -379,9 +380,16 @@ impl<'a> W<'a> {
             })
             .collect();
         self.comments();
-        // Assembly binaries.
+        // Assembly binaries, one blob per file.
+        let files: Vec<Vec<u8>> = db.assemblies.iter().flat_map(|a| &a.files).map(|f| unhex(&f.content)).collect();
+        let blob_ids: Vec<i32> = files.iter().map(|_| self.id()).collect();
         self.f32(BLOBS);
-        self.i32(0);
+        self.len(files.len());
+        for (bytes, id) in files.iter().zip(&blob_ids) {
+            self.u64(*id as i64 as u64);
+            self.len(bytes.len());
+            self.b.b.extend(bytes);
+        }
         self.i32(0);
         // XML schema collection contents, by the collection's id.
         let xml_ids: Vec<i32> = db.xml_schema_collections.iter().map(|_| self.id()).collect();
@@ -393,9 +401,24 @@ impl<'a> W<'a> {
             self.b.b.extend(x.definition.as_bytes());
         }
         self.i32(0);
-        self.empty_coll(); // assemblies
-        self.f32(VERSION); // assembly dependencies
-        self.i32(0);
+        let mut blobs = files.iter().zip(blob_ids);
+        let cs = self.cs;
+        self.coll_head(cs, db.assemblies.len());
+        for a in &db.assemblies {
+            let mine: Vec<(&AssemblyFile, &Vec<u8>, i32)> = a.files.iter().filter_map(|f| blobs.next().map(|(b, id)| (f, b, id))).collect();
+            self.assembly(a, &mine);
+        }
+        // Assembly dependencies: the user assemblies each one references.
+        let refs: Vec<(&str, &str)> = db.assemblies.iter().flat_map(|a| a.references.iter().map(move |r| (a.name.as_str(), r.as_str()))).collect();
+        self.f32(VERSION);
+        self.len(refs.len());
+        for (from, to) in refs {
+            self.u8(OT_ASSEMBLY);
+            self.s(&quote(from));
+            self.u8(OT_ASSEMBLY);
+            self.s(&quote(to));
+            self.bool(true);
+        }
         self.coll(&db.synonyms, W::synonym);
         let xml: Vec<(&XmlSchemaCollection, i32)> = db.xml_schema_collections.iter().zip(xml_ids).collect();
         self.coll(&xml, |w, (x, id)| w.xml_schema_collection(x, *id));
@@ -543,31 +566,53 @@ impl<'a> W<'a> {
         self.empty_coll();
     }
 
-    /// Parameters (id, name, type), then the id map.
-    fn params(&mut self, list: &[(i32, &str, &DataType)]) {
+    /// Parameters, then the id map.
+    fn params(&mut self, list: &[ParamRec]) {
         let cs = self.cs;
         self.coll_head(cs, list.len());
-        for (_, name, t) in list {
-            let ty = facets(self.db, t);
-            self.f32(VERSION);
-            self.i32(ty.sql_type);
-            self.s(name);
-            self.i32(ty.size);
-            self.i32(ty.scale);
-            self.i32(ty.precision);
-            self.s(&ty.type_name);
-            self.s(&ty.type_schema);
-            self.bool(false); // has default
-            self.s("NULL");
-            self.bool(false); // OUTPUT
-            self.bool(t.xml_document);
-            self.str(t.xml_collection.as_deref());
-            self.str(ty.udt.as_deref());
+        for p in list {
+            self.param(p);
         }
-        for (id, name, _) in list {
-            self.i32(*id);
-            self.s(name);
+        for p in list {
+            self.i32(p.id);
+            self.s(p.name);
         }
+    }
+
+    fn param(&mut self, p: &ParamRec) {
+        let t = &p.ty;
+        let ty = facets(self.db, t);
+        self.f32(VERSION);
+        self.i32(ty.sql_type);
+        self.s(p.name);
+        self.i32(ty.size);
+        self.i32(ty.scale);
+        self.i32(ty.precision);
+        self.s(&ty.type_name);
+        self.s(if ty.type_schema.is_empty() { "sys" } else { &ty.type_schema });
+        self.bool(p.default.is_some());
+        self.s(p.default.unwrap_or("NULL"));
+        self.bool(p.output);
+        self.bool(t.xml_document);
+        self.str(t.xml_collection.as_deref());
+        self.str(ty.udt.as_deref());
+    }
+
+    /// A CLR module's parameters, numbered from 1.
+    fn clr_params(&mut self, r: &Routine) {
+        let list: Vec<ParamRec> = r
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ParamRec {
+                id: i32::try_from(i + 1).unwrap_or(i32::MAX),
+                name: &p.name,
+                ty: parse_type(&p.data_type),
+                output: p.output,
+                default: p.default.as_deref(),
+            })
+            .collect();
+        self.params(&list);
     }
 
     fn partition_function(&mut self, f: &PartitionFunction) {
@@ -580,7 +625,7 @@ impl<'a> W<'a> {
         self.bool(cs);
         self.bool(f.range_right);
         // SQL Compare looks the input type up as parameter 0.
-        self.params(&[(0, "", &f.data_type)]);
+        self.params(&[ParamRec { id: 0, name: "", ty: f.data_type.clone(), output: false, default: None }]);
         self.no_eprops();
         self.len(f.boundaries.len());
         for b in &f.boundaries {
@@ -1122,8 +1167,9 @@ impl<'a> W<'a> {
         self.s(&r.schema);
         self.i32(if clr { -1 } else { id });
         self.perms("OBJECT", &r.schema, Some(&r.name));
-        self.bool(r.settings.quoted_identifier);
-        self.bool(r.settings.ansi_nulls);
+        // CLR modules have no SET options.
+        self.bool(r.settings.quoted_identifier && !clr);
+        self.bool(r.settings.ansi_nulls && !clr);
         self.i32(id);
         let class = if r.kind == RoutineKind::ClrAggregate { "AGGREGATE" } else { "FUNCTION" };
         self.eprops_function(class, r);
@@ -1141,12 +1187,30 @@ impl<'a> W<'a> {
         self.bool(r.encrypted);
         self.bool(false); // recursive
         self.clr_binding(r.clr_method.as_deref());
-        self.i32(0); // returned table columns
-        self.bool(clr && r.kind != RoutineKind::ClrAggregate);
-        self.no_params();
-        self.bool(false); // no return parameter
+        self.len(r.result_columns.len());
+        if !r.result_columns.is_empty() {
+            let t = Table { schema: r.schema.clone(), name: r.name.clone(), columns: r.result_columns.clone(), ..Default::default() };
+            self.coll_head(cs, t.columns.len());
+            for c in &t.columns {
+                self.column(&t, c);
+            }
+        }
+        self.bool(clr);
+        if clr {
+            self.clr_params(r);
+        } else {
+            self.no_params();
+        }
+        match r.returns.as_deref().filter(|_| clr) {
+            Some(ty) => {
+                self.bool(true);
+                // The return value is parameter 0, an OUTPUT one.
+                self.param(&ParamRec { id: 0, name: "", ty: parse_type(ty), output: true, default: None });
+            }
+            None => self.bool(false),
+        }
         self.bool(false); // system object
-        self.bool(false); // returns null on null input
+        self.bool(r.null_on_null_input);
         self.str(None); // authorization
         self.execute_as(r.execute_as.as_deref());
         self.no_ss(2);
@@ -1168,9 +1232,11 @@ impl<'a> W<'a> {
     }
 
     /// CLR assembly, class and method: `[a].[b].[c]`.
+    /// `[assembly]`, then the class and the method as the assembly names them.
     fn clr_binding(&mut self, method: Option<&str>) {
         let parts = method.map(split_multipart).unwrap_or_default();
-        for i in 0..3 {
+        self.str(parts.first().map(|a| quote(a)).as_deref());
+        for i in 1..3 {
             self.str(parts.get(i).map(String::as_str));
         }
     }
@@ -1191,7 +1257,7 @@ impl<'a> W<'a> {
         self.i32(id);
         self.perms("OBJECT", &r.schema, Some(&r.name));
         let mut flags = 0i16;
-        for (on, bit) in [(r.settings.quoted_identifier || clr, 0x1), (r.settings.ansi_nulls || clr, 0x2), (clr, 0x4), (r.encrypted, 0x8)] {
+        for (on, bit) in [(r.settings.quoted_identifier && !clr, 0x1), (r.settings.ansi_nulls && !clr, 0x2), (clr, 0x4), (r.encrypted, 0x8)] {
             if on {
                 flags |= bit;
             }
@@ -1202,7 +1268,11 @@ impl<'a> W<'a> {
         // SQL Compare leaves EXECUTE AS of procedures to the module text.
         self.i32(0);
         self.clr_binding(r.clr_method.as_deref());
-        self.no_params();
+        if clr {
+            self.clr_params(r);
+        } else {
+            self.no_params();
+        }
         self.str(None); // authorization
         self.i32(0); // schema-bound tables
         self.i32(0); // numbered procedures
@@ -1266,7 +1336,7 @@ impl<'a> W<'a> {
             UserTypeKind::Clr => (-2, None),
             UserTypeKind::Alias => (0, t.base_type.as_ref().map(|b| facets(db, b))),
         };
-        self.bool(t.kind == UserTypeKind::Alias && t.nullable);
+        self.bool(t.kind != UserTypeKind::Table && t.nullable);
         match &base {
             Some(f) => {
                 self.i32(f.size);
@@ -1295,9 +1365,10 @@ impl<'a> W<'a> {
         self.strs(&tables);
         self.i32(0); // functions using it
         self.i32(0); // procedures using it
-        let (assembly, class) = match t.clr_class.as_deref().and_then(|c| c.split_once('.')) {
-            Some((a, c)) => (a.to_string(), Some(c.to_string())),
-            None => (String::new(), None),
+        // The assembly quoted, the class as it is named in the assembly.
+        let (assembly, class) = match t.clr_class.as_deref().map(split_multipart).as_deref() {
+            Some([a, rest @ ..]) if !rest.is_empty() => (quote(a), Some(rest.join("."))),
+            _ => (String::new(), None),
         };
         self.s(&assembly);
         self.str(class.as_deref());
@@ -1315,7 +1386,7 @@ impl<'a> W<'a> {
             };
             self.table(&TableRec { t: &table, object_id: id, type_table: true });
         }
-        self.no_perms();
+        self.perms_on("TYPE", Some(&t.schema), Some(&t.name));
         self.str(None); // authorization
         self.no_ss(2);
         self.i32(0); // user types used
@@ -1453,7 +1524,10 @@ impl<'a> W<'a> {
         self.coll_head(cs, roles.len() + 1 + FIXED_ROLES.len());
         self.role("public", Some("dbo"), false);
         for p in roles {
-            self.role(&p.name, Some(p.owner.as_deref().unwrap_or("dbo")), p.kind == "APPLICATION_ROLE");
+            // An application role's owner field holds its default schema.
+            let app_role = p.kind == "APPLICATION_ROLE";
+            let owner = if app_role { p.default_schema.as_deref().unwrap_or("dbo") } else { p.owner.as_deref().unwrap_or("dbo") };
+            self.role(&p.name, Some(owner), app_role);
         }
         for r in FIXED_ROLES {
             self.role(r, Some("dbo"), false);
@@ -1707,6 +1781,40 @@ impl<'a> W<'a> {
         self.no_ss(1);
     }
 
+    /// An assembly with its files: (file, bytes, blob id).
+    fn assembly(&mut self, a: &Assembly, files: &[(&AssemblyFile, &Vec<u8>, i32)]) {
+        let cs = self.cs;
+        self.u8(0xFF);
+        self.f32(VERSION);
+        self.s(&a.name);
+        self.str(a.owner.as_deref());
+        let id = self.id();
+        self.i32(id);
+        self.bool(cs);
+        self.no_eprops();
+        // The module version id of the main image, which SQL Compare compares.
+        let mvid = files.first().and_then(|(_, b, _)| mvid(b)).unwrap_or([0; 16]);
+        self.b.b.extend(mvid);
+        self.s(&a.clr_name);
+        self.bool(a.visible);
+        self.len(files.len());
+        for (f, bytes, blob) in files {
+            self.u8(0xFF);
+            self.f32(VERSION);
+            self.s(&f.name);
+            self.u64(*blob as i64 as u64);
+            self.len(bytes.len());
+            self.no_ss(1);
+        }
+        self.i32(match a.permission_set.as_str() {
+            "EXTERNAL_ACCESS" => 2,
+            "UNSAFE" => 3,
+            _ => 1,
+        });
+        self.perms_on("ASSEMBLY", None, Some(&a.name));
+        self.no_ss(3);
+    }
+
     fn xml_schema_collection(&mut self, x: &XmlSchemaCollection, id: i32) {
         let cs = self.cs;
         self.f32(VERSION);
@@ -1928,6 +2036,45 @@ fn oa_now() -> f64 {
     secs / 86_400.0 + 25_569.0
 }
 
+/// A parameter record to write.
+struct ParamRec<'a> {
+    id: i32,
+    name: &'a str,
+    ty: DataType,
+    output: bool,
+    default: Option<&'a str>,
+}
+
+/// A type as written in DDL (`nvarchar(50)`, `decimal(10, 2)`, `varbinary(max)`, `[dbo].[Point]`).
+fn parse_type(s: &str) -> DataType {
+    let s = s.trim();
+    let (base, args) = match s.find('(') {
+        Some(i) if s.ends_with(')') && !s.starts_with('[') => (s[..i].trim(), Some(&s[i + 1..s.len() - 1])),
+        _ => (s, None),
+    };
+    let parts = split_multipart(base);
+    if let [schema, name] = parts.as_slice() {
+        return DataType { name: name.clone(), schema: Some(schema.clone()), ..Default::default() };
+    }
+    let name = parts.last().cloned().unwrap_or_default().to_ascii_lowercase();
+    let mut t = DataType { name, ..Default::default() };
+    let nums: Vec<&str> = args.map(|a| a.split(',').map(str::trim).collect()).unwrap_or_default();
+    let n = |i: usize| nums.get(i).and_then(|x| x.parse::<i32>().ok());
+    match t.name.as_str() {
+        "char" | "varchar" | "nchar" | "nvarchar" | "binary" | "varbinary" => {
+            t.length = if nums.first().is_some_and(|x| x.eq_ignore_ascii_case("max")) { Some(-1) } else { n(0) };
+        }
+        "decimal" | "numeric" => {
+            t.precision = n(0).and_then(|x| u8::try_from(x).ok());
+            t.scale = n(1).and_then(|x| u8::try_from(x).ok()).or(Some(0));
+        }
+        "datetime2" | "time" | "datetimeoffset" => t.scale = n(0).and_then(|x| u8::try_from(x).ok()),
+        "float" => t.precision = n(0).and_then(|x| u8::try_from(x).ok()),
+        _ => {}
+    }
+    t
+}
+
 /// How a type is described in Field, Param and UDT records.
 #[derive(Default)]
 struct Facets {
@@ -2113,6 +2260,69 @@ fn synonym_target(base: &str, database: &str) -> Option<ObjectName> {
     }
 }
 
+/// Upper- or lower-case hex (no `0x`) as bytes.
+fn unhex(s: &str) -> Vec<u8> {
+    let s = s.strip_prefix("0x").unwrap_or(s).as_bytes();
+    s.chunks(2).filter_map(|p| std::str::from_utf8(p).ok().and_then(|p| u8::from_str_radix(p, 16).ok())).collect()
+}
+
+/// The MVID of a .NET assembly image: the Module table's GUID in the CLI metadata (ECMA-335).
+fn mvid(pe: &[u8]) -> Option<[u8; 16]> {
+    let u16_at = |o: usize| pe.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let u32_at = |o: usize| pe.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let pe_at = u32_at(0x3C)? as usize;
+    if pe.get(pe_at..pe_at + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let coff = pe_at + 4;
+    let sections = usize::from(u16_at(coff + 2)?);
+    let optional = coff + 20;
+    let optional_size = usize::from(u16_at(coff + 16)?);
+    // Data directory 14 is the CLI header; directories start at 96 (PE32) or 112 (PE32+).
+    let dirs = optional + if u16_at(optional)? == 0x20B { 112 } else { 96 };
+    let cli_rva = u32_at(dirs + 14 * 8)?;
+    let table = optional + optional_size;
+    let offset = |rva: u32| -> Option<usize> {
+        (0..sections).find_map(|i| {
+            let s = table + i * 40;
+            let (va, size, raw) = (u32_at(s + 12)?, u32_at(s + 16)?.max(u32_at(s + 8)?), u32_at(s + 20)?);
+            (rva >= va && rva < va + size).then(|| (rva - va + raw) as usize)
+        })
+    };
+    let cli = offset(cli_rva)?;
+    let meta = offset(u32_at(cli + 8)?)?;
+    if u32_at(meta)? != 0x424A_5342 {
+        return None;
+    }
+    let version_len = u32_at(meta + 12)? as usize;
+    let mut at = meta + 16 + version_len + 2;
+    let streams = usize::from(u16_at(at)?);
+    at += 2;
+    let (mut tables, mut guids) = (None, None);
+    for _ in 0..streams {
+        let (start, _) = (u32_at(at)? as usize, u32_at(at + 4)?);
+        let name_at = at + 8;
+        let name_len = pe.get(name_at..)?.iter().position(|&b| b == 0)?;
+        let name = &pe[name_at..name_at + name_len];
+        match name {
+            b"#~" | b"#-" => tables = Some(meta + start),
+            b"#GUID" => guids = Some(meta + start),
+            _ => {}
+        }
+        at = name_at + (name_len + 4) / 4 * 4;
+    }
+    let (tables, guids) = (tables?, guids?);
+    let heap_sizes = *pe.get(tables + 6)?;
+    let valid = pe.get(tables + 8..tables + 16).map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))?;
+    // The Module table (table 0) comes first, after one row count per present table.
+    let rows = tables + 24 + valid.count_ones() as usize * 4;
+    let string_index = if heap_sizes & 0x1 != 0 { 4 } else { 2 };
+    let guid_at = rows + 2 + string_index;
+    let index = if heap_sizes & 0x2 != 0 { u32_at(guid_at)? as usize } else { usize::from(u16_at(guid_at)?) };
+    let g = guids + index.checked_sub(1)? * 16;
+    pe.get(g..g + 16)?.try_into().ok()
+}
+
 /// A partition boundary literal as SQL Compare stores the value: the text of a string or date,
 /// a GUID without braces, None for NULL.
 fn boundary_text(literal: &str) -> Option<String> {
@@ -2270,5 +2480,14 @@ mod tests {
                 std::fs::write(std::path::Path::new(&out).join(name), &bytes).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn assembly_mvid() {
+        // SQL Compare 15 stores this MVID for the fixture's assembly.
+        let dll = unhex(include_str!("../../tests/fixtures/objects/clr.hex").trim());
+        let expected = [0x62, 0x35, 0x4b, 0x7b, 0xe2, 0x36, 0x27, 0x48, 0xb2, 0x75, 0x51, 0xd5, 0xe8, 0x37, 0x67, 0xad];
+        assert_eq!(mvid(&dll), Some(expected));
+        assert_eq!(mvid(b"not an image"), None);
     }
 }
