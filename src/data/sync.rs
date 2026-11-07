@@ -62,6 +62,9 @@ pub struct SyncSettings {
     pub max_transaction_bytes: Option<u64>,
     /// Database 1, to read values that were compared by hash.
     pub source_connection: Option<ConnectionSpec>,
+    /// Row messages without counts (`Add row to …`), as SQL Data Compare's command line writes
+    /// them: it always deploys through a row-selection callback.
+    pub row_messages: bool,
 }
 
 impl SyncSettings {
@@ -76,6 +79,7 @@ impl SyncSettings {
             selections: HashMap::new(),
             max_transaction_bytes: None,
             source_connection: None,
+            row_messages: false,
         }
     }
 }
@@ -168,7 +172,7 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
         return Ok(DeploymentScript { sql: String::new(), warnings, batches: Vec::new() });
     }
     // Row-level choices change the messages of every table, as in SQL Data Compare.
-    let by_row = plans.iter().any(|p| p.rows.is_some_and(|r| r.iter().any(|k| !k.toggled.is_empty() || !k.included)));
+    let by_row = settings.row_messages || plans.iter().any(|p| p.rows.is_some_and(|r| r.iter().any(|k| !k.toggled.is_empty() || !k.included)));
     let (order, extra_fks) = dependency_order(&plans, target, opts, &mut warnings);
     if result.kinds[1] == SideKind::Backup {
         warnings.push(Warning {

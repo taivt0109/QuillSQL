@@ -65,6 +65,7 @@ Redgate's.
 | `converge-redgate` | Redgate deploys to `_r` and quill finds database 1 and `_r` identical |
 | `outcome` | both deployments end alike and Redgate finds `_q` and `_r` identical (only `/options` from `args`, no filters) |
 | `check` | `check.sql` returns the same rows on `_q` and `_r` |
+| `prints` | data: the two synchronization scripts print the same progress messages in the same order (runs with `outcome`) |
 | `diffset` | schema: the same (object type, name, status) set in the XML reports; data: the same per-table counts of different / only in 1 / only in 2 / identical rows (a run with `/include:Identical`) |
 | `names` | schema: the report `fqn` values are the same (catches quoting differences that `diffset` ignores) |
 | `warnings` | the same set of warnings, by severity and text with identifiers masked |
@@ -75,7 +76,9 @@ When both deployments fail with the same exit code, the two `converge` oracles p
 Normalised as documented deviations: the product name in warnings (QuillSQL vs SQL Compare /
 SQL Data Compare), script headers (scripts are not compared), the object-name prefix quill puts in
 front of a warning (`[dbo].[T]: ...`), brackets in names for `diffset`, console width
-(`/outputwidth:250` is passed to both).
+(`/outputwidth:250` is passed to both). Both tools get the same connection switches: no
+`/trustServerCertificate`, since SQL Compare has none and does not validate the certificate of an
+unencrypted connection.
 
 ## Known differences
 

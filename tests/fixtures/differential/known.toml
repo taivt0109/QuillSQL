@@ -37,102 +37,6 @@ finding = "data H2"
 reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
 
 [[known]]
-scenario = "data-where-scripts"
-oracle = "converge-quill"
-finding = "data H3"
-reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-where-scripts"
-oracle = "converge-redgate"
-finding = "data H3"
-reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-where-scripts"
-oracle = "diffset"
-finding = "data H3"
-reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-where-scripts"
-oracle = "exit"
-finding = "data H3"
-reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-where-scripts"
-oracle = "outcome"
-finding = "data H3"
-reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-project-where-excludecolumns"
-oracle = "check"
-finding = "data H5"
-reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
-
-[[known]]
-scenario = "data-project-where-excludecolumns"
-oracle = "converge-redgate"
-finding = "data H5"
-reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
-
-[[known]]
-scenario = "data-project-where-excludecolumns"
-oracle = "diffset"
-finding = "data H5"
-reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
-
-[[known]]
-scenario = "data-project-where-excludecolumns"
-oracle = "outcome"
-finding = "data H5"
-reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
-
-[[known]]
-scenario = "data-sdc-sessionsettings"
-oracle = "check"
-finding = "data H6, sources-cli H2"
-reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
-
-[[known]]
-scenario = "data-sdc-sessionsettings"
-oracle = "converge-redgate"
-finding = "data H6, sources-cli H2"
-reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
-
-[[known]]
-scenario = "data-sdc-sessionsettings"
-oracle = "diffset"
-finding = "data H6, sources-cli H2"
-reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
-
-[[known]]
-scenario = "data-sdc-sessionsettings"
-oracle = "outcome"
-finding = "data H6, sources-cli H2"
-reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
-
-[[known]]
-scenario = "data-sdc-deselectall-selectitem"
-oracle = "check"
-finding = "data H7, sources-cli H3"
-reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
-
-[[known]]
-scenario = "data-sdc-deselectall-selectitem"
-oracle = "converge-redgate"
-finding = "data H7, sources-cli H3"
-reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
-
-[[known]]
-scenario = "data-sdc-deselectall-selectitem"
-oracle = "diffset"
-finding = "data H7, sources-cli H3"
-reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
-
-[[known]]
 scenario = "data-type-pairs"
 oracle = "converge-quill"
 finding = "AUDIT2-BRIEF deviation"
@@ -149,3 +53,21 @@ scenario = "data-binary-key"
 oracle = "diffset"
 finding = "new"
 reason = "Redgate fails to pair the equal key 0xFF (deletes and re-inserts it), so its counts differ; quill pairs it"
+[[known]]
+scenario = "data-binary-key"
+oracle = "prints"
+finding = "new"
+reason = "Redgate fails to pair the equal key 0xFF, so it deletes and re-inserts two rows and prints messages for them"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "prints"
+finding = "data H2"
+reason = "Redgate's backup reader crashes on this backup, so it writes no script"
+
+[[known]]
+scenario = "data-type-pairs"
+oracle = "prints"
+finding = "AUDIT2-BRIEF deviation"
+reason = "documented deviation: quill compares date/datetime pairs by value, so it updates one row where Redgate updates two"
+
