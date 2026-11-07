@@ -100,12 +100,6 @@ namespace QuillSql.Compare
                 _status.Text = "No files selected";
                 return;
             }
-            if (_files.Items.Cast<string>().Any(f => f.EndsWith(".sqb", StringComparison.OrdinalIgnoreCase)))
-            {
-                _sets.ItemsSource = null;
-                _status.Text = "SQL Backup files are not supported yet";
-                return;
-            }
             _status.Text = "Retrieving backup sets...";
             var reply = await Ui.Try(_session.Host.Owner, async () => await _session.Engine.Request("backup_sets", new JsonObject
             {
