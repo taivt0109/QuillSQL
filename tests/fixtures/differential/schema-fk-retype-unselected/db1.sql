@@ -1,0 +1,3 @@
+CREATE TABLE dbo.Parent (Id bigint NOT NULL CONSTRAINT PK_Parent PRIMARY KEY)
+GO
+CREATE TABLE dbo.Child (Id int NOT NULL CONSTRAINT PK_Child PRIMARY KEY, ParentId bigint NULL CONSTRAINT FK_Child_Parent REFERENCES dbo.Parent (Id))
