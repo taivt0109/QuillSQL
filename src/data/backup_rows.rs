@@ -15,7 +15,8 @@ use crate::sources::backup::{Backup, guid_text};
 pub fn sorted(backup: &Backup, pair: &TablePair, side: u8, opts: &DataOptions, server: Server, keys: usize) -> Result<Vec<Vec<Value>>, String> {
     let (table, filter) = if side == 1 { (&pair.source, &pair.where1) } else { (&pair.target, &pair.where2) };
     if filter.as_deref().is_some_and(|w| !w.trim().is_empty()) {
-        return Err("a WHERE clause cannot be applied to a backup".into());
+        // SQL Data Compare refuses it too: its backup reader takes SELECT ... FROM ... ORDER BY only.
+        return Err("a WHERE clause cannot be applied to a backup data source".into());
     }
     let name = |i: usize| if side == 1 { &pair.columns[i].source } else { &pair.columns[i].target };
     let ty = |i: usize| if side == 1 { &pair.columns[i].source_type } else { &pair.columns[i].target_type };

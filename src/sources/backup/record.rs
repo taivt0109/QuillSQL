@@ -102,7 +102,7 @@ impl<'a> Record<'a> {
             return Field::Bytes(&self.bytes[at..at + len]);
         }
         if c.offset == 0 {
-            return Field::Null;
+            return self.sparse(c.id);
         }
         let i = (-c.offset - 1) as usize;
         // Trailing empty variable columns are not stored; the null bitmap tells them from NULLs.
@@ -114,6 +114,32 @@ impl<'a> Record<'a> {
         }
         let b = &self.bytes[start..stop];
         if end & 0x8000 != 0 { Field::Complex(b) } else { Field::Bytes(b) }
+    }
+
+    /// A sparse column: its value in the row's sparse vector (a complex column of type 5:
+    /// count, column ids, end offsets, then the values), NULL when it is not there.
+    fn sparse(&self, column: i32) -> Field<'a> {
+        for (i, &end) in self.var_ends.iter().enumerate() {
+            if end & 0x8000 == 0 {
+                continue;
+            }
+            let start = if i == 0 { self.var_start } else { (self.var_ends[i - 1] & 0x7fff) as usize };
+            let Some(v) = self.bytes.get(start..(end & 0x7fff) as usize) else { continue };
+            if v.len() < 4 || u16_at(v, 0) != 5 {
+                continue;
+            }
+            let n = u16_at(v, 2) as usize;
+            let ends = 4 + 2 * n;
+            let data = ends + 2 * n;
+            for k in 0..n {
+                if u16_at(v, 4 + 2 * k) as i32 == column {
+                    let from = if k == 0 { data } else { u16_at(v, ends + 2 * (k - 1)) as usize };
+                    let to = u16_at(v, ends + 2 * k) as usize;
+                    return v.get(from..to).map_or(Field::Null, Field::Bytes);
+                }
+            }
+        }
+        Field::Null
     }
 
     /// For a forwarding stub: where the row lives.

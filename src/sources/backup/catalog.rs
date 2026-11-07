@@ -1367,18 +1367,15 @@ impl Builder<'_> {
         rows.sort_by_key(|r| (self.key(self.schema_names.get(&(r.int("nsid") as i32)).map(String::as_str).unwrap_or("")), self.key(&r.str("name"))));
         for r in rows {
             let id = r.int("id");
-            let mine: Vec<&SysRow> = components.iter().filter(|c| c.int("xsdid") == id).collect();
+            // Global components are those not placed inside another of the same schema.
+            let mine: Vec<&SysRow> = components.iter().filter(|c| c.int("xsdid") == id && c.int("nmscope") == 0).collect();
+            let xsd = Xsd { components: &components, placements: &placements, qnames: &qnames };
             let mut body = String::new();
             let mut whole = true;
             for c in &mine {
-                let name = qnames.get(&c.int("nameid")).cloned().unwrap_or_default();
-                let ty = placements.iter().find(|p| p.int("placingid") == c.int("id")).and_then(|p| components.iter().find(|t| t.int("id") == p.int("placedid")));
-                match (c.str("kind").trim(), ty) {
-                    ("E", Some(t)) if t.int("xsdid") == 1 => {
-                        let tn = qnames.get(&t.int("nameid")).cloned().unwrap_or_default();
-                        body.push_str(&format!("<xsd:element name=\"{name}\" type=\"xsd:{tn}\"/>"));
-                    }
-                    _ => whole = false,
+                match xsd.component(c, None) {
+                    Some(t) => body.push_str(&t),
+                    None => whole = false,
                 }
             }
             let definition = if whole { format!("<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">{body}</xsd:schema>") } else { String::new() };
@@ -1910,6 +1907,92 @@ fn variant_binary(r: &SysRow, column: &str) -> Vec<u8> {
             if matches!(raw.first(), Some(165 | 173)) { raw.get(4..).unwrap_or_default().to_vec() } else { raw }
         }
         _ => Vec::new(),
+    }
+}
+
+/// XML schema components (sysxmlcomponent, sysxmlplacement) written back as XSD text, in the
+/// normalized form XML_SCHEMA_NAMESPACE gives: elements, anonymous complex types (as a
+/// restriction of anyType), sequences, choices, all groups and attributes; other components
+/// are not rebuilt.
+struct Xsd<'a> {
+    components: &'a [SysRow],
+    placements: &'a [SysRow],
+    qnames: &'a HashMap<i64, String>,
+}
+
+impl Xsd<'_> {
+    fn by_id(&self, id: i64) -> Option<&SysRow> {
+        self.components.iter().find(|c| c.int("id") == id)
+    }
+
+    fn placed(&self, id: i64) -> Vec<&SysRow> {
+        let mut v: Vec<&SysRow> = self.placements.iter().filter(|p| p.int("placingid") == id).collect();
+        v.sort_by_key(|p| p.int("ordinal"));
+        v
+    }
+
+    fn name(&self, c: &SysRow) -> String {
+        self.qnames.get(&c.int("nameid")).cloned().unwrap_or_default()
+    }
+
+    /// `minOccurs` and `maxOccurs` when they are not 1.
+    fn occurs(p: Option<&SysRow>) -> String {
+        let Some(p) = p else { return String::new() };
+        let mut s = String::new();
+        if p.int("minoccur") != 1 {
+            s.push_str(&format!(" minOccurs=\"{}\"", p.int("minoccur")));
+        }
+        match p.int("maxoccur") {
+            1 => {}
+            2147483647 => s.push_str(" maxOccurs=\"unbounded\""),
+            n => s.push_str(&format!(" maxOccurs=\"{n}\"")),
+        }
+        s
+    }
+
+    fn component(&self, c: &SysRow, placement: Option<&SysRow>) -> Option<String> {
+        let kind = c.str("kind");
+        match kind.trim() {
+            "E" => {
+                let name = self.name(c);
+                let ty = self.placed(c.int("id")).first().and_then(|p| self.by_id(p.int("placedid")));
+                match ty {
+                    // A named type of the XML Schema namespace.
+                    Some(t) if t.int("xsdid") == 1 => Some(format!("<xsd:element name=\"{name}\" type=\"xsd:{}\"{}/>", self.name(t), Self::occurs(placement))),
+                    Some(t) if t.str("kind").trim() == "K" => {
+                        Some(format!("<xsd:element name=\"{name}\"{}>{}</xsd:element>", Self::occurs(placement), self.complex(t)?))
+                    }
+                    _ => None,
+                }
+            }
+            "A" => {
+                let name = self.name(c);
+                let ty = self.placed(c.int("id")).first().and_then(|p| self.by_id(p.int("placedid"))).filter(|t| t.int("xsdid") == 1)?;
+                let required = if placement.is_some_and(|p| p.int("minoccur") == 1) { " use=\"required\"" } else { "" };
+                Some(format!("<xsd:attribute name=\"{name}\" type=\"xsd:{}\"{required}/>", self.name(ty)))
+            }
+            "M" => {
+                let tag = match c.str("enum").trim() {
+                    "C" => "choice",
+                    "A" => "all",
+                    _ => "sequence",
+                };
+                let mut inner = String::new();
+                for p in self.placed(c.int("id")) {
+                    inner.push_str(&self.component(self.by_id(p.int("placedid"))?, Some(p))?);
+                }
+                Some(format!("<xsd:{tag}{}>{inner}</xsd:{tag}>", Self::occurs(placement)))
+            }
+            _ => None,
+        }
+    }
+
+    fn complex(&self, t: &SysRow) -> Option<String> {
+        let mut inner = String::new();
+        for p in self.placed(t.int("id")) {
+            inner.push_str(&self.component(self.by_id(p.int("placedid"))?, Some(p))?);
+        }
+        Some(format!("<xsd:complexType><xsd:complexContent><xsd:restriction base=\"xsd:anyType\">{inner}</xsd:restriction></xsd:complexContent></xsd:complexType>"))
     }
 }
 

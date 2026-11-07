@@ -14,6 +14,8 @@ const PI: u8 = 0xF4;
 const COMMENT: u8 = 0xF3;
 const TEXT: u8 = 0x11;
 const XML_DECLARATION: u8 = 0xFE;
+/// An extension the reader can skip: length, then data (typed xml's type annotations).
+const EXTENSION: u8 = 0xEA;
 
 struct Reader<'a> {
     b: &'a [u8],
@@ -40,6 +42,74 @@ impl Reader<'_> {
         Err("invalid length in xml value".into())
     }
 
+    fn take(&mut self, n: usize) -> Result<&[u8], String> {
+        let s = self.b.get(self.at..self.at + n).ok_or("xml value ends early")?;
+        self.at += n;
+        Ok(s)
+    }
+
+    /// A typed value (typed xml) as its canonical XSD text; `None` for tokens that are not values.
+    fn atomic(&mut self, token: u8) -> Result<Option<String>, String> {
+        let int = |b: &[u8]| b.iter().rev().fold(0i64, |v, &x| (v << 8) | x as i64);
+        Ok(Some(match token {
+            TEXT => self.text()?,
+            0x01 => (int(self.take(2)?) as i16).to_string(),
+            0x02 => (int(self.take(4)?) as i32).to_string(),
+            0x07 => self.take(1)?[0].to_string(),
+            0x08 => int(self.take(8)?).to_string(),
+            0x06 | 0x86 => if self.take(1)?[0] != 0 { "true" } else { "false" }.to_string(),
+            0x03 => double_text(f32::from_le_bytes(self.take(4)?.try_into().unwrap()) as f64),
+            0x04 => double_text(f64::from_le_bytes(self.take(8)?.try_into().unwrap())),
+            // Decimal: length, precision, scale, sign, magnitude.
+            0x0A | 0x0B | 0x87 => {
+                let n = self.take(1)?[0] as usize;
+                let b = self.take(n)?;
+                let scale = b[1] as u32;
+                let mag = b[3..].iter().rev().fold(0u128, |v, &x| (v << 8) | x as u128);
+                let p = 10u128.pow(scale);
+                let mut t = format!("{}{}", if b[2] == 1 { "" } else { "-" }, mag / p);
+                let frac = format!("{:0w$}", mag % p, w = scale as usize);
+                let frac = frac.trim_end_matches('0');
+                if !frac.is_empty() {
+                    t.push('.');
+                    t.push_str(frac);
+                }
+                if t == "-0" { "0".into() } else { t }
+            }
+            // dateTime with an offset: scale, then time, date and offset minutes (UTC).
+            0x7B | 0x7E | 0x7F | 0x7D => {
+                let scale = if token == 0x7F { 0 } else { self.take(1)?[0] };
+                let tb = super::record::time_bytes(scale);
+                let time = if token == 0x7F { 0 } else { int(self.take(tb)?) };
+                let days = if token == 0x7D { 0 } else { int(self.take(3)?) };
+                let offset = if token == 0x7B { int(self.take(2)?) as i16 as i64 } else { 0 };
+                let ns = time * 10i64.pow(9 - scale as u32);
+                let local = days as i128 * super::values::DAY + ns as i128 + offset as i128 * 60_000_000_000;
+                let (d, t) = (local.div_euclid(super::values::DAY) as i64, local.rem_euclid(super::values::DAY) as i64);
+                let date = super::text::odbc(&crate::data::value::Value::Date(d), super::values::xtype::DATE, 0);
+                let secs = t / 1_000_000_000;
+                let mut clock = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
+                let frac = format!("{:09}", t % 1_000_000_000);
+                let frac = frac.trim_end_matches('0');
+                if !frac.is_empty() {
+                    clock.push('.');
+                    clock.push_str(frac);
+                }
+                let zone = match (token, offset) {
+                    (0x7B, 0) => "Z".to_string(),
+                    (0x7B, o) => format!("{}{:02}:{:02}", if o < 0 { '-' } else { '+' }, o.abs() / 60, o.abs() % 60),
+                    _ => String::new(),
+                };
+                match token {
+                    0x7F => format!("{date}{zone}"),
+                    0x7D => format!("{clock}{zone}"),
+                    _ => format!("{date}T{clock}{zone}"),
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     fn text(&mut self) -> Result<String, String> {
         let n = self.number()? * 2;
         let s = self.b.get(self.at..self.at + n).ok_or("xml value ends early")?;
@@ -63,6 +133,11 @@ fn escape(s: &str, attribute: bool) -> String {
         }
     }
     out
+}
+
+/// xs:double as SQL Server writes it: the shortest form, an exponent for large and small values.
+fn double_text(f: f64) -> String {
+    if f == 0.0 || (1e-6..1e15).contains(&f.abs()) { format!("{f}") } else { format!("{f:E}").replace("E", "E") }
 }
 
 pub fn decode(b: &[u8]) -> Result<String, String> {
@@ -105,9 +180,22 @@ pub fn decode(b: &[u8]) -> Result<String, String> {
             ATTRIBUTE => {
                 let q = qnames.get(r.number()?).cloned().unwrap_or_default();
                 let mut value = String::new();
-                while r.b.get(r.at) == Some(&TEXT) {
+                while let Some(&t) = r.b.get(r.at) {
+                    if t == EXTENSION {
+                        r.at += 1;
+                        let n = r.number()?;
+                        r.take(n)?;
+                        continue;
+                    }
+                    let at = r.at;
                     r.at += 1;
-                    value.push_str(&r.text()?);
+                    match r.atomic(t)? {
+                        Some(v) => value.push_str(&v),
+                        None => {
+                            r.at = at;
+                            break;
+                        }
+                    }
                 }
                 out.push_str(&format!(" {q}=\"{}\"", escape(&value, true)));
             }
@@ -121,10 +209,9 @@ pub fn decode(b: &[u8]) -> Result<String, String> {
                     out.push_str(&format!("</{q}>"));
                 }
             }
-            TEXT => {
-                close_start(&mut out, &mut pending);
-                let t = r.text()?;
-                out.push_str(&escape(&t, false));
+            EXTENSION => {
+                let n = r.number()?;
+                r.take(n)?;
             }
             COMMENT => {
                 close_start(&mut out, &mut pending);
@@ -143,7 +230,15 @@ pub fn decode(b: &[u8]) -> Result<String, String> {
                 r.text()?;
                 r.byte()?;
             }
-            t => return Err(format!("unsupported token 0x{t:02X} in xml value")),
+            t => match r.atomic(t)? {
+                // An empty text leaves the element empty (`<s/>`).
+                Some(v) if v.is_empty() => {}
+                Some(v) => {
+                    close_start(&mut out, &mut pending);
+                    out.push_str(&escape(&v, false));
+                }
+                None => return Err(format!("unsupported token 0x{t:02X} in xml value")),
+            },
         }
     }
     Ok(out)

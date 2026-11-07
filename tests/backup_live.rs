@@ -129,6 +129,10 @@ fn assert_identical(server: &Server, live: &str, files: &[PathBuf], set: Option<
     let from_live = catalog::read_database(&spec).unwrap();
     let c = schema::compare(&from_backup, &from_live, &Options::default_set(), &Mappings::default());
     let differences: Vec<String> = c.differences.iter().filter(|d| d.kind != schema::DiffKind::Equal).map(|d| format!("{:?} {} {:?}", d.object_type, d.name, d.properties)).collect();
+    if let Ok(dir) = std::env::var("QUILL_BACKUP_DEBUG") {
+        std::fs::write(format!("{dir}/b.json"), serde_json::to_string_pretty(&from_backup).unwrap()).unwrap();
+        std::fs::write(format!("{dir}/b.json.live"), serde_json::to_string_pretty(&from_live).unwrap()).unwrap();
+    }
     assert!(differences.is_empty(), "{files:?}: {differences:#?}");
     let data = compare_sides(Side::Backup(&b), Side::Live(&spec), &from_backup, &from_live, &DataOptions::default_set(), &DataMappings::default(), |_| true, 4, |_, _| {}).unwrap();
     for t in &data.tables {
@@ -210,6 +214,13 @@ const OBJECTS: &str = include_str!("fixtures/objects/objects.sql");
 const CLR: &str = include_str!("fixtures/objects/clr.hex");
 const XML_SPATIAL: &str = include_str!("fixtures/compare/sources_xml_spatial.sql");
 
+/// Sparse columns with a column set, and typed xml.
+const SPARSE_TYPED_XML: &str = r#"CREATE XML SCHEMA COLLECTION dbo.TS AS N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="o"><xs:complexType><xs:sequence><xs:element name="n" type="xs:int"/><xs:element name="s" type="xs:string"/><xs:element name="d" type="xs:decimal"/><xs:element name="b" type="xs:boolean"/><xs:element name="t" type="xs:dateTime"/></xs:sequence><xs:attribute name="a" type="xs:double"/></xs:complexType></xs:element></xs:schema>';
+GO
+CREATE TABLE dbo.SP (id int PRIMARY KEY, s1 int SPARSE NULL, s2 nvarchar(20) SPARSE NULL, s3 datetime2(3) SPARSE NULL, x xml(dbo.TS) NULL, cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS);
+GO
+INSERT dbo.SP (id, s1, s2, s3, x) VALUES (1, 5, N'abc', '2020-01-02 03:04:05.678', N'<o a="1.5"><n>42</n><s>hi</s><d>12.50</d><b>true</b><t>2020-01-02T03:04:05Z</t></o>'), (2, NULL, NULL, NULL, NULL), (3, NULL, N'only', NULL, N'<o><n>-7</n><s/><d>0</d><b>0</b><t>1999-12-31T23:59:59.123+02:00</t></o>');"#;
+
 /// The objects beyond tables and modules: CLR, XML schema collections, Service Broker, security
 /// policies, graph and temporal tables, partitioning, XML and spatial indexes. Needs `clr
 /// enabled` on and `clr strict security` off. Selective XML indexes are left out: their paths
@@ -219,7 +230,7 @@ fn backups_of_every_object_kind() {
     let Some(server) = server("objects") else { return };
     let db = name("Objects");
     let xml: String = XML_SPATIAL.split("\nGO\n").filter(|b| !b.contains("SELECTIVE") && !b.contains("SSX_Doc2")).collect::<Vec<_>>().join("\nGO\n");
-    let script = format!("{}\nGO\n{xml}", OBJECTS.replace("{CLR}", &format!("0x{}", CLR.trim())));
+    let script = format!("{}\nGO\n{xml}\nGO\n{SPARSE_TYPED_XML}", OBJECTS.replace("{CLR}", &format!("0x{}", CLR.trim())));
     server.create(&db, &script);
     let f = format!("{db}.bak");
     let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![f.clone()] };
