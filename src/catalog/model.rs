@@ -18,6 +18,9 @@ pub struct Database {
     pub name: String,
     pub collation: String,
     pub compatibility_level: u32,
+    /// The login that owns the database: the login of its `dbo` user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub schemas: Vec<Schema>,
     pub tables: Vec<Table>,
     pub views: Vec<View>,

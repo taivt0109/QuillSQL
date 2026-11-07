@@ -1811,6 +1811,9 @@ impl Snap {
     fn principals(&self, db: &mut Database, permissions: &mut Vec<Permission>) {
         let named = |list: &[&str], name: &str| list.iter().any(|x| x.eq_ignore_ascii_case(name));
         for u in &self.users {
+            if u.name.eq_ignore_ascii_case("dbo") {
+                db.owner = u.login.clone().filter(|l| !l.is_empty());
+            }
             if named(&BUILT_IN_USERS, &u.name) || named(&FIXED_ROLES, &u.name) {
                 continue;
             }

@@ -635,4 +635,25 @@ mod tests {
         // SQL Compare's snapshots write empty elements with a space before the slash.
         assert_eq!(xml_key("<a><b x=\"1\" /></a>"), xml_key("<a><b x=\"1\"/></a>"));
     }
+
+    #[test]
+    fn database_owner_is_reported_on_dbo_and_not_deployed() {
+        use crate::schema::{DiffKind, Mappings, Opt, Options, compare, deploy};
+        let db = |owner: &str| Database { name: "x".into(), owner: Some(owner.into()), ..Default::default() };
+        let (a, b) = (db("sa"), db("QuillOwner"));
+        assert!(compare(&a, &b, &Options::default_set(), &Mappings::default()).differences.iter().all(|d| d.kind == DiffKind::Equal));
+        let opts = Options::default_set().without(Opt::IgnoreUserProperties);
+        let c = compare(&a, &b, &opts, &Mappings::default());
+        let dbo: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal).collect();
+        assert_eq!(dbo.len(), 1);
+        assert_eq!((dbo[0].object_type, dbo[0].name.name.as_str(), dbo[0].properties[0].source.as_deref()), (ObjectType::User, "dbo", Some("sa")));
+        let settings = deploy::ScriptSettings {
+            transaction_isolation_level: "SERIALIZABLE".into(),
+            source: "a".into(),
+            target: "b".into(),
+            target_database: "x".into(),
+            target_major_version: 16,
+        };
+        assert!(deploy::generate(&c, &a, &b, &opts, &Mappings::default(), &settings).unwrap().is_empty());
+    }
 }
