@@ -336,6 +336,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             let (from, to) = (describe(Some(&source1), &db1), describe(side2_source(&side2), &db2));
             s = crate::data::staticdata::merge(s, |own| data.script(&db2, &from, &to, isolation, own)).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
         }
+        if args.has("sca1") {
+            s.warnings.push(crate::schema::warnings::sca_migrations_ignored());
+        }
+        if matches!(side2, Side::Source(Source::Scripts { .. })) {
+            // A scripts folder is rewritten, not run: no warning about running without transactions.
+            let no_transactions = crate::schema::warnings::no_transactions().message;
+            s.warnings.retain(|w| w.message != no_transactions);
+        }
         if let Some(f) = &folder1 {
             sources::add_pre_post(&mut s, f, &options)?;
         }
@@ -355,6 +363,9 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         if matches!(side2, Side::Source(Source::Scripts { revision: Some(_), .. })) {
             return Err(ArgError::new(exit::USAGE, "/synchronize cannot write to a source control revision; give the scripts folder with /scripts2"));
         }
+        let warnings = deploy::DeploymentScript { warnings: deploy::folder_warnings(&comparison, &db1), ..Default::default() };
+        common::report_warnings(args, &warnings);
+        common::check_warnings(args, &warnings)?;
         sources::sync_folder(&db1, f, &comparison.differences, &options)?;
         return Ok(exit::SUCCESS);
     }
@@ -428,8 +439,20 @@ fn side_identifier(side: &Side, db: &Database) -> String {
     }
 }
 
+/// `[schema].[name]`. Objects without a schema (principals, schemas, DDL triggers…) are named
+/// bare when the name is a regular identifier, as SQL Compare writes them: `role-AppReaders`,
+/// but `contract-[//app/Contract]`.
 fn full_name(n: &ObjectName) -> String {
-    if n.schema.is_empty() { format!("[{}]", n.name.replace(']', "]]")) } else { format!("[{}].[{}]", n.schema.replace(']', "]]"), n.name.replace(']', "]]")) }
+    let regular = |s: &str| {
+        let mut c = s.chars();
+        c.next().is_some_and(|f| f.is_alphabetic() || matches!(f, '_' | '@' | '#'))
+            && c.all(|x| x.is_alphanumeric() || matches!(x, '_' | '@' | '#' | '$'))
+    };
+    if n.schema.is_empty() && regular(&n.name) {
+        n.name.clone()
+    } else if n.schema.is_empty() {
+        format!("[{}]", n.name.replace(']', "]]"))
+    } else { format!("[{}].[{}]", n.schema.replace(']', "]]"), n.name.replace(']', "]]")) }
 }
 
 /// Text cut to `len - 1` characters when it does not fit, then padded to `len`.

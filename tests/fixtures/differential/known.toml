@@ -1,204 +1,6 @@
 # Known differences between quill and the Vendor tools; see README.md.
 
 [[known]]
-scenario = "*"
-oracle = "names"
-finding = "new"
-reason = "quill brackets principal, schema and DDL-trigger names in report fqn/console (role-[App], schema-[App], ddltrigger-[T]); Vendor writes them bare (role-App)"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "check"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "converge-quill"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "diffset"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "exit"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "names"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "outcome"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "check"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "converge-quill"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "diffset"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "exit"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "names"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "outcome"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "check"
-finding = "schema-model H3"
-reason = "a mapped pair with different names is reported identical and never renamed"
-
-[[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "converge-quill"
-finding = "schema-model H3"
-reason = "a mapped pair with different names is reported identical and never renamed"
-
-[[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "diffset"
-finding = "schema-model H3"
-reason = "a mapped pair with different names is reported identical and never renamed"
-
-[[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "exit"
-finding = "schema-model H3"
-reason = "a mapped pair with different names is reported identical and never renamed"
-
-[[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "names"
-finding = "schema-model H3"
-reason = "a mapped pair with different names is reported identical and never renamed"
-
-[[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "converge-vendor"
-finding = "new"
-reason = "after Vendor renamed the target, quill keeps the project's stale mapping Client->Customer and reports Client as only in 1 and only in 2 instead of pairing by name"
-
-[[known]]
-scenario = "schema-refreshview"
-oracle = "check"
-finding = "schema-deploy H2"
-reason = "SELECT * views (direct and through a synonym) are not refreshed with sp_refreshview after the table gains a column"
-
-[[known]]
-scenario = "schema-view-chain"
-oracle = "check"
-finding = "schema-deploy H2"
-reason = "V2 (SELECT * FROM V1) is not refreshed after V1 is altered"
-
-[[known]]
-scenario = "schema-columnstore"
-oracle = "check"
-finding = "new"
-reason = "deploying a nonclustered columnstore index writes CREATE NONCLUSTERED COLUMNSTORE INDEX without its column list; SQL Server rejects it (error 35336)"
-
-[[known]]
-scenario = "schema-columnstore"
-oracle = "converge-quill"
-finding = "new"
-reason = "deploying a nonclustered columnstore index writes CREATE NONCLUSTERED COLUMNSTORE INDEX without its column list; SQL Server rejects it (error 35336)"
-
-[[known]]
-scenario = "schema-columnstore"
-oracle = "outcome"
-finding = "new"
-reason = "deploying a nonclustered columnstore index writes CREATE NONCLUSTERED COLUMNSTORE INDEX without its column list; SQL Server rejects it (error 35336)"
-
-[[known]]
-scenario = "schema-temporal"
-oracle = "check"
-finding = "new"
-reason = "rebuilding a plain table into a system-versioned one copies rows without the period columns, so the INSERT into the rebuild table fails on NULL ValidFrom"
-
-[[known]]
-scenario = "schema-temporal"
-oracle = "converge-quill"
-finding = "new"
-reason = "rebuilding a plain table into a system-versioned one copies rows without the period columns, so the INSERT into the rebuild table fails on NULL ValidFrom"
-
-[[known]]
-scenario = "schema-temporal"
-oracle = "outcome"
-finding = "new"
-reason = "rebuilding a plain table into a system-versioned one copies rows without the period columns, so the INSERT into the rebuild table fails on NULL ValidFrom"
-
-[[known]]
-scenario = "schema-type-changes"
-oracle = "check"
-finding = "new"
-reason = "varchar(20) -> nvarchar(30) loses the column's data (NULL after deployment); Vendor keeps it"
-
-[[known]]
-scenario = "schema-type-changes"
-oracle = "warnings"
-finding = "new"
-reason = "quill warns 'cannot be cast ... The script may fail' (High) and 'table must be rebuilt' (Medium) for varchar->nvarchar; Vendor gives no warning and alters in place"
-
-[[known]]
-scenario = "schema-schemabound-view"
-oracle = "warnings"
-finding = "new"
-reason = "Vendor warns (Medium) that the schema-bound view will have its schemabinding dropped and reapplied; quill gives no warning"
-
-[[known]]
-scenario = "schema-security"
-oracle = "diffset"
-finding = "new"
-reason = "quill reports user Loader as different because its role membership differs; Vendor attributes membership to the role only"
-
-[[known]]
-scenario = "schema-triggers"
-oracle = "converge-vendor"
-finding = "new"
-reason = "quill compares the trigger text literally: Vendor deploys CREATE TRIGGER [dbo].[T_Ins] ON [dbo].[T] and quill then reports the table different from the source text CREATE TRIGGER dbo.T_Ins ON dbo.T"
-
-[[known]]
-scenario = "schema-empty-target"
-oracle = "converge-vendor"
-finding = "new"
-reason = "same as schema-triggers: bracketed trigger header written by Vendor makes quill report the table different"
-
-[[known]]
 scenario = "data-mot-backup"
 oracle = "check"
 finding = "data H2"
@@ -329,22 +131,21 @@ scenario = "data-sdc-deselectall-selectitem"
 oracle = "diffset"
 finding = "data H7, sources-cli H3"
 reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
+
+[[known]]
+scenario = "data-type-pairs"
+oracle = "converge-quill"
+finding = "AUDIT2-BRIEF deviation"
+reason = "documented deviation: date/datetime pairs are compared by value; Vendor reports datetime vs datetime2 (and the other cross-type rows) as different"
+
+[[known]]
+scenario = "data-type-pairs"
+oracle = "diffset"
+finding = "AUDIT2-BRIEF deviation"
+reason = "documented deviation: date/datetime pairs are compared by value; Vendor reports datetime vs datetime2 (and the other cross-type rows) as different"
 
 [[known]]
 scenario = "data-binary-key"
 oracle = "diffset"
 finding = "new"
 reason = "Vendor fails to pair the equal key 0xFF (deletes and re-inserts it), so its counts differ; quill pairs it"
-
-[[known]]
-scenario = "data-type-pairs"
-oracle = "converge-quill"
-finding = "AUDIT2-BRIEF deviation"
-reason = "documented deviation: date/datetime pairs are compared by value; Vendor reports datetime vs datetime2 (and the other cross-type rows) as different"
-
-[[known]]
-scenario = "data-type-pairs"
-oracle = "diffset"
-finding = "AUDIT2-BRIEF deviation"
-reason = "documented deviation: date/datetime pairs are compared by value; Vendor reports datetime vs datetime2 (and the other cross-type rows) as different"
-

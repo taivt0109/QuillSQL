@@ -532,6 +532,7 @@ pub struct Trigger {
     /// sp_settriggerorder: (event, FIRST|LAST).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub order: Vec<(String, String)>,
+    pub settings: ModuleSettings,
     /// CLR triggers: `[assembly].[class].[method]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_method: Option<String>,
@@ -555,6 +556,9 @@ pub struct Temporal {
 pub struct Table {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// sys.objects.modify_date as `yyyy-MM-dd HH:mm:ss.fff`; kept for snapshots, not compared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
@@ -593,6 +597,29 @@ pub struct Table {
     pub fulltext_index: Option<FullTextIndex>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edge_constraints: Vec<EdgeConstraint>,
+    /// sp_tableoption 'large value types out of row'.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub large_value_types_out_of_row: bool,
+    /// Set for a FileTable. Its fixed columns stay in `columns`; its system-defined constraints
+    /// and indexes are left out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_table: Option<FileTable>,
+    /// Stretch Database is enabled on the table (sys.tables.is_remote_data_archive_enabled).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub remote_data_archive: bool,
+}
+
+/// The FileTable options of a table (`AS FILETABLE WITH (…)`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FileTable {
+    /// FILETABLE_DIRECTORY.
+    pub directory: String,
+    /// FILETABLE_COLLATE_FILENAME.
+    pub filename_collation: String,
+    /// FILETABLE_PRIMARY_KEY_CONSTRAINT_NAME: the name of the system-defined primary key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_key: Option<String>,
 }
 
 impl Table {
@@ -634,6 +661,9 @@ impl Default for ModuleSettings {
 pub struct View {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// sys.objects.modify_date as `yyyy-MM-dd HH:mm:ss.fff`; kept for snapshots, not compared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
@@ -675,6 +705,9 @@ pub enum RoutineKind {
 pub struct Routine {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// sys.objects.modify_date as `yyyy-MM-dd HH:mm:ss.fff`; kept for snapshots, not compared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified: Option<String>,
@@ -726,6 +759,9 @@ pub struct Parameter {
 pub struct UserType {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// Alias types: the base type; table types: `table`; CLR types: `clr`.
     pub kind: UserTypeKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -743,6 +779,12 @@ pub struct UserType {
     /// CLR: `[assembly].[class]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clr_class: Option<String>,
+    /// Alias types: default object bound with sp_bindefault, `[schema].[name]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_default: Option<String>,
+    /// Alias types: rule bound with sp_bindrule, `[schema].[name]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_rule: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -759,6 +801,9 @@ pub enum UserTypeKind {
 pub struct Sequence {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub data_type: DataType,
     pub start: String,
     pub increment: String,
@@ -777,6 +822,9 @@ pub struct Sequence {
 pub struct Synonym {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// As stored: `[server].[db].[schema].[object]`, parts optional.
     pub base_object: String,
 }
@@ -798,6 +846,10 @@ pub struct ExtendedProperty {
     pub minor_name: Option<String>,
     pub name: String,
     pub value: Option<String>,
+    /// The sql_variant base type of the value (`nvarchar`, `int`, `varbinary`…). `None` when not
+    /// known (older snapshots, scripts); it then matches any type. Binary values are `0x…` hex.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
 }
 
 impl ExtendedProperty {

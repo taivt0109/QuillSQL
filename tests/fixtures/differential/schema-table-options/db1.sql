@@ -1,0 +1,13 @@
+CREATE USER Owner1 WITHOUT LOGIN
+GO
+CREATE TABLE dbo.Big (Id int NOT NULL CONSTRAINT PK_Big PRIMARY KEY, Doc varchar(max) NULL)
+GO
+EXEC sp_tableoption N'dbo.Big', 'large value types out of row', 1
+GO
+CREATE TABLE dbo.Owned (Id int NOT NULL CONSTRAINT PK_Owned PRIMARY KEY)
+GO
+ALTER AUTHORIZATION ON OBJECT::dbo.Owned TO Owner1
+GO
+CREATE VIEW dbo.OwnedView AS SELECT Id FROM dbo.Owned
+GO
+ALTER AUTHORIZATION ON OBJECT::dbo.OwnedView TO Owner1

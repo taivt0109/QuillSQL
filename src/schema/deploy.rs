@@ -23,6 +23,10 @@ use crate::catalog::*;
 use crate::db::{literal, quote};
 
 mod objects;
+mod rename;
+pub use rename::folder_warnings;
+#[cfg(test)]
+mod tests_fix;
 mod unbind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -76,10 +80,15 @@ impl DeploymentScript {
 enum Phase {
     /// Certificates and keys: created and altered before anything can use them.
     PreCrypto,
+    /// Users and roles that must exist before the transaction (see principals_before_transaction).
+    PrePrincipals,
+    PreRoleMembers,
     /// Full-text work, which can't run in a transaction (ranked inside).
     PreFullText,
     PreTransaction,
     DisableDdlTriggers,
+    /// Tables paired under another name are renamed before anything else uses them.
+    RenameTables,
     CreatePrincipals,
     RoleMembers,
     /// External tables, data sources and file formats (ranked in that order).
@@ -133,6 +142,8 @@ enum Phase {
     /// Tables (with their indexes), views, functions, procedures, synonyms, Service Broker
     /// objects and security policies, dependencies first.
     CreateObjects,
+    /// sp_refreshview of views on changed tables and views, dependencies first.
+    RefreshViews,
     /// SET (SYSTEM_VERSIONING = ON …) once the table has its primary key again.
     Versioning,
     BindColumns,
@@ -146,6 +157,8 @@ enum Phase {
     Routes,
     ExtendedProperties,
     Permissions,
+    /// ALTER AUTHORIZATION on schema objects.
+    Authorizations,
     DropSchemas,
     EnableDdlTriggers,
     AddSensitivity,
@@ -197,11 +210,29 @@ pub fn generate(
     settings: &ScriptSettings,
 ) -> Result<DeploymentScript, String> {
     opts.validate()?;
+    let renames = rename::table_renames(comparison, source, target, opts, mappings);
+    if renames.is_empty() {
+        return Ok(plan_script(comparison, source, target, opts, mappings, settings, renames));
+    }
+    let (comparison, target) = rename::after_renames(comparison, target, &renames);
+    Ok(plan_script(&comparison, source, &target, opts, mappings, settings, renames))
+}
+
+fn plan_script(
+    comparison: &Comparison,
+    source: &Database,
+    target: &Database,
+    opts: &Options,
+    mappings: &Mappings,
+    settings: &ScriptSettings,
+    renames: Vec<rename::TableRename>,
+) -> DeploymentScript {
     let prepared = unbind::prepare(comparison, source, target, opts);
     let mut p = Planner::new(comparison, source, target, opts, mappings, settings);
     p.prepared = &prepared;
+    p.renames = renames;
     p.plan();
-    Ok(p.emit())
+    p.emit()
 }
 
 /// A leftover table of an earlier rebuild that failed half way: `RG_Recovery_<n>_…` (and
@@ -238,6 +269,9 @@ struct Planner<'a> {
     dropped_sub: HashSet<(ObjectName, String)>,
     /// Source modules that will be created (rather than altered).
     recreate: BTreeSet<ObjectName>,
+    /// Tables whose columns change and views that are altered (target names): views that use
+    /// them without schema binding are refreshed.
+    altered: BTreeSet<ObjectName>,
     /// Foreign keys already added: (table, name).
     added_fks: HashSet<(ObjectName, String)>,
     /// Column bindings already removed: (table, column, rule).
@@ -252,6 +286,7 @@ struct Planner<'a> {
     object_filegroups: BTreeSet<String>,
     objects: objects::State,
     prepared: &'a unbind::Prepared,
+    renames: Vec<rename::TableRename>,
 }
 
 impl<'a> Planner<'a> {
@@ -296,6 +331,7 @@ impl<'a> Planner<'a> {
             dropped: HashSet::new(),
             dropped_sub: HashSet::new(),
             recreate: BTreeSet::new(),
+            altered: BTreeSet::new(),
             added_fks: HashSet::new(),
             unbound: HashSet::new(),
             case_sensitive: opts.has(Opt::CaseSensitiveObjectDefinition),
@@ -306,6 +342,7 @@ impl<'a> Planner<'a> {
             object_filegroups: BTreeSet::new(),
             objects: objects::State::default(),
             prepared: &unbind::NOTHING,
+            renames: Vec::new(),
         }
     }
 
@@ -380,6 +417,7 @@ impl<'a> Planner<'a> {
     fn plan(&mut self) {
         let selected = self.selected();
         self.ddl_triggers();
+        self.rename_tables();
         self.unbind_by_rebuild();
         for d in &selected {
             match d.object_type {
@@ -401,9 +439,12 @@ impl<'a> Planner<'a> {
         }
         self.finish_objects();
         self.dependants(&selected);
+        self.refresh_views();
         self.extended_properties(&selected);
         self.permissions(&selected);
+        self.authorizations(&selected);
         self.deployment_warnings();
+        self.principals_before_transaction();
         self.sort();
     }
 
@@ -446,6 +487,14 @@ impl<'a> Planner<'a> {
                 self.warn(warn::filegroups_unsupported());
             }
         }
+        // Live SQL Server 2008 and 2008 R2 databases on either side.
+        let old = |server: &ServerInfo| {
+            server.major_version > 0
+                && matches!(Features::of(server, 0, 0, false).family, super::features::Family::Sql2008 | super::features::Family::Sql2008R2)
+        };
+        if old(&self.src.server) || old(&self.tgt.server) {
+            self.warn(warn::old_server());
+        }
         if self.selective_xml {
             self.step(
                 Phase::PreTransaction,
@@ -480,7 +529,9 @@ impl<'a> Planner<'a> {
                 self.group(Phase::DropSchemas, "Dropping schemas", vec![self.ex.schema(name, Check::Drop, &sql)]);
             }
             DiffKind::Different => {
-                if let Some(s) = self.src.schemas.iter().find(|s| s.name == *name) {
+                if let Some(s) = self.src.schemas.iter().find(|s| s.name == *name)
+                    && self.tgt.schemas.iter().find(|t| self.same(&t.name, name)).is_none_or(|t| !self.same(&t.owner, &s.owner))
+                {
                     self.group(Phase::CreateSchemas, "Altering schemas", vec![format!("ALTER AUTHORIZATION ON SCHEMA::{} TO {}", quote(name), quote(&s.owner))]);
                 }
             }
@@ -492,6 +543,16 @@ impl<'a> Planner<'a> {
         let s = self.src.types.iter().find(|t| t.schema == d.name.schema && t.name == d.name.name);
         let tn = self.target_name(d);
         let t = self.tgt.types.iter().find(|t| t.schema == tn.schema && t.name == tn.name);
+        // Only bindings, permissions, properties or the owner differ: the type stays.
+        if let (Some(s), Some(t)) = (s, t)
+            && ddl::create_type(s) == ddl::create_type(t)
+        {
+            if !self.opts.has(Opt::IgnoreBindings) {
+                self.rebind_type(&d.name, &t.bound_default, &s.bound_default, false);
+                self.rebind_type(&d.name, &t.bound_rule, &s.bound_rule, true);
+            }
+            return;
+        }
         if let Some(t) = t {
             // Columns that use the type go over to its base type while it is re-created.
             if t.kind == UserTypeKind::Alias {
@@ -518,6 +579,28 @@ impl<'a> Planner<'a> {
             }
             let sql = self.ex.user_type(&d.name, Check::Create, &ddl::create_type(s));
             self.group(Phase::CreateTypes, "Creating types", vec![sql]);
+            self.recreate.insert(d.name.clone());
+            // Defaults and rules bound to the type itself.
+            if !self.opts.has(Opt::IgnoreBindings) {
+                self.rebind_type(&d.name, &None, &s.bound_default, false);
+                self.rebind_type(&d.name, &None, &s.bound_rule, true);
+            }
+        }
+    }
+
+    /// sp_unbind… / sp_bind… of a default or rule object on an alias type.
+    fn rebind_type(&mut self, ty: &ObjectName, old: &Option<String>, new: &Option<String>, rule: bool) {
+        if old == new {
+            return;
+        }
+        let kind = if rule { "rules" } else { "defaults" };
+        let name = literal(&ty.quoted());
+        if old.is_some() {
+            let sql = format!("EXEC sp_unbind{} {name}", if rule { "rule" } else { "efault" });
+            self.group(Phase::UnbindColumns, format!("Unbinding {kind} from types"), vec![sql]);
+        }
+        if let Some(o) = new {
+            self.group(Phase::BindColumns, format!("Binding {kind} to types"), vec![format!("EXEC sp_bind{} {}, {name}", if rule { "rule" } else { "efault" }, literal(o))]);
         }
     }
 
@@ -579,12 +662,23 @@ impl<'a> Planner<'a> {
         }
     }
 
+    /// DropAndCreateInsteadOfAlter: creates are preceded by a checked drop, alters become both.
+    fn rerunnable(&self) -> bool {
+        self.opts.has(Opt::DropAndCreateInsteadOfAlter)
+    }
+
     fn add_xprop(&mut self, p: &ExtendedProperty, levels: &str) {
-        let sql = self.ex.extended_property(&p.name, levels, Check::Create, &ddl::add_xprop(p, levels));
+        if self.rerunnable() {
+            self.drop_xprop(p, levels);
+        }
+        let sql = ddl::xprop_variable(p) + &self.ex.extended_property(&p.name, levels, Check::Create, &ddl::add_xprop(p, levels));
         self.push(Step { group: true, try_catch: true, ..Step::new(Phase::ExtendedProperties, "Creating extended properties", vec![sql]) });
     }
 
     fn update_xprop(&mut self, p: &ExtendedProperty, levels: &str) {
+        if self.rerunnable() {
+            return self.add_xprop(p, levels);
+        }
         let sql = ddl::update_xprop(p, levels);
         self.push(Step { group: true, try_catch: true, ..Step::new(Phase::ExtendedProperties, "Altering extended properties", vec![sql]) });
     }
@@ -677,7 +771,13 @@ impl<'a> Planner<'a> {
         }
         let drop_create = self.opts.has(Opt::DropAndCreateInsteadOfAlter) || kind_changed;
         match (source, target) {
-            (Some(s), None) => self.create_module(&d.name, s),
+            (Some(s), None) => {
+                // A rerunnable script drops whatever is there before creating it.
+                if self.rerunnable() && !s.encrypted() {
+                    self.drop_module(&d.name, s);
+                }
+                self.create_module(&d.name, s)
+            }
             (None, Some(t)) => self.drop_module(&tn, t),
             (Some(s), Some(t)) => {
                 if s.encrypted() || t.encrypted() {
@@ -691,13 +791,16 @@ impl<'a> Planner<'a> {
                     self.create_module(&d.name, s);
                 } else {
                     self.native_module(&d.name, s);
-                    let verb = if self.opts.has(Opt::CreateOrAlterInsteadOfAlter) && self.has(Feature::CreateOrAlter) { "CREATE OR ALTER" } else { "ALTER" };
+                    let verb = self.ddl_verb("ALTER");
                     let sql = match s {
                         Module::Routine(r) if r.clr_method.is_some() => ddl_objects::clr_routine(r, verb),
                         _ => ddl::module_sql(&self.encryption(s.definition(), t.encrypted()), verb, &d.name.quoted()),
                     };
                     let sql = self.module_statement(&d.name, s, Check::Alter, &sql);
                     self.module_step(Phase::CreateObjects, format!("Altering {}", d.name), vec![sql], s.settings());
+                    if matches!(s, Module::View(_)) {
+                        self.altered.insert(tn.clone());
+                    }
                     // ALTER VIEW removes the view's indexes.
                     if let Module::View(v) = s {
                         self.view_indexes(&d.name, v);
@@ -710,6 +813,14 @@ impl<'a> Planner<'a> {
 
     /// Natively compiled modules need memory-optimized support and no transaction.
     fn native_module(&mut self, name: &ObjectName, m: Module<'a>) {
+        if let Module::Routine(r) = m
+            && r.kind != RoutineKind::Procedure
+            && has_inline_option(&r.definition)
+            && !self.has(Feature::ScalarInlining)
+        {
+            let version = self.r.features.version_name();
+            self.warn(warn::target::scalar_inlining(&name.to_string(), version));
+        }
         if let Module::Routine(r) = m
             && r.native_compilation
         {
@@ -728,7 +839,7 @@ impl<'a> Planner<'a> {
         }
         self.native_module(name, m);
         self.recreate.insert(name.clone());
-        let verb = if self.opts.has(Opt::CreateOrAlterInsteadOfAlter) && self.has(Feature::CreateOrAlter) { "CREATE OR ALTER" } else { "CREATE" };
+        let verb = self.ddl_verb("CREATE");
         let sql = match m {
             Module::Routine(r) if r.clr_method.is_some() => ddl_objects::clr_routine(r, verb),
             _ => ddl::module_sql(&self.encryption(m.definition(), false), verb, &name.quoted()),
@@ -760,17 +871,29 @@ impl<'a> Planner<'a> {
         self.create_indexes(name, &Host::view(), v.indexes.iter().collect());
     }
 
+    fn drop_trigger(&mut self, parent: &ObjectName, name: &ObjectName, clr: bool) {
+        if !self.dropped.insert(name.clone()) {
+            return;
+        }
+        let sql = self.ex.module(name, if clr { "TA" } else { "TR" }, Check::Drop, &format!("DROP TRIGGER {name}"));
+        self.step(Phase::DropTriggers, format!("Dropping trigger {name} from {parent}"), vec![sql]);
+    }
+
     fn create_trigger(&mut self, parent: &ObjectName, tr: &Trigger) {
         let name = ObjectName::new(&parent.schema, &tr.name);
+        if self.rerunnable() {
+            self.drop_trigger(parent, &name, tr.clr_method.is_some());
+        }
+        let verb = self.ddl_verb("CREATE");
         let mut statements = if tr.clr_method.is_some() {
-            vec![self.ex.module(&name, "TA", Check::Create, &ddl_objects::clr_trigger(&name, parent, tr, "CREATE"))]
+            vec![self.ex.module(&name, "TA", Check::Create, &ddl_objects::clr_trigger(&name, parent, tr, verb))]
         } else {
             if tr.encrypted || tr.definition.is_empty() {
                 self.warn(warn::nondecryptable("trigger", &name.to_string()));
                 return;
             }
             let text = self.trigger_text(&name, &tr.definition, false);
-            vec![self.ex.module(&name, "TR", Check::Create, &ddl::module_sql(&text, "CREATE", &name.quoted()))]
+            vec![self.ex.module(&name, "TR", Check::Create, &ddl::module_sql(&text, verb, &name.quoted()))]
         };
         if tr.disabled {
             statements.push(format!("DISABLE TRIGGER {name} ON {parent}"));
@@ -778,7 +901,12 @@ impl<'a> Planner<'a> {
         for (event, order) in &tr.order {
             statements.push(trigger_order(&name, order, event));
         }
-        self.module_step(Phase::Triggers, format!("Creating trigger {name} on {parent}"), statements, &ModuleSettings::default());
+        self.module_step(Phase::Triggers, format!("Creating trigger {name} on {parent}"), statements, &tr.settings);
+    }
+
+    /// CREATE or ALTER, or CREATE OR ALTER where CreateOrAlterInsteadOfAlter asks and the target has it.
+    pub(super) fn ddl_verb(&self, plain: &'static str) -> &'static str {
+        if self.opts.has(Opt::CreateOrAlterInsteadOfAlter) && self.has(Feature::CreateOrAlter) { "CREATE OR ALTER" } else { plain }
     }
 
     /// Re-creates (or drops) everything schema-bound to a disturbed object: views and functions
@@ -799,14 +927,30 @@ impl<'a> Planner<'a> {
                     queue.push(dep.clone());
                     continue;
                 }
+                if self.tgt.table(&dep.schema, &dep.name).is_some() {
+                    // Constraints, defaults or computed columns that call a dropped function.
+                    if self.dropped.contains(&n) && self.target_module(&n).is_some() {
+                        if include || selected.iter().any(|d| self.target_name(d) == dep) {
+                            self.function_user(&n, &dep);
+                        } else {
+                            missing.entry(n.clone()).or_default().push(dep.clone());
+                        }
+                    }
+                    continue;
+                }
                 let Some(t) = self.target_module(&dep) else { continue };
-                if !include && !selected.iter().any(|d| self.target_name(d) == dep) {
+                let chosen = selected.iter().any(|d| self.target_name(d) == dep);
+                if !include && !chosen {
                     missing.entry(n.clone()).or_default().push(dep.clone());
                     continue;
                 }
                 queue.push(dep.clone());
                 if self.dropped.contains(&dep) {
                     continue;
+                }
+                // Brought back as it is, it may no longer fit the table or module it is bound to.
+                if !chosen && (self.tgt.table(&n.schema, &n.name).is_some() || self.target_module(&n).is_some()) {
+                    self.warn(warn::rebind_might_fail(&dep.to_string()));
                 }
                 self.drop_module(&dep, t);
                 // Bring it back from the source, unless the comparison already creates or drops it.
@@ -819,6 +963,35 @@ impl<'a> Planner<'a> {
         for (owner, objects) in missing {
             let list = objects.iter().map(|o| o.to_string()).collect::<Vec<_>>().join("\r\n");
             self.warn(warn::strong_dependencies(&owner.to_string(), &list));
+        }
+    }
+
+    /// sp_refreshview for target views that are kept as they are but read (directly, through a
+    /// synonym or through another refreshed view) something whose columns change: a view that
+    /// is not schema-bound keeps its old column list otherwise.
+    fn refresh_views(&mut self) {
+        let mut queue: Vec<ObjectName> = self.altered.iter().cloned().collect();
+        let mut seen: HashSet<ObjectName> = queue.iter().cloned().collect();
+        while let Some(n) = queue.pop() {
+            let users: Vec<ObjectName> = self.tgt_deps.iter().filter(|d| !d.strong && d.to == n).map(|d| d.from.clone()).collect();
+            for u in users {
+                if !seen.insert(u.clone()) {
+                    continue;
+                }
+                if self.tgt.synonyms.iter().any(|s| s.schema == u.schema && s.name == u.name) {
+                    queue.push(u);
+                    continue;
+                }
+                let Some(v) = self.tgt.views.iter().find(|v| v.schema == u.schema && v.name == u.name) else { continue };
+                let kept = self.src.views.iter().any(|s| s.schema == u.schema && s.name == u.name)
+                    && !self.cmp.differences.iter().any(|d| d.object_type == ObjectType::View && d.kind != DiffKind::Equal && self.target_name(d) == u);
+                if v.schema_bound || v.encrypted || !kept || self.dropped.contains(&u) || self.recreate.contains(&u) {
+                    continue;
+                }
+                let sql = self.ex.module(&u, "V", Check::Drop, &format!("EXEC sp_refreshview {}", literal(&u.quoted())));
+                self.ranked(Phase::RefreshViews, format!("Refreshing {u}"), &u, vec![sql]);
+                queue.push(u);
+            }
         }
     }
 
@@ -849,6 +1022,13 @@ impl<'a> Planner<'a> {
         if s.graph.is_some() && !self.has(Feature::Graph) {
             self.warn(warn::target::graph(&name));
         }
+        if s.remote_data_archive {
+            if !self.has(Feature::Stretch) {
+                self.warn(warn::stretch::unsupported(&name));
+            } else if !self.tgt.tables.iter().any(|t| t.remote_data_archive) {
+                self.warn(warn::stretch::make_sure_enabled());
+            }
+        }
         for c in &s.columns {
             if c.masking_function.is_some() && !self.has(Feature::DataMasking) && !self.opts.has(Opt::IgnoreDynamicDataMasking) {
                 self.warn(warn::target::masking(&name, &c.name));
@@ -869,6 +1049,10 @@ impl<'a> Planner<'a> {
 
     fn create_table(&mut self, s: &'a Table) {
         let name = s.object_name();
+        if s.file_table.is_some() && !self.has(Feature::FileTables) {
+            self.warn(warn::target::file_table(&name.to_string()));
+            return;
+        }
         // A system-versioned table comes with its history table, created first.
         let mut statements = Vec::new();
         if let Some(temporal) = &s.temporal {
@@ -892,6 +1076,9 @@ impl<'a> Planner<'a> {
             self.objects.inline_key.insert(name.clone());
         }
         statements.push(self.ex.object(&name, "U", Check::Create, &ddl::create_table_with(s, None, inline_key, &self.r)));
+        if s.large_value_types_out_of_row {
+            statements.push(ddl::large_values_out_of_row(&name.quoted(), true));
+        }
         if s.lock_escalation != "TABLE" && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&name.quoted(), &s.lock_escalation));
         }
@@ -1057,6 +1244,9 @@ impl<'a> Planner<'a> {
     }
 
     fn add_check(&mut self, owner: &ObjectName, ck: &CheckConstraint) {
+        if !self.added_fks.insert((owner.clone(), format!("\u{1}check {}", self.key(&ck.name)))) {
+            return;
+        }
         let mut sql = ddl::add_check_with(&owner.quoted(), ck, self.opts);
         sql[0] = self.ex.check_constraint(owner, &ck.name, Check::Create, &sql[0]);
         let disable = sql.split_off(1);
@@ -1151,6 +1341,19 @@ impl<'a> Planner<'a> {
                 && !self.same(a, b)
             {
                 return Some(vec![warn::rebuild::filestream_filegroup(&name)]);
+            }
+        }
+        // FILESTREAM data needs a unique index on the ROWGUIDCOL column; changing or dropping
+        // that index means a rebuild.
+        if let Some(fs) = t.columns.iter().find(|c| c.filestream)
+            && let Some(guid) = t.columns.iter().find(|c| c.rowguidcol)
+        {
+            let single = |ix: &Index| (ix.unique || ix.primary_key || ix.unique_constraint) && ix.columns.len() == 1 && self.same(&ix.columns[0].name, &guid.name);
+            if let Some(ix) = t.indexes.iter().find(|ix| single(ix)) {
+                let kept = s.indexes.iter().any(|a| self.same(&a.name, &ix.name) && single(a) && a.kind == ix.kind && a.primary_key == ix.primary_key && a.unique_constraint == ix.unique_constraint);
+                if !kept {
+                    return Some(vec![warn::rebuild::filestream(&name, &fs.name)]);
+                }
             }
         }
         let modified: Vec<&str> = pairs
@@ -1260,10 +1463,22 @@ impl<'a> Planner<'a> {
     }
 
     fn alter_table(&mut self, s: &'a Table, t: &'a Table) {
+        // A FileTable can't be made from an ordinary table or back: the table is re-created.
+        if s.file_table.is_some() != t.file_table.is_some() {
+            self.drop_table(t);
+            self.create_table(s);
+            return;
+        }
         let pairs = self.column_pairs(s, t);
-        if let Some(why) = self.rebuild_reason(s, t, &pairs) {
+        // Stretch Database comes off a table only through a rebuild.
+        let why = self.rebuild_reason(s, t, &pairs).or_else(|| (t.remote_data_archive && !s.remote_data_archive).then(Vec::new));
+        if let Some(why) = why {
             for w in why {
                 self.warn(w);
+            }
+            if t.remote_data_archive {
+                let name = t.object_name().to_string();
+                self.warn(if s.remote_data_archive { warn::stretch::rebuild_alter(&name) } else { warn::stretch::rebuild_removal(&name) });
             }
             if s.temporal.is_some() || t.temporal.is_some() {
                 self.rebuild_temporal(s, t, &pairs);
@@ -1405,6 +1620,8 @@ impl<'a> Planner<'a> {
         let mut after_defaults: Vec<String> = Vec::new();
         let mut disturbed = false;
         let mut rebind: Vec<&str> = Vec::new();
+        // Columns of a system-versioned table made NOT NULL with a default: (column, default).
+        let mut history_nulls: Vec<(String, String)> = Vec::new();
 
         let mut adds = Vec::new();
         let mut drops: Vec<&Column> = Vec::new();
@@ -1501,6 +1718,10 @@ impl<'a> Planner<'a> {
             if becomes_not_null {
                 if let Some(df) = &a.default {
                     self.warn(warn::not_null_default(&label, &a.name));
+                    if let (Some(x), Some(_)) = (&s.temporal, &t.temporal) {
+                        self.warn(warn::history_not_null_default(&a.name, &x.history_table.to_string()));
+                        history_nulls.push((a.name.clone(), df.definition.clone()));
+                    }
                     col.nullable = true;
                     alters.push(format!("ALTER TABLE {table} ALTER COLUMN {}{online}", ddl::column_definition_with(&col, false, &self.r, t.memory_optimized)));
                     after_defaults.push(self.ex.default_constraint(&name, &a.name, &df.name, Check::Create, &ddl::add_default(&table, &a.name, df)));
@@ -1557,6 +1778,21 @@ impl<'a> Planner<'a> {
             }
         };
         let (versioning_off, period_change) = self.versioning_change(s, t);
+        // The history rows get the default too, with versioning off while they are changed.
+        if let (Some(x), false) = (s.temporal.as_ref().filter(|_| !history_nulls.is_empty() && self.has(Feature::Temporal)), versioning_off) {
+            let h = t.temporal.as_ref().map(|y| y.history_table.quoted()).unwrap_or_else(|| x.history_table.quoted());
+            // Versioning goes back on before the columns become NOT NULL, so the history table follows.
+            let alter = format!("ALTER TABLE {table} ALTER COLUMN");
+            let (mut rest, alters): (Vec<String>, Vec<String>) = std::mem::take(&mut after_defaults).into_iter().partition(|q| !q.starts_with(&alter));
+            rest.push(format!("ALTER TABLE {table} SET ({})", ddl::system_versioning(x, &self.r)));
+            rest.extend(alters);
+            after_defaults = rest;
+            let mut block = vec![format!("ALTER TABLE {table} SET (SYSTEM_VERSIONING = OFF)")];
+            for (c, def) in &history_nulls {
+                block.push(format!("UPDATE {h} SET {} = {def} WHERE {} IS NULL", quote(c), quote(c)));
+            }
+            after_defaults.splice(0..0, block);
+        }
         statements.extend(period_change.0);
         statements.extend(drop_list(self, &computed_drops));
         statements.extend(add_list(self, &adds));
@@ -1566,13 +1802,24 @@ impl<'a> Planner<'a> {
         let computed: Vec<&Column> = computed_adds.iter().chain(recompute.iter()).copied().collect();
         statements.extend(add_list(self, &computed));
         statements.extend(period_change.1);
+        if !statements.is_empty() {
+            self.altered.insert(name.clone());
+        }
         // Table options.
         if !o.has(Opt::IgnoreDataCompression) && s.storage.compression != t.storage.compression {
-            let c = s.storage.compression.first().map(|p| p.compression.as_str()).unwrap_or("NONE");
-            statements.push(format!("ALTER TABLE {table} REBUILD PARTITION = ALL\r\nWITH (DATA_COMPRESSION = {c})"));
+            let c = ddl::compression_option(&s.storage, &self.r).unwrap_or_else(|| "DATA_COMPRESSION = NONE".into());
+            statements.push(format!("ALTER TABLE {table} REBUILD PARTITION = ALL\r\nWITH ({c})"));
         }
         if s.lock_escalation != t.lock_escalation && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&table, &s.lock_escalation));
+        }
+        if s.large_value_types_out_of_row != t.large_value_types_out_of_row {
+            statements.push(ddl::large_values_out_of_row(&table, s.large_value_types_out_of_row));
+        }
+        if let (Some(a), Some(b)) = (&s.file_table, &t.file_table)
+            && a.directory != b.directory
+        {
+            statements.push(format!("ALTER TABLE {table} SET ( FILETABLE_DIRECTORY = {} )", literal(&a.directory)));
         }
         if disturbed {
             self.disturbed.insert(name.clone());
@@ -1580,6 +1827,13 @@ impl<'a> Planner<'a> {
         self.module_step(Phase::CreateObjects, format!("Altering {name}"), statements, &ModuleSettings::default());
         self.step(Phase::CreateDefaults, format!("Altering {name}"), after_defaults);
         self.sub_objects(s, t);
+        // The history table's own indexes and constraints.
+        if let (Some(x), Some(y)) = (&s.temporal, &t.temporal)
+            && self.key(&x.history_table.to_string()) == self.key(&y.history_table.to_string())
+            && let (Some(hs), Some(ht)) = (self.src.table(&x.history_table.schema, &x.history_table.name), self.tgt.table(&y.history_table.schema, &y.history_table.name))
+        {
+            self.sub_objects(hs, ht);
+        }
         self.change_tracking(s, t);
         self.bind_columns(s, Some(&rebind), true);
         self.table_parts(s, Some(t));
@@ -1764,6 +2018,7 @@ impl<'a> Planner<'a> {
                     && let Some(src_other) = self.src.table(&other.schema, &other.name)
                     && let Some(src_fk) = src_other.foreign_keys.iter().find(|f| self.same(&f.name, &fk.name))
                 {
+                    self.retype_referencing(other, src_fk, s);
                     self.add_foreign_key(&other.object_name(), src_fk);
                 }
             }
@@ -1777,22 +2032,29 @@ impl<'a> Planner<'a> {
                     Some(b) => {
                         let same_text = super::text::compare(&a.definition, &b.definition, super::text::TextKind::Module, &o.clone().with(Opt::IgnoreOwners)).is_none()
                             && a.clr_method == b.clr_method
-                            && (a.clr_method.is_none() || (a.events == b.events && a.execute_as == b.execute_as));
+                            && (a.clr_method.is_none() || (a.events == b.events && a.execute_as == b.execute_as))
+                            && (a.settings == b.settings || o.has(Opt::IgnoreQuotedIdentifiersAndAnsiNullSettings));
                         let trig = ObjectName::new(&name.schema, &a.name);
+                        if !same_text && self.rerunnable() {
+                            // Dropped and created rather than altered.
+                            self.create_trigger(&name, a);
+                            continue;
+                        }
                         let mut statements = Vec::new();
                         if !same_text {
+                            let verb = self.ddl_verb("ALTER");
                             if a.clr_method.is_some() {
-                                statements.push(ddl_objects::clr_trigger(&trig, &name, a, "ALTER"));
+                                statements.push(ddl_objects::clr_trigger(&trig, &name, a, verb));
                             } else {
                                 let text = self.trigger_text(&trig, &a.definition, b.encrypted);
-                                statements.push(ddl::module_sql(&text, "ALTER", &trig.quoted()));
+                                statements.push(ddl::module_sql(&text, verb, &trig.quoted()));
                             }
                         }
                         if a.disabled != b.disabled || !same_text {
                             statements.push(format!("{} TRIGGER {trig} ON {table}", if a.disabled { "DISABLE" } else { "ENABLE" }));
                         }
                         if !statements.is_empty() {
-                            self.module_step(Phase::Triggers, format!("Altering trigger {trig} on {name}"), statements, &ModuleSettings::default());
+                            self.module_step(Phase::Triggers, format!("Altering trigger {trig} on {name}"), statements, &a.settings);
                         }
                         if a.order != b.order && !o.has(Opt::IgnoreTriggerOrder) {
                             let order: Vec<String> = a.order.iter().map(|(event, ord)| trigger_order(&trig, ord, event)).collect();
@@ -1804,10 +2066,40 @@ impl<'a> Planner<'a> {
             for b in &t.triggers {
                 if !s.triggers.iter().any(|a| self.same(&a.name, &b.name)) {
                     let trig = ObjectName::new(&name.schema, &b.name);
-                    let sql = self.ex.module(&trig, "TR", Check::Drop, &format!("DROP TRIGGER {trig}"));
-                    self.step(Phase::DropTriggers, format!("Dropping trigger {trig} from {name}"), vec![sql]);
+                    self.drop_trigger(&name, &trig, b.clr_method.is_some());
                 }
             }
+        }
+    }
+
+    /// With IncludeDependencies, the columns of a table that is not deployed itself follow the
+    /// new type of the key columns its foreign key references, else the key can't come back.
+    fn retype_referencing(&mut self, other: &'a Table, fk: &ForeignKey, referenced: &'a Table) {
+        let oname = other.object_name();
+        if !self.opts.has(Opt::IncludeDependencies)
+            || referenced.object_name() == oname
+            || self.cmp.differences.iter().any(|d| d.object_type == ObjectType::Table && d.selected && self.target_name(d) == oname)
+        {
+            return;
+        }
+        let mut changed = false;
+        for (c, rc) in fk.columns.iter().zip(&fk.referenced_columns) {
+            let (Some(sc), Some(oc)) = (referenced.columns.iter().find(|x| self.same(&x.name, rc)), other.columns.iter().find(|x| self.same(&x.name, c))) else { continue };
+            if type_sql(&sc.data_type) == type_sql(&oc.data_type) {
+                continue;
+            }
+            self.release_column(other, &oc.name, false);
+            let mut col = oc.clone();
+            col.data_type = sc.data_type.clone();
+            col.default = None;
+            col.identity = None;
+            col.collation = sc.collation.clone();
+            let sql = format!("ALTER TABLE {} ALTER COLUMN {}", oname.quoted(), ddl::column_definition_with(&col, false, &self.r, other.memory_optimized));
+            self.ranked(Phase::CreateObjects, format!("Altering {oname}"), &oname, vec![sql]);
+            changed = true;
+        }
+        if changed {
+            self.restore_released(other);
         }
     }
 
@@ -1885,6 +2177,7 @@ impl<'a> Planner<'a> {
         let label = name.to_string();
         self.table_feature_warnings(s);
         self.disturbed.insert(old.clone());
+        self.altered.insert(old.clone());
         self.recreate.insert(name.clone());
         // A memory-optimized table goes through a disk-based copy: it can't be renamed, and its
         // keys and constraints can't be dropped one by one.
@@ -2010,6 +2303,16 @@ impl<'a> Planner<'a> {
             }
         }
         let tmp_q = tmp.quoted();
+        if s.large_value_types_out_of_row {
+            statements.push(ddl::large_values_out_of_row(&tmp_q, true));
+        }
+        // Period columns the target does not have yet get their values from the period, so it
+        // goes on before the copy; otherwise after, as the copy writes the old period values.
+        let temporal = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal) && !memory_optimized);
+        let period_first = temporal.is_some_and(|x| !into.iter().any(|c| *c == quote(&x.period_start)) || !into.iter().any(|c| *c == quote(&x.period_end)));
+        if let Some(x) = temporal.filter(|_| period_first) {
+            statements.push(format!("ALTER TABLE {tmp_q} ADD PERIOD FOR SYSTEM_TIME ({}, {})", quote(&x.period_start), quote(&x.period_end)));
+        }
         // Bound defaults go on the new table before the copy, for NOT NULL columns that get no value.
         if !self.opts.has(Opt::IgnoreBindings) {
             for c in &s.columns {
@@ -2066,8 +2369,10 @@ impl<'a> Planner<'a> {
                 statements.push(ddl::drop_constraint(&name.quoted(), temp));
                 statements.push(ddl::add_default(&name.quoted(), column, real));
             }
-            if let Some(x) = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal)) {
-                statements.push(format!("ALTER TABLE {} ADD PERIOD FOR SYSTEM_TIME ({}, {})", name.quoted(), quote(&x.period_start), quote(&x.period_end)));
+            if let Some(x) = temporal {
+                if !period_first {
+                    statements.push(format!("ALTER TABLE {} ADD PERIOD FOR SYSTEM_TIME ({}, {})", name.quoted(), quote(&x.period_start), quote(&x.period_end)));
+                }
                 for c in s.columns.iter().filter(|c| c.hidden) {
                     statements.push(format!("ALTER TABLE {} ALTER COLUMN {} ADD HIDDEN", name.quoted(), quote(&c.name)));
                 }
@@ -2096,7 +2401,7 @@ impl<'a> Planner<'a> {
         }
         for d in selected {
             let class = match d.object_type {
-                ObjectType::Role | ObjectType::User => continue,
+                ObjectType::Role | ObjectType::User => "USER",
                 ObjectType::Table => "TABLE",
                 ObjectType::View => "VIEW",
                 ObjectType::Function => "FUNCTION",
@@ -2140,7 +2445,9 @@ impl<'a> Planner<'a> {
                 let existing = tgt_props.iter().find(|tp| tp.name == sp.name && tp.minor_type == sp.minor_type && tp.minor_name == sp.minor_name);
                 match existing {
                     None => self.add_xprop(sp, &levels(sp)),
-                    Some(tp) if tp.value != sp.value => self.update_xprop(sp, &levels(sp)),
+                    Some(tp) if tp.value != sp.value || (tp.value_type.is_some() && sp.value_type.is_some() && !tp.value_type.as_deref().unwrap_or_default().eq_ignore_ascii_case(sp.value_type.as_deref().unwrap_or_default())) => {
+                        self.update_xprop(sp, &levels(sp))
+                    }
                     _ => {}
                 }
             }
@@ -2156,7 +2463,35 @@ impl<'a> Planner<'a> {
 
     // ---- Users, roles and permissions ----
 
-    fn create_user_sql(&mut self, s: &Principal) -> Option<String> {
+    /// The statements that create a user: for a Windows or Microsoft Entra user mapped to a
+    /// login, the login first (in its own batch) when the server lacks it.
+    fn create_user_sql(&mut self, s: &Principal) -> Option<Vec<String>> {
+        let entra = matches!(s.kind.as_str(), "EXTERNAL_USER" | "EXTERNAL_GROUP");
+        if entra {
+            if !self.has(Feature::EntraUsers) {
+                self.warn(warn::user_type_unsupported(&s.name, "MicrosoftEntraUser"));
+            } else if s.login.is_some() && !self.has(Feature::EntraLogins) {
+                self.warn(warn::entra_login_unsupported(&s.name));
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(login) = s.login.as_ref().filter(|_| entra || matches!(s.kind.as_str(), "WINDOWS_USER" | "WINDOWS_GROUP")) {
+            let from = if entra { "FROM EXTERNAL PROVIDER" } else { "FROM WINDOWS" };
+            let test = if self.opts.has(Opt::WriteAsDataToolsPermissions) { String::new() } else { format!("IF NOT EXISTS (SELECT * FROM master.dbo.syslogins WHERE loginname = {})\r\n", literal(login)) };
+            out.push(format!("{test}CREATE LOGIN {} {from}", quote(login)));
+        }
+        out.push(self.create_user_statement(s)?);
+        Some(out)
+    }
+
+    /// SQL Compare's warning for a user it creates or alters (or adds to a role) that has no login.
+    fn user_warnings(&mut self, u: &Principal) {
+        if u.login.is_none() && matches!(u.kind.as_str(), "SQL_USER" | "WINDOWS_USER" | "WINDOWS_GROUP") && !u.name.eq_ignore_ascii_case("guest") {
+            self.warn(warn::user_without_login(&u.name));
+        }
+    }
+
+    fn create_user_statement(&mut self, s: &Principal) -> Option<String> {
         let q = quote(&s.name);
         let schema = s.default_schema.as_deref().filter(|x| *x != "dbo").map(|x| format!(" WITH DEFAULT_SCHEMA={}", quote(x))).unwrap_or_default();
         let ex = self.ex;
@@ -2174,11 +2509,9 @@ impl<'a> Planner<'a> {
                     create(" WITHOUT LOGIN".into()),
                 )
             }
-            ("WINDOWS_USER" | "WINDOWS_GROUP", Some(login)) => create(format!(" FOR LOGIN {}", quote(login))),
+            ("WINDOWS_USER" | "WINDOWS_GROUP" | "EXTERNAL_USER" | "EXTERNAL_GROUP", Some(login)) => create(format!(" FOR LOGIN {}", quote(login))),
             ("SQL_USER" | "WINDOWS_USER" | "WINDOWS_GROUP", None) => {
-                if s.name != "guest" {
-                    self.warn(warn::user_without_login(&s.name));
-                }
+                self.user_warnings(s);
                 create(" WITHOUT LOGIN".into())
             }
             ("EXTERNAL_USER" | "EXTERNAL_GROUP", _) => create(" FROM EXTERNAL PROVIDER".into()),
@@ -2186,6 +2519,42 @@ impl<'a> Planner<'a> {
             ("ASYMMETRIC_KEY_MAPPED_USER", _) => create(format!(" FOR ASYMMETRIC KEY {}", quote(s.asymmetric_key.as_deref().unwrap_or("UNKNOWN")))),
             _ => return None,
         })
+    }
+
+    /// A step that creates or alters one principal (marked so it can move before the transaction).
+    fn principal_step(&mut self, p: &Principal, print: String, statements: Vec<String>) {
+        let kind = if p.is_role() { "role" } else { "user" };
+        self.push(Step { object: Some(ObjectName::new(kind, &p.name)), ..Step::new(Phase::CreatePrincipals, print, statements) });
+    }
+
+    /// Principals that must exist before the transaction: on a target without ALTER ROLE all
+    /// of them (and memberships) when roles change, as sp_addrolemember can't run in a user
+    /// transaction; otherwise only those that own a full-text catalog, stoplist or search
+    /// property list created before the transaction.
+    fn principals_before_transaction(&mut self) {
+        let roles_change = self.steps.iter().any(|s| s.phase == Phase::RoleMembers || (s.phase == Phase::CreatePrincipals && s.object.as_ref().is_some_and(|o| o.schema == "role")));
+        if !self.has(Feature::AlterRole) && roles_change {
+            for s in self.steps.iter_mut() {
+                match s.phase {
+                    Phase::CreatePrincipals => s.phase = Phase::PrePrincipals,
+                    Phase::RoleMembers => s.phase = Phase::PreRoleMembers,
+                    _ => {}
+                }
+            }
+            return;
+        }
+        let (src, tgt) = (self.src, self.tgt);
+        let created = |list: Vec<(&str, &Option<String>)>, existing: Vec<&str>| -> Vec<String> {
+            list.into_iter().filter(|(n, _)| !existing.contains(n)).filter_map(|(_, o)| o.clone()).collect()
+        };
+        let mut owners = created(src.fulltext_catalogs.iter().map(|c| (c.name.as_str(), &c.owner)).collect(), tgt.fulltext_catalogs.iter().map(|c| c.name.as_str()).collect());
+        owners.extend(created(src.fulltext_stoplists.iter().map(|c| (c.name.as_str(), &c.owner)).collect(), tgt.fulltext_stoplists.iter().map(|c| c.name.as_str()).collect()));
+        owners.extend(created(src.search_property_lists.iter().map(|c| (c.name.as_str(), &c.owner)).collect(), tgt.search_property_lists.iter().map(|c| c.name.as_str()).collect()));
+        for s in self.steps.iter_mut().filter(|s| s.phase == Phase::CreatePrincipals) {
+            if s.object.as_ref().is_some_and(|o| owners.iter().any(|w| w.eq_ignore_ascii_case(&o.name))) {
+                s.phase = Phase::PrePrincipals;
+            }
+        }
     }
 
     fn member_sql(&self, role: &str, member: &str, add: bool) -> String {
@@ -2214,28 +2583,29 @@ impl<'a> Planner<'a> {
                 "DATABASE_ROLE" => {
                     let owner = s.owner.as_deref().map(|o| format!("\r\nAUTHORIZATION {}", quote(o))).unwrap_or_default();
                     let sql = self.ex.principal(&s.name, true, Check::Create, &format!("CREATE ROLE {q}{owner}"));
-                    self.step(Phase::CreatePrincipals, format!("Creating role {}", s.name), vec![sql]);
+                    self.principal_step(s, format!("Creating role {}", s.name), vec![sql]);
                 }
                 "APPLICATION_ROLE" => {
                     // The password can't be read; SQL Compare's placeholder is used.
                     self.warn(super::warnings::objects::application_role_password(&q));
                     let schema = s.default_schema.as_deref().map(|x| format!(", DEFAULT_SCHEMA = {}", quote(x))).unwrap_or_default();
                     let sql = self.ex.principal(&s.name, true, Check::Create, &format!("CREATE APPLICATION ROLE {q} WITH PASSWORD = 'p@ssw0rd'{schema}"));
-                    self.step(Phase::CreatePrincipals, format!("Creating role {}", s.name), vec![sql]);
+                    self.principal_step(s, format!("Creating role {}", s.name), vec![sql]);
                 }
                 _ => match self.create_user_sql(s) {
-                    Some(sql) => self.step(Phase::CreatePrincipals, "", vec![sql]),
+                    Some(sql) => self.principal_step(s, String::new(), sql),
                     None => {
                         self.warn(Warning { severity: Severity::High, object: q.clone(), message: format!("{} principals are not scripted yet; create it by hand", s.kind) });
                         return;
                     }
                 },
             }
-            for r in &s.member_of {
-                let sql = self.member_sql(r, &s.name, true);
-                self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
+            if s.is_role() {
+                self.role_members(&s.name, None);
             }
-            self.database_permissions(&s.name, &[]);
+            if s.is_role() || !self.opts.has(Opt::IgnoreUsers) {
+                self.database_permissions(&s.name, &[]);
+            }
             if s.no_connect && !s.is_role() && !self.opts.has(Opt::IgnorePermissions) {
                 self.step(Phase::Permissions, "", vec![format!("REVOKE CONNECT FROM {q}")]);
             }
@@ -2258,6 +2628,12 @@ impl<'a> Planner<'a> {
             }
         } else if let (Some(s), Some(t)) = (s, t) {
             let mut sql = Vec::new();
+            if !s.is_role() {
+                self.user_warnings(s);
+            }
+            if !s.is_role() && !self.opts.has(Opt::IgnoreUserProperties) && (s.kind != t.kind || s.certificate != t.certificate || s.asymmetric_key != t.asymmetric_key) {
+                self.warn(warn::user_unsyncable(&s.name));
+            }
             if !s.is_role() && !self.opts.has(Opt::IgnoreUserProperties) {
                 let mut with = Vec::new();
                 if s.default_schema != t.default_schema
@@ -2283,22 +2659,53 @@ impl<'a> Planner<'a> {
             if s.kind == "DATABASE_ROLE" && s.owner != t.owner && !self.opts.has(Opt::IgnoreOwners) {
                 sql.push(format!("ALTER AUTHORIZATION ON ROLE::{q} TO {}", quote(s.owner.as_deref().unwrap_or("dbo"))));
             }
-            self.step(Phase::CreatePrincipals, "", sql);
-            let added: Vec<&String> = s.member_of.iter().filter(|r| !t.member_of.iter().any(|x| self.same(x, r))).collect();
-            let removed: Vec<&String> = t.member_of.iter().filter(|r| !s.member_of.iter().any(|x| self.same(x, r))).collect();
-            for r in added {
-                let sql = self.member_sql(r, &s.name, true);
-                self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
+            self.principal_step(s, String::new(), sql);
+            if s.is_role() {
+                self.role_members(&s.name, Some(&t.name));
             }
-            for r in removed {
-                let sql = self.member_sql(r, &s.name, false);
-                self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
+            if s.is_role() || !self.opts.has(Opt::IgnoreUsers) {
+                let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &t.name)).cloned().collect();
+                self.database_permissions(&s.name, &existing);
             }
-            let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &t.name)).cloned().collect();
-            self.database_permissions(&s.name, &existing);
             if !s.is_role() && s.no_connect != t.no_connect && !self.opts.has(Opt::IgnorePermissions) {
                 let sql = if s.no_connect { format!("REVOKE CONNECT FROM {q}") } else { format!("GRANT CONNECT TO {q}") };
                 self.step(Phase::Permissions, "", vec![sql]);
+            }
+        } else if s.is_none() && t.is_none() {
+            // Fixed roles and public / guest are not in the model: only their members and
+            // database permissions can differ.
+            if d.object_type == ObjectType::Role {
+                self.role_members(&d.name.name, Some(&tn.name));
+            }
+            let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &tn.name)).cloned().collect();
+            self.database_permissions(&d.name.name, &existing);
+        }
+    }
+
+    /// ALTER ROLE ADD / DROP MEMBER so the role has the source's members (under IgnoreUsers,
+    /// only roles count as members). `target` is the role's name in the target, if it is there.
+    fn role_members(&mut self, role: &str, target: Option<&str>) {
+        let roles_only = self.opts.has(Opt::IgnoreUsers);
+        let members = |db: &'a Database, r: &str| -> Vec<&'a Principal> {
+            db.principals.iter().filter(|m| m.member_of.iter().any(|x| x == r) && (!roles_only || m.is_role())).collect()
+        };
+        let wanted = members(self.src, role);
+        let current = target.map(|t| members(self.tgt, t)).unwrap_or_default();
+        let bare = |n: &str| n.rsplit('\u{5c}').next().unwrap_or(n).to_string();
+        let same_member = |p: &Self, a: &str, b: &str| p.same(a, b) || p.same(&bare(a), &bare(b));
+        for m in &wanted {
+            if !current.iter().any(|c| same_member(self, &c.name, &m.name)) {
+                if !m.is_role() {
+                    self.user_warnings(m);
+                }
+                let sql = self.member_sql(role, &m.name, true);
+                self.group(Phase::RoleMembers, format!("Altering members of role {role}"), vec![sql]);
+            }
+        }
+        for c in &current {
+            if !wanted.iter().any(|m| same_member(self, &c.name, &m.name)) {
+                let sql = self.member_sql(target.unwrap_or(role), &c.name, false);
+                self.group(Phase::RoleMembers, format!("Altering members of role {role}"), vec![sql]);
             }
         }
     }
@@ -2416,6 +2823,7 @@ impl<'a> Planner<'a> {
             let Some(name) = step.object.clone().or_else(|| step_object(&step.print)) else { continue };
             match step.phase {
                 Phase::CreateObjects => step.rank = *order_src.get(&name).unwrap_or(&usize::MAX),
+                Phase::RefreshViews => step.rank = *order_tgt.get(&name).unwrap_or(&usize::MAX),
                 // Dependants are dropped first.
                 Phase::DropObjects => step.rank = usize::MAX - order_tgt.get(&name).copied().unwrap_or(0),
                 _ => {}
@@ -2547,6 +2955,12 @@ impl<'a> Module<'a> {
 /// system-versioned table and sensitivity labels are deployed on their own.
 fn material_differences(a: &Column, b: &Column, o: &Options) -> Vec<super::compare::PropDiff> {
     column_differences(a, b, o, false).into_iter().filter(|d| d.name != "GENERATED ALWAYS" && d.name != "Hidden").collect()
+}
+
+/// The function text sets INLINE = ON or OFF (scalar UDF inlining, SQL Server 2019).
+fn has_inline_option(text: &str) -> bool {
+    let words: Vec<String> = super::text::tokenize(text).iter().filter(|t| !matches!(t.kind, super::text::Tok::Space | super::text::Tok::LineComment | super::text::Tok::BlockComment)).map(|t| t.text.to_ascii_uppercase()).collect();
+    words.windows(2).any(|w| w[0] == "INLINE" && w[1] == "=")
 }
 
 fn is_clustered(ix: &Index) -> bool {
@@ -2968,7 +3382,7 @@ mod tests {
         tgt.tables[0].columns[0].nullable = false;
         let s = script(&src, &tgt, &Options::default_set());
         assert!(s.sql.contains("CREATE TABLE [dbo].[RG_Recovery_8_T]"), "{}", s.sql);
-        assert!(has_warning(&s, "recovered from a failed deployment"));
+        assert!(has_warning(&s, "recovered from a failed QuillSQL Compare deployment"));
         assert!(has_warning(&s, "Cannot alter IDENTITY property on column [a] on table [dbo].[T]"), "{:?}", s.warnings);
     }
 
@@ -3019,7 +3433,7 @@ mod tests {
     #[test]
     fn synonym_dependencies_can_be_ignored() {
         let mut src = db(vec![]);
-        src.synonyms.push(Synonym { schema: "dbo".into(), name: "S".into(), base_object: "[dbo].[T]".into() });
+        src.synonyms.push(Synonym { schema: "dbo".into(), name: "S".into(), base_object: "[dbo].[T]".into(), ..Default::default() });
         src.dependencies.push(Dependency { from: ObjectName::new("dbo", "S"), to: ObjectName::new("dbo", "T"), strong: true });
         let settings = ScriptSettings {
             transaction_isolation_level: "SERIALIZABLE".into(),
