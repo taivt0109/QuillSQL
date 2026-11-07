@@ -648,6 +648,7 @@ fn read_warnings(out: &str) -> BTreeSet<String> {
     let ident = regex::Regex::new(r"(\[[^\]]*\](\.\[[^\]]*\])*)|('[^']*')").unwrap();
     let prefix = regex::Regex::new(r"^Warning:\s*(\((High|Medium|Low)\)\s*)?((\[[^\]]*\]|[^\s:\[]+)(\.(\[[^\]]*\]|[^\s:\[]+))*:\s+)?").unwrap();
     let product = regex::Regex::new(r"QuillSQL Data Compare|QuillSQL Compare|SQL Data Compare|SQL Compare|QuillSQL").unwrap();
+    let contraction = regex::Regex::new(r"([A-Za-z])'([A-Za-z])").unwrap();
     items
         .into_iter()
         .map(|w| {
@@ -655,6 +656,9 @@ fn read_warnings(out: &str) -> BTreeSet<String> {
             let sev = prefix.captures(&w).and_then(|c| c.get(2)).map(|m| m.as_str().to_string()).unwrap_or_else(|| "-".into());
             let body = prefix.replace(&w, "");
             let body = product.replace_all(&body, "<product>");
+            // Vendor's console prints "You’re" as "You're" or "You’re" depending on the code page;
+            // an apostrophe inside a word is not a quote.
+            let body = contraction.replace_all(&body, "$1\u{2019}$2");
             format!("({sev}) {}", ident.replace_all(&body, "<id>"))
         })
         .collect()
