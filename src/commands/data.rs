@@ -250,7 +250,7 @@ fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
 
 fn execute(args: &Args) -> Result<u8, ArgError> {
     // Dependency checks first, as SQLDataCompare.exe does.
-    if !["project", "database2", "connection2", "snapshot2", "makescripts", "scripts2", "sourcecontrol2"].iter().any(|s| args.has(s)) {
+    if !["project", "database2", "connection2", "snapshot2", "backup2", "makescripts", "scripts2", "sourcecontrol2"].iter().any(|s| args.has(s)) {
         return Err(ArgError::new(
             exit::USAGE,
             "You must specify one of the following argument(s): /project, /database2, /backup2, /scripts2, /makescripts, /sourcecontrol2, /sca2, /empty2",
@@ -300,6 +300,9 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         _ => None,
     });
     let open = |s: Source, n: u8| -> Result<Opened, ArgError> {
+        if let Source::Backup(b) = &s {
+            return Ok(Opened::Backup(Box::new(super::backups::open(b)?)));
+        }
         let Source::Scripts { path, revision } = s else { return Ok(Opened::Live(live(s, n)?)) };
         if verbose {
             eprintln!("Reading database scripts from '{}'...", path.display());
@@ -344,6 +347,11 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
                 (db, label)
             }
             Opened::Folder(f) => (f.folder.database.clone(), f.folder.database.name.clone()),
+            Opened::Backup(b) => {
+                let db = b.read_database().map_err(super::backups::error)?;
+                let label = db.name.clone();
+                (db, label)
+            }
         })
     };
     let (db1, label1) = model(&side1)?;
@@ -491,6 +499,8 @@ enum Opened {
     Folder(Box<crate::sources::datafolder::DataFolder>),
     /// A scripts folder loaded into a temporary database.
     Staged(Box<crate::sources::staging::Staging>),
+    /// A backup set, read without a server.
+    Backup(Box<crate::sources::backup::Backup>),
 }
 
 impl Opened {
@@ -498,13 +508,14 @@ impl Opened {
         match self {
             Opened::Live(s) => Some(s),
             Opened::Staged(s) => Some(&s.spec),
-            Opened::Folder(_) => None,
+            Opened::Folder(_) | Opened::Backup(_) => None,
         }
     }
 
     fn rows(&self) -> compare::RowSource<'_> {
         match self {
             Opened::Folder(f) => compare::RowSource::Memory(&f.memory),
+            Opened::Backup(b) => compare::RowSource::Backup(b),
             other => compare::RowSource::Live(other.spec().unwrap()),
         }
     }
