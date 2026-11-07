@@ -1122,20 +1122,6 @@ impl<'a> Comparer<'a> {
             let r: Vec<&Principal> = right.iter().copied().filter(|p| p.is_role() == role).collect();
             self.objects(ty, &l, &r, |p| (&empty, &p.name), |c, a, b| c.principal(a, b));
         }
-        // dbo is the database owner's login; SQL Compare reports a change of owner on it and
-        // leaves it to ALTER AUTHORIZATION by hand.
-        let (o1, o2) = (self.db1.owner.as_deref(), self.db2.owner.as_deref());
-        if !o.has(Opt::IgnoreUsers) && !o.has(Opt::IgnoreUserProperties) && o1.is_some() && o2.is_some() && o1.map(|x| self.key(x)) != o2.map(|x| self.key(x)) {
-            self.result.differences.push(Difference {
-                object_type: ObjectType::User,
-                name: ObjectName::new("", "dbo"),
-                target_name: None,
-                kind: DiffKind::Different,
-                properties: vec![PropDiff { location: Vec::new(), name: "Login".into(), source: o1.map(str::to_string), target: o2.map(str::to_string) }],
-                selected: true,
-                trivial: false,
-            });
-        }
         for diff in &mut self.result.differences {
             if matches!(diff.object_type, ObjectType::Role | ObjectType::User) {
                 diff.name.schema.clear();
