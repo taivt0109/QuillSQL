@@ -303,6 +303,7 @@ namespace QuillSql.Compare
             _openMenu.Items.Add(Ui.MenuItem("Open project…", async () => await OpenDialog(), Glyph.Open, "Ctrl+O"));
             _openMenu.Items.Add(Ui.MenuItem("Open saved data comparison…", async () => await OpenResults(), Glyph.Document));
             _openMenu.Items.Add(Ui.MenuItem("My projects…", async () => await MyProjects(), Glyph.Recent, "Ctrl+M"));
+            if (_session != null) _openMenu.Items.Add(Ui.MenuItem("Close project", async () => await CloseProject(), Glyph.Delete, "Ctrl+F4"));
             var recent = CompareSettings.Load().Recent.Where(File.Exists).Take(10).ToList();
             if (recent.Count == 0) return;
             _openMenu.Items.Add(new Separator());
