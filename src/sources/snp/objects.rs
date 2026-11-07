@@ -59,7 +59,7 @@ pub(super) fn ticks_text(ticks: i64) -> String {
 }
 
 /// Raw .NET ticks of `yyyy-MM-dd HH:mm:ss`.
-pub(super) fn text_ticks(s: &str) -> i64 {
+pub(crate) fn text_ticks(s: &str) -> i64 {
     let n: Vec<i64> = s.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).filter_map(|x| x.parse().ok()).collect();
     let (y, m, d) = (n.first().copied().unwrap_or(1), n.get(1).copied().unwrap_or(1), n.get(2).copied().unwrap_or(1));
     let (hh, mm, ss) = (n.get(3).copied().unwrap_or(0), n.get(4).copied().unwrap_or(0), n.get(5).copied().unwrap_or(0));
@@ -95,10 +95,10 @@ pub(super) fn private_key(code: i32) -> &'static str {
     }
 }
 
-pub(super) const SYMMETRIC_ALGORITHMS: [&str; 8] = ["RC2", "RC4", "DES", "TRIPLE_DES", "DESX", "AES_128", "AES_192", "AES_256"];
-pub(super) const ASYMMETRIC_ALGORITHMS: [&str; 5] = ["RSA_512", "RSA_1024", "RSA_2048", "RSA_3072", "RSA_4096"];
-pub(super) const DATA_SOURCE_TYPES: [&str; 7] = ["HADOOP", "RDBMS", "SHARD_MAP_MANAGER", "REMOTE_DATA_ARCHIVE", "", "BLOB_STORAGE", ""];
-pub(super) const BLOCK_OPERATIONS: [&str; 5] = ["", "AFTER INSERT", "AFTER UPDATE", "BEFORE UPDATE", "BEFORE DELETE"];
+pub(crate) const SYMMETRIC_ALGORITHMS: [&str; 8] = ["RC2", "RC4", "DES", "TRIPLE_DES", "DESX", "AES_128", "AES_192", "AES_256"];
+pub(crate) const ASYMMETRIC_ALGORITHMS: [&str; 5] = ["RSA_512", "RSA_1024", "RSA_2048", "RSA_3072", "RSA_4096"];
+pub(crate) const DATA_SOURCE_TYPES: [&str; 7] = ["HADOOP", "RDBMS", "SHARD_MAP_MANAGER", "REMOTE_DATA_ARCHIVE", "", "BLOB_STORAGE", ""];
+pub(crate) const BLOCK_OPERATIONS: [&str; 5] = ["", "AFTER INSERT", "AFTER UPDATE", "BEFORE UPDATE", "BEFORE DELETE"];
 
 impl Cur<'_> {
     pub(super) fn bindable(&mut self, rule: bool) -> R<BindableObject> {

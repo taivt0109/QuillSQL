@@ -27,7 +27,7 @@ const FIXED_ROLES: [&str; 10] = [
     "db_denydatareader",
     "db_denydatawriter",
 ];
-mod objects;
+pub(crate) mod objects;
 
 const BUILT_IN_USERS: [&str; 4] = ["dbo", "guest", "sys", "INFORMATION_SCHEMA"];
 /// Grantees whose permissions the live reader leaves out.
@@ -77,6 +77,7 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     c.str()?; // migrations folder
 
     s.tables = c.member(Cur::table_item)?;
+    s.tables.append(&mut c.histories);
     s.functions = c.member(Cur::function)?;
     s.more.defaults = c.member(|c| c.bindable(false))?;
     s.more.rules = c.member(|c| c.bindable(true))?;
@@ -265,6 +266,8 @@ struct RawUser {
     login: Option<String>,
     user_type: i32,
     default_schema: Option<String>,
+    certificate: Option<String>,
+    asymmetric_key: Option<String>,
     db_perms: Vec<(String, u8)>,
 }
 
@@ -295,11 +298,13 @@ struct Cur<'a> {
     stats: Vec<Statistic>,
     /// Permissions on user-defined types: (schema, name, perms).
     type_perms: Vec<(String, String, Vec<RawPerm>)>,
+    /// History tables, which are written inside their system-versioned table.
+    histories: Vec<RawTable>,
 }
 
 impl<'a> Cur<'a> {
     fn new(b: &'a [u8]) -> Self {
-        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new(), type_perms: Vec::new() }
+        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new(), type_perms: Vec::new(), histories: Vec::new() }
     }
 
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
@@ -1169,7 +1174,8 @@ impl Cur<'_> {
             self.ss()?;
         }
         if v >= 13.18 && self.bool()? {
-            self.table()?;
+            let history = self.table()?;
+            self.histories.push(history);
         }
         if v >= 13.62 {
             self.bool()?;
@@ -1375,7 +1381,10 @@ impl Cur<'_> {
         self.eprops()?;
         self.i32()?;
         let perms = self.perms()?;
+        let stats_from = self.stats.len();
         view.indexes = self.coll(Cur::index)?.into_iter().flatten().collect();
+        view.statistics = self.stats.split_off(stats_from);
+        view.statistics.sort_by(|a, b| a.name.cmp(&b.name));
         let triggers = self.coll(Cur::trigger)?;
         self.bool()?;
         // Output columns carry names only (no types), so they are left out.
@@ -1535,11 +1544,11 @@ impl Cur<'_> {
 impl Cur<'_> {
     fn user(&mut self) -> R<RawUser> {
         let v = self.f32()?;
-        let mut u = RawUser { name: self.s()?, login: self.str()?, user_type: 1, default_schema: None, db_perms: Vec::new() };
+        let mut u = RawUser { name: self.s()?, login: self.str()?, user_type: 1, default_schema: None, certificate: None, asymmetric_key: None, db_perms: Vec::new() };
         if v >= 4.0 {
             u.user_type = self.i32()?;
-            self.str()?;
-            self.str()?;
+            u.certificate = self.str()?.filter(|c| !c.is_empty());
+            u.asymmetric_key = self.str()?.filter(|k| !k.is_empty());
             u.default_schema = self.str()?;
         } else {
             self.bool()?;
@@ -1817,6 +1826,8 @@ impl Snap {
                 kind: kind.into(),
                 login: u.login.clone().filter(|l| !l.is_empty()),
                 default_schema: u.default_schema.clone().filter(|s| !s.is_empty()),
+                certificate: u.certificate.clone(),
+                asymmetric_key: u.asymmetric_key.clone(),
                 no_connect: !u.db_perms.iter().any(|(a, _)| a.eq_ignore_ascii_case("CONNECT")),
                 ..Default::default()
             });
@@ -2202,7 +2213,7 @@ fn decimal(b: [u8; 16]) -> String {
 }
 
 /// .NET `Guid.ToByteArray` order, as SQL Server prints it.
-fn guid(b: [u8; 16]) -> String {
+pub(crate) fn guid(b: [u8; 16]) -> String {
     let d1 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     let d2 = u16::from_le_bytes([b[4], b[5]]);
     let d3 = u16::from_le_bytes([b[6], b[7]]);
