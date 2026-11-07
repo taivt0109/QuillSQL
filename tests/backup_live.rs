@@ -205,3 +205,24 @@ fn compressed_rows_of_every_type() {
     let files = server.backup(&db, &[&f], "INIT, FORMAT, COMPRESSION");
     assert_identical(&server, &db, &files, None);
 }
+
+const OBJECTS: &str = include_str!("fixtures/objects/objects.sql");
+const CLR: &str = include_str!("fixtures/objects/clr.hex");
+const XML_SPATIAL: &str = include_str!("fixtures/compare/sources_xml_spatial.sql");
+
+/// The objects beyond tables and modules: CLR, XML schema collections, Service Broker, security
+/// policies, graph and temporal tables, partitioning, XML and spatial indexes. Needs `clr
+/// enabled` on and `clr strict security` off. Selective XML indexes are left out: their paths
+/// are not read from backups.
+#[test]
+fn backups_of_every_object_kind() {
+    let Some(server) = server("objects") else { return };
+    let db = name("Objects");
+    let xml: String = XML_SPATIAL.split("\nGO\n").filter(|b| !b.contains("SELECTIVE") && !b.contains("SSX_Doc2")).collect::<Vec<_>>().join("\nGO\n");
+    let script = format!("{}\nGO\n{xml}", OBJECTS.replace("{CLR}", &format!("0x{}", CLR.trim())));
+    server.create(&db, &script);
+    let f = format!("{db}.bak");
+    let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![f.clone()] };
+    let files = server.backup(&db, &[&f], "INIT, FORMAT");
+    assert_identical(&server, &db, &files, None);
+}

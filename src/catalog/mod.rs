@@ -5,7 +5,7 @@ pub mod model;
 pub mod objects;
 pub mod read;
 mod read_objects;
-pub(crate) use read_objects::split_predicate;
+pub(crate) use read_objects::{object_dependencies, split_predicate};
 
 pub use model::*;
 pub use objects::*;

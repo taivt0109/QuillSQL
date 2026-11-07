@@ -940,7 +940,14 @@ impl Reader {
     /// References of the new objects for dependency order: what a CLR module, a queue, a service
     /// or a policy needs before it can be created.
     pub(super) fn object_dependencies(&mut self) {
-        let db = &mut self.db;
+        object_dependencies(&mut self.db);
+    }
+}
+
+/// Dependencies the server does not record: CLR modules on their assembly, Service Broker objects
+/// on each other, typed columns on their XML schema collection...
+pub(crate) fn object_dependencies(db: &mut Database) {
+    {
         let mut extra: Vec<Dependency> = Vec::new();
         let assembly = |a: &str| ObjectName::new(KEY_ASSEMBLY, a);
         let first_part = |m: &str| split_quoted(m).into_iter().next().unwrap_or_default();

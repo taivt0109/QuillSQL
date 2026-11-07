@@ -111,6 +111,22 @@ mod rc {
     pub const ROLE_OWNER: i64 = 51;
     pub const CONSTRAINT_TO_INDEX: i64 = 93;
     pub const TEMPORAL_HISTORY: i64 = 112;
+    pub const ASSEMBLY_REFERENCE: i64 = 10;
+    pub const ASSEMBLY_NAME: i64 = 26;
+    pub const ASSEMBLY_NAME_2: i64 = 17;
+    pub const ASSEMBLY_OWNER: i64 = 52;
+    pub const XML_COLLECTION_OWNER: i64 = 59;
+    pub const MESSAGE_XML_COLLECTION: i64 = 92;
+    pub const MESSAGE_OWNER: i64 = 53;
+    pub const CONTRACT_OWNER: i64 = 54;
+    pub const SERVICE_OWNER: i64 = 55;
+    pub const CONTRACT_MESSAGE: i64 = 20;
+    pub const SERVICE_CONTRACT: i64 = 19;
+    pub const SERVICE_QUEUE: i64 = 21;
+    pub const ROUTE_OWNER: i64 = 49;
+    pub const BINDING_OWNER: i64 = 48;
+    pub const BINDING_USER: i64 = 24;
+    pub const OBJECT_OWNER: i64 = 97;
     pub const MODULE_TO_ASSEMBLY: i64 = 11;
     pub const TYPE_TO_ASSEMBLY: i64 = 38;
     pub const SECURITY_PREDICATE: i64 = 11;
@@ -134,6 +150,11 @@ mod vc {
     pub const RETENTION: i64 = 123;
     pub const STATS_FILTER: i64 = 67;
     pub const PARTITION_BOUNDARY: i64 = 30;
+    pub const ASSEMBLY_FILE: i64 = 10;
+    pub const QUEUE_ACTIVATION: i64 = 12;
+    pub const NOTIFICATION_EVENT: i64 = 71;
+    pub const NOTIFICATION_SERVICE: i64 = 72;
+    pub const NOTIFICATION_BROKER: i64 = 74;
     pub const ASSEMBLY_ENTRY: i64 = 11;
     pub const TESSELLATION: i64 = 92;
     pub const PREDICATE: i64 = 112;
@@ -192,7 +213,10 @@ pub fn read(cat: &Catalog, info: &DatabaseInfo) -> Result<Database, String> {
     b.db.collation = collation::name(info.collation).unwrap_or_default();
     b.db.compatibility_level = info.compatibility_level;
     b.load();
+    b.db.owner = b.cat.system("sysowners").into_iter().find(|r| r.int("id") == 1).filter(|r| r.bytes("sid") == [1]).map(|_| "sa".to_string());
     b.schemas();
+    b.assemblies();
+    b.xml_schema_collections();
     b.types();
     b.tables();
     b.columns();
@@ -212,6 +236,7 @@ pub fn read(cat: &Catalog, info: &DatabaseInfo) -> Result<Database, String> {
     b.xml_and_spatial_indexes();
     b.extended_properties();
     b.sensitivity();
+    b.service_broker();
     b.principals_and_roles();
     b.permissions();
     b.dependencies();
@@ -1278,6 +1303,225 @@ impl Builder<'_> {
         }
     }
 
+    fn owner_ref(&self, class: i64, id: i64) -> Option<String> {
+        self.single_ref(class, id, 0).and_then(|r| self.principal(r.int("indepid")))
+    }
+
+    fn assemblies(&mut self) {
+        let classes = self.cat.system("sysclsobjs");
+        let qnames: HashMap<i64, String> = self.cat.system("sysqnames").into_iter().map(|r| (r.int("nid"), r.str("name"))).collect();
+        let mut rows: Vec<&SysRow> = classes.iter().filter(|r| r.int("class") == 10 && r.int("id") >= 65536).collect();
+        rows.sort_by_key(|r| self.key(&r.str("name")));
+        for r in rows {
+            let id = r.int("id");
+            // The CLR name is kept among the qualified names.
+            let clr_name = [rc::ASSEMBLY_NAME, rc::ASSEMBLY_NAME_2]
+                .iter()
+                .filter_map(|c| self.single_ref(*c, id, 0))
+                .filter_map(|q| qnames.get(&q.int("indepid")))
+                .find(|n| n.contains("version="))
+                .cloned()
+                .unwrap_or_default();
+            let mut files: Vec<&SysRow> = self.values.get(&(vc::ASSEMBLY_FILE, id)).into_iter().flatten().filter(|v| v.int("valnum") == 1).collect();
+            files.sort_by_key(|v| v.int("subobjid"));
+            let files = files
+                .iter()
+                .map(|f| {
+                    let content = self.value(vc::ASSEMBLY_FILE, id, f.int("subobjid"), 2).map(|c| c.bytes("imageval")).unwrap_or_default();
+                    AssemblyFile { name: text_of(f.get("value")).unwrap_or_default(), content: content.iter().map(|b| format!("{b:02X}")).collect() }
+                })
+                .collect();
+            let mut references: Vec<String> = self
+                .multi
+                .get(&rc::ASSEMBLY_REFERENCE)
+                .into_iter()
+                .flatten()
+                .filter(|m| m.int("depid") == id && m.int("indepid") >= 65536)
+                .filter_map(|m| self.assembly_name(m.int("indepid")))
+                .collect();
+            references.sort_by_key(|n| self.key(n));
+            self.db.assemblies.push(Assembly {
+                name: r.str("name"),
+                owner: self.owner_ref(rc::ASSEMBLY_OWNER, id),
+                clr_name,
+                visible: r.int("status") & 1 != 0,
+                permission_set: match r.int("intprop") {
+                    2 => "EXTERNAL_ACCESS",
+                    3 => "UNSAFE",
+                    _ => "SAFE",
+                }
+                .into(),
+                files,
+                references,
+            });
+        }
+    }
+
+    /// XML schema collections whose schemas declare global elements of built-in types (the text
+    /// of other schemas is not rebuilt).
+    fn xml_schema_collections(&mut self) {
+        let components = self.cat.system("sysxmlcomponent");
+        let placements = self.cat.system("sysxmlplacement");
+        let qnames: HashMap<i64, String> = self.cat.system("sysqnames").into_iter().map(|r| (r.int("nid"), r.str("name"))).collect();
+        let mut rows: Vec<SysRow> = self.cat.system("sysnsobjs").into_iter().filter(|r| r.int("class") == 27 && r.int("nsid") != 4).collect();
+        rows.sort_by_key(|r| (self.key(self.schema_names.get(&(r.int("nsid") as i32)).map(String::as_str).unwrap_or("")), self.key(&r.str("name"))));
+        for r in rows {
+            let id = r.int("id");
+            let mine: Vec<&SysRow> = components.iter().filter(|c| c.int("xsdid") == id).collect();
+            let mut body = String::new();
+            let mut whole = true;
+            for c in &mine {
+                let name = qnames.get(&c.int("nameid")).cloned().unwrap_or_default();
+                let ty = placements.iter().find(|p| p.int("placingid") == c.int("id")).and_then(|p| components.iter().find(|t| t.int("id") == p.int("placedid")));
+                match (c.str("kind").trim(), ty) {
+                    ("E", Some(t)) if t.int("xsdid") == 1 => {
+                        let tn = qnames.get(&t.int("nameid")).cloned().unwrap_or_default();
+                        body.push_str(&format!("<xsd:element name=\"{name}\" type=\"xsd:{tn}\"/>"));
+                    }
+                    _ => whole = false,
+                }
+            }
+            let definition = if whole { format!("<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">{body}</xsd:schema>") } else { String::new() };
+            self.db.xml_schema_collections.push(XmlSchemaCollection {
+                schema: self.schema_names.get(&(r.int("nsid") as i32)).cloned().unwrap_or_default(),
+                name: r.str("name"),
+                owner: self.owner_ref(rc::XML_COLLECTION_OWNER, id),
+                definition,
+            });
+        }
+    }
+
+    fn service_broker(&mut self) {
+        let bin = self.cat.system("sysbinobjs");
+        let ci = self.ci;
+        let named = |class: i64| -> Vec<&SysRow> {
+            let mut v: Vec<&SysRow> = bin.iter().filter(|r| r.int("class") == class && r.int("id") >= 65536).collect();
+            v.sort_by_key(|r| if ci { r.str("name").to_lowercase() } else { r.str("name") });
+            v
+        };
+        let message_name = |id: i64| bin.iter().find(|r| r.int("class") == 21 && r.int("id") == id).map(|r| r.str("name"));
+        for m in named(21) {
+            let id = m.int("id");
+            let collection = self.single_ref(rc::MESSAGE_XML_COLLECTION, id, 0).and_then(|x| self.xml_collection_name(x.int("indepid")));
+            let validation = match m.str("type").trim() {
+                "E" => "EMPTY",
+                "X" if collection.is_some() => "VALID_XML",
+                "X" => "WELL_FORMED_XML",
+                _ => "NONE",
+            };
+            self.db.message_types.push(MessageType { name: m.str("name"), owner: self.owner_ref(rc::MESSAGE_OWNER, id), validation: validation.into(), xml_collection: collection });
+        }
+        for c in named(22) {
+            let id = c.int("id");
+            let name = c.str("name");
+            if name == "DEFAULT" || name.starts_with("http://schemas.microsoft.com/SQL/") {
+                continue;
+            }
+            let mut messages: Vec<ContractMessage> = self
+                .multi
+                .get(&rc::CONTRACT_MESSAGE)
+                .into_iter()
+                .flatten()
+                .filter(|u| u.int("depid") == id)
+                .filter_map(|u| {
+                    let sent_by = match u.int("status") & 3 {
+                        3 => "ANY",
+                        1 => "INITIATOR",
+                        _ => "TARGET",
+                    };
+                    Some(ContractMessage { message_type: message_name(u.int("indepid"))?, sent_by: sent_by.into() })
+                })
+                .collect();
+            messages.sort_by_key(|m| self.key(&m.message_type));
+            self.db.contracts.push(Contract { name, owner: self.owner_ref(rc::CONTRACT_OWNER, id), messages });
+        }
+        let contract_name = |id: i64| bin.iter().find(|r| r.int("class") == 22 && r.int("id") == id).map(|r| r.str("name"));
+        for s in named(23) {
+            let id = s.int("id");
+            let name = s.str("name");
+            if name.starts_with("http://schemas.microsoft.com/SQL/") {
+                continue;
+            }
+            let Some(queue) = self.single_ref(rc::SERVICE_QUEUE, id, 0).and_then(|q| self.name_of(q.int("indepid") as i32)) else { continue };
+            let mut contracts: Vec<String> = self.multi.get(&rc::SERVICE_CONTRACT).into_iter().flatten().filter(|u| u.int("depid") == id).filter_map(|u| contract_name(u.int("indepid"))).collect();
+            contracts.sort_by_key(|c| self.key(c));
+            self.db.services.push(Service { name, owner: self.owner_ref(rc::SERVICE_OWNER, id), queue, contracts });
+        }
+        let mut queues = HashMap::new();
+        for o in self.sorted_objects(&["SQ"]) {
+            let activation = self.value(vc::QUEUE_ACTIVATION, o.id as i64, 0, 0).and_then(|v| text_of(v.get("value"))).map(|procedure| QueueActivation {
+                enabled: o.flag(0x100),
+                procedure,
+                max_readers: o.intprop as i32,
+                execute_as: self.execute_as(o.id),
+            });
+            // The queue's messages live in an internal table, on the queue's filegroup.
+            let filegroup = self.objects.values().find(|it| it.kind == "IT" && it.parent == o.id).and_then(|it| self.data_space_of(it.id, 1));
+            queues.insert(o.id, self.db.queues.len());
+            self.db.queues.push(Queue {
+                schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(),
+                name: o.name.clone(),
+                owner: self.owner_ref(rc::OBJECT_OWNER, o.id as i64),
+                enabled: o.flag(0x400),
+                retention: o.flag(0x800),
+                poison_message_handling: o.flag(0x4000000),
+                activation,
+                filegroup,
+                event_notifications: Vec::new(),
+            });
+        }
+        let mut routes: Vec<SysRow> = self.cat.system("sysrts").into_iter().filter(|r| r.str("name") != "AutoCreatedLocal").collect();
+        routes.sort_by_key(|r| self.key(&r.str("name")));
+        for r in routes {
+            let opt = |n: &str| Some(r.str(n)).filter(|s| !s.is_empty());
+            self.db.routes.push(Route {
+                name: r.str("name"),
+                owner: self.owner_ref(rc::ROUTE_OWNER, r.int("id")),
+                remote_service: opt("remsvc"),
+                broker_instance: opt("brkrinst"),
+                expires: match r.get("lifetime") {
+                    Value::Null => None,
+                    v => Some(super::text::odbc(v, values::xtype::DATETIME, 3)),
+                },
+                address: r.str("addr"),
+                mirror_address: opt("miraddr"),
+            });
+        }
+        let mut bindings = self.cat.system("sysremsvcbinds");
+        bindings.sort_by_key(|r| self.key(&r.str("name")));
+        for b in bindings {
+            let id = b.int("id");
+            self.db.service_bindings.push(ServiceBinding {
+                name: b.str("name"),
+                owner: self.owner_ref(rc::BINDING_OWNER, id),
+                remote_service: b.str("remsvc"),
+                user: self.owner_ref(rc::BINDING_USER, id).unwrap_or_default(),
+                anonymous: b.int("status") & 1 != 0,
+            });
+        }
+        let mut notifications: Vec<Obj> = self.objects.values().filter(|o| o.kind == "EN").cloned().collect();
+        notifications.sort_by_key(|o| o.name.clone());
+        for o in notifications {
+            let id = o.id as i64;
+            let mut events: Vec<String> = self.values.get(&(vc::NOTIFICATION_EVENT, id)).into_iter().flatten().filter_map(|v| super::events::name(v.int("subobjid")).map(str::to_string)).collect();
+            events.sort();
+            let queue = queues.get(&o.parent).copied();
+            let en = EventNotification {
+                name: o.name.clone(),
+                queue: queue.map(|q| ObjectName::new(&self.db.queues[q].schema, &self.db.queues[q].name)),
+                events,
+                service: self.value(vc::NOTIFICATION_SERVICE, id, 0, 0).and_then(|v| text_of(v.get("value"))).unwrap_or_default(),
+                broker_instance: self.value(vc::NOTIFICATION_BROKER, id, 0, 0).and_then(|v| text_of(v.get("value"))).unwrap_or_default(),
+                ..Default::default()
+            };
+            match queue {
+                Some(q) => self.db.queues[q].event_notifications.push(en),
+                None if o.parent == 0 => self.db.event_notifications.push(en),
+                None => {}
+            }
+        }
+    }
+
     fn parent_of(&self, id: i32) -> Option<&Obj> {
         let o = self.objects.get(&id)?;
         (o.parent != 0).then(|| self.objects.get(&o.parent)).flatten()
@@ -1305,6 +1549,34 @@ impl Builder<'_> {
                     p.class = "TYPE".into();
                     p.schema = self.schema_names.get(&(t.int("schid") as i32)).cloned();
                     p.object = Some(t.str("name"));
+                }
+                10 => {
+                    let Some(x) = self.cat.system("sysnsobjs").into_iter().find(|x| x.int("class") == 27 && x.int("id") == major as i64) else { continue };
+                    p.class = "XML SCHEMA COLLECTION".into();
+                    p.schema = self.schema_names.get(&(x.int("nsid") as i32)).cloned();
+                    p.object = Some(x.str("name"));
+                }
+                5 | 15..=21 => {
+                    let id = major as i64;
+                    let bin = |c: i64| self.cat.system("sysbinobjs").into_iter().find(|b| b.int("class") == c && b.int("id") == id).map(|b| b.str("name"));
+                    let cls = |c: i64| self.cat.system("sysclsobjs").into_iter().find(|b| b.int("class") == c && b.int("id") == id).map(|b| b.str("name"));
+                    let (name, kind) = match class {
+                        5 => (self.assembly_name(id), "ASSEMBLY"),
+                        15 => (bin(21), "MESSAGE TYPE"),
+                        16 => (bin(22), "CONTRACT"),
+                        17 => (bin(23), "SERVICE"),
+                        18 => (self.cat.system("sysremsvcbinds").into_iter().find(|b| b.int("id") == id).map(|b| b.str("name")), "REMOTE SERVICE BINDING"),
+                        19 => (self.cat.system("sysrts").into_iter().find(|b| b.int("id") == id).map(|b| b.str("name")), "ROUTE"),
+                        20 => (cls(31), "PARTITION SCHEME"),
+                        _ => (cls(30), "PARTITION FUNCTION"),
+                    };
+                    let Some(name) = name else { continue };
+                    p.class = kind.into();
+                    p.object = Some(name);
+                }
+                1 if minor == 0 && self.objects.get(&major).is_some_and(|o| o.kind == "TR" && o.schema == 0) => {
+                    p.class = "TRIGGER".into();
+                    p.object = self.objects.get(&major).map(|o| o.name.clone());
                 }
                 1 | 2 | 7 => {
                     let Some(o) = self.objects.get(&major).cloned() else { continue };
@@ -1477,6 +1749,34 @@ impl Builder<'_> {
                     p.schema = self.schema_names.get(&(t.int("schid") as i32)).cloned();
                     p.object = Some(t.str("name"));
                 }
+                5 | 10 | 15..=19 => {
+                    let bin = |c: i64| self.cat.system("sysbinobjs").into_iter().find(|b| b.int("class") == c && b.int("id") == major).map(|b| b.str("name"));
+                    let name = match class {
+                        5 => self.assembly_name(major),
+                        10 => {
+                            let x = self.cat.system("sysnsobjs").into_iter().find(|x| x.int("class") == 27 && x.int("id") == major);
+                            p.schema = x.as_ref().and_then(|x| self.schema_names.get(&(x.int("nsid") as i32)).cloned());
+                            x.map(|x| x.str("name"))
+                        }
+                        15 => bin(21),
+                        16 => bin(22),
+                        17 => bin(23),
+                        18 => self.cat.system("sysremsvcbinds").into_iter().find(|b| b.int("id") == major).map(|b| b.str("name")),
+                        _ => self.cat.system("sysrts").into_iter().find(|b| b.int("id") == major).map(|b| b.str("name")),
+                    };
+                    let Some(name) = name else { continue };
+                    p.class = match class {
+                        5 => "ASSEMBLY",
+                        10 => "XML SCHEMA COLLECTION",
+                        15 => "MESSAGE TYPE",
+                        16 => "CONTRACT",
+                        17 => "SERVICE",
+                        18 => "REMOTE SERVICE BINDING",
+                        _ => "ROUTE",
+                    }
+                    .into();
+                    p.object = Some(name);
+                }
                 _ => continue,
             }
             self.db.permissions.push(p);
@@ -1531,7 +1831,24 @@ impl Builder<'_> {
                 deps.insert((ObjectName::new(&t.schema, &t.name), assembly(c)), true);
             }
         }
+        // Modules using a user type or an XML schema collection in a parameter.
+        for (&id, pars) in &self.cat.parameters {
+            let Some(from) = self.name_of(id) else { continue };
+            for p in pars {
+                if p.int("utype") > 256
+                    && let Some(t) = self.types.get(&p.int("utype"))
+                {
+                    deps.insert((from.clone(), ObjectName::new(self.schema_names.get(&(t.int("schid") as i32)).map(String::as_str).unwrap_or(""), &t.str("name"))), true);
+                }
+                if p.int("xmlns") > 0
+                    && let Some(x) = self.cat.system("sysnsobjs").into_iter().find(|x| x.int("class") == 27 && x.int("id") == p.int("xmlns"))
+                {
+                    deps.insert((from.clone(), ObjectName::new(self.schema_names.get(&(x.int("nsid") as i32)).map(String::as_str).unwrap_or(""), &x.str("name"))), true);
+                }
+            }
+        }
         self.db.dependencies = deps.into_iter().map(|((from, to), strong)| Dependency { from, to, strong }).collect();
+        crate::catalog::object_dependencies(&mut self.db);
     }
 
     fn finish(mut self) -> Database {
@@ -1577,6 +1894,9 @@ fn level1_class(kind: &str) -> &'static str {
         "FN" | "IF" | "TF" | "FS" | "FT" | "AF" => "FUNCTION",
         "SO" => "SEQUENCE",
         "SN" => "SYNONYM",
+        "SQ" => "QUEUE",
+        "D" => "DEFAULT",
+        "R" => "RULE",
         _ => "OBJECT",
     }
 }
