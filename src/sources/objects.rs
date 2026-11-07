@@ -25,12 +25,9 @@ fn xprop_class(t: ObjectType) -> Option<&'static str> {
     })
 }
 
-/// GRANT statements on a securable that has a class prefix (`SERVICE::`) or is an object.
+/// GRANT statements on a securable that has a class prefix (`SERVICE:: [s]`) or is an object.
 fn grants(db: &Database, class: &str, schema: Option<&str>, name: &str, o: &Options) -> Vec<String> {
-    if o.has(Opt::IgnorePermissions) {
-        return Vec::new();
-    }
-    db.permissions.iter().filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == Some(name)).map(Permission::grant_sql).collect()
+    script::securable_grants(db, class, schema, Some(name), &[], o)
 }
 
 /// A DDL trigger's file: its text, then its extended properties.
@@ -48,8 +45,9 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
     let key = |ty, s: &str, n: &str| (FileKind::Object(ty), s.to_string(), n.to_string());
     let mut out: Vec<(ObjectKey, String)> = Vec::new();
     let mut images: Vec<(ObjectKey, String)> = Vec::new();
-    let mut add = |k: ObjectKey, mut v: Vec<String>, g: Vec<String>| {
-        v.extend(g);
+    // `head`: the object's own statements, already laid out; then its grants and extended
+    // properties.
+    let mut add = |k: ObjectKey, head: String, mut v: Vec<String>| {
         // Extended properties of the object.
         let (FileKind::Object(ty), schema, name) = &k else { return };
         if let Some(class) = xprop_class(*ty)
@@ -63,7 +61,7 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
                     .map(script::xprop_sql),
             );
         }
-        out.push((k, script::statements(&v)));
+        out.push((k, head + &script::statements(&v)));
     };
     for a in &db.assemblies {
         if o.has(crate::schema::Opt::WriteAssembliesAsDlls) {
@@ -71,85 +69,85 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
             images.push((key(ObjectType::Assembly, "", &a.name), super::folder::binary_script(a)));
             continue;
         }
-        add(key(ObjectType::Assembly, "", &a.name), d::create_assembly(a), grants(db, "ASSEMBLY", None, &a.name, o));
+        add(key(ObjectType::Assembly, "", &a.name), script::statements(&d::create_assembly(a)), grants(db, "ASSEMBLY", None, &a.name, o));
     }
     for x in &db.xml_schema_collections {
-        add(key(ObjectType::XmlSchemaCollection, &x.schema, &x.name), vec![d::create_xml_schema_collection(x)], grants(db, "XML SCHEMA COLLECTION", Some(&x.schema), &x.name, o));
+        add(key(ObjectType::XmlSchemaCollection, &x.schema, &x.name), script::statements(&[script::xml_schema_collection(x)]), grants(db, "XML SCHEMA COLLECTION", Some(&x.schema), &x.name, o));
     }
     for x in &db.defaults {
-        add(key(ObjectType::Default, &x.schema, &x.name), vec![d::create_bindable(x)], Vec::new());
+        add(key(ObjectType::Default, &x.schema, &x.name), script::bindable(x, true), Vec::new());
     }
     for x in &db.rules {
-        add(key(ObjectType::Rule, &x.schema, &x.name), vec![d::create_bindable(x)], Vec::new());
+        add(key(ObjectType::Rule, &x.schema, &x.name), script::bindable(x, false), Vec::new());
     }
-    for f in &db.partition_functions {
-        add(key(ObjectType::PartitionFunction, "", &f.name), vec![d::create_partition_function(f)], Vec::new());
+    // Partition functions and schemes are filegroup settings: not written when those are ignored.
+    let partitioning = !o.has(Opt::IgnoreFileGroups);
+    for f in db.partition_functions.iter().filter(|_| partitioning) {
+        add(key(ObjectType::PartitionFunction, "", &f.name), script::statements(&[d::create_partition_function(f)]), Vec::new());
     }
-    for s in &db.partition_schemes {
-        add(key(ObjectType::PartitionScheme, "", &s.name), vec![d::create_partition_scheme(s)], Vec::new());
+    for s in db.partition_schemes.iter().filter(|_| partitioning) {
+        add(key(ObjectType::PartitionScheme, "", &s.name), script::statements(&[d::create_partition_scheme(s)]), Vec::new());
     }
     for c in &db.fulltext_catalogs {
-        add(key(ObjectType::FullTextCatalog, "", &c.name), vec![d::create_fulltext_catalog(c)], grants(db, "FULLTEXT CATALOG", None, &c.name, o));
+        add(key(ObjectType::FullTextCatalog, "", &c.name), script::statements(&[d::create_fulltext_catalog(c)]), grants(db, "FULLTEXT CATALOG", None, &c.name, o));
     }
     for l in &db.fulltext_stoplists {
-        add(key(ObjectType::FullTextStoplist, "", &l.name), d::create_stoplist(l), grants(db, "FULLTEXT STOPLIST", None, &l.name, o));
+        add(key(ObjectType::FullTextStoplist, "", &l.name), script::statements(&d::create_stoplist(l)), grants(db, "FULLTEXT STOPLIST", None, &l.name, o));
     }
     for l in &db.search_property_lists {
-        add(key(ObjectType::SearchPropertyList, "", &l.name), d::create_property_list(l), Vec::new());
+        add(key(ObjectType::SearchPropertyList, "", &l.name), script::statements(&d::create_property_list(l)), Vec::new());
     }
     for m in &db.message_types {
-        add(key(ObjectType::MessageType, "", &m.name), vec![d::create_message_type(m)], grants(db, "MESSAGE TYPE", None, &m.name, o));
+        add(key(ObjectType::MessageType, "", &m.name), script::statements(&[d::create_message_type(m)]), grants(db, "MESSAGE TYPE", None, &m.name, o));
     }
     for c in &db.contracts {
-        add(key(ObjectType::Contract, "", &c.name), vec![d::create_contract(c)], grants(db, "CONTRACT", None, &c.name, o));
+        add(key(ObjectType::Contract, "", &c.name), script::statements(&[d::create_contract(c)]), grants(db, "CONTRACT", None, &c.name, o));
     }
     for q in &db.queues {
         let mut v = vec![d::create_queue(q, true, !o.has(Opt::IgnoreFileGroups))];
         v.extend(q.event_notifications.iter().map(d::create_event_notification));
-        add(key(ObjectType::Queue, &q.schema, &q.name), v, grants(db, "OBJECT", Some(&q.schema), &q.name, o));
+        add(key(ObjectType::Queue, &q.schema, &q.name), script::statements(&v), grants(db, "OBJECT", Some(&q.schema), &q.name, o));
     }
     for s in &db.services {
-        add(key(ObjectType::Service, "", &s.name), vec![d::create_service(s)], grants(db, "SERVICE", None, &s.name, o));
+        add(key(ObjectType::Service, "", &s.name), script::statements(&[d::create_service(s)]), grants(db, "SERVICE", None, &s.name, o));
     }
     for r in &db.routes {
-        add(key(ObjectType::Route, "", &r.name), vec![d::create_route(r)], grants(db, "ROUTE", None, &r.name, o));
+        add(key(ObjectType::Route, "", &r.name), script::statements(&[d::create_route(r)]), grants(db, "ROUTE", None, &r.name, o));
     }
     for b in &db.service_bindings {
-        add(key(ObjectType::ServiceBinding, "", &b.name), vec![d::create_service_binding(b)], grants(db, "REMOTE SERVICE BINDING", None, &b.name, o));
+        add(key(ObjectType::ServiceBinding, "", &b.name), script::statements(&[d::create_service_binding(b)]), grants(db, "REMOTE SERVICE BINDING", None, &b.name, o));
     }
     for e in &db.event_notifications {
-        add(key(ObjectType::EventNotification, "", &e.name), vec![d::create_event_notification(e)], Vec::new());
+        add(key(ObjectType::EventNotification, "", &e.name), script::statements(&[d::create_event_notification(e)]), Vec::new());
     }
     if !o.has(Opt::IgnoreCertificatesAndCryptoKeys) {
         for c in &db.certificates {
-            add(key(ObjectType::Certificate, "", &c.name), vec![d::describe_certificate(c)], Vec::new());
+            add(key(ObjectType::Certificate, "", &c.name), script::statements(&[d::describe_certificate(c)]), Vec::new());
         }
         for k in &db.asymmetric_keys {
-            add(key(ObjectType::AsymmetricKey, "", &k.name), vec![d::describe_asymmetric_key(k)], Vec::new());
+            add(key(ObjectType::AsymmetricKey, "", &k.name), script::statements(&[d::describe_asymmetric_key(k)]), Vec::new());
         }
         for k in &db.symmetric_keys {
-            add(key(ObjectType::SymmetricKey, "", &k.name), vec![d::describe_symmetric_key(k)], Vec::new());
+            add(key(ObjectType::SymmetricKey, "", &k.name), script::statements(&[d::describe_symmetric_key(k)]), Vec::new());
         }
     }
     for p in &db.security_policies {
-        // SQL Compare leaves a blank line after the policy when its authorization follows.
-        let mut v = vec![d::create_security_policy(p)];
+        let mut head = script::security_policy(p);
         if let Some(a) = script::authorization(None, &p.schema, &p.name, p.owner.as_deref(), o) {
-            v[0].push_str("\r\n");
-            v.push(a);
+            head.push_str(&script::statements(&[a]));
         }
-        add(key(ObjectType::SecurityPolicy, &p.schema, &p.name), v, grants(db, "OBJECT", Some(&p.schema), &p.name, o));
+        add(key(ObjectType::SecurityPolicy, &p.schema, &p.name), head, grants(db, "OBJECT", Some(&p.schema), &p.name, o));
     }
     for x in &db.external_data_sources {
-        add(key(ObjectType::ExternalDataSource, "", &x.name), vec![d::create_external_data_source(x)], Vec::new());
+        add(key(ObjectType::ExternalDataSource, "", &x.name), script::statements(&[d::create_external_data_source(x)]), Vec::new());
     }
     for x in &db.external_file_formats {
-        add(key(ObjectType::ExternalFileFormat, "", &x.name), vec![d::create_external_file_format(x)], Vec::new());
+        add(key(ObjectType::ExternalFileFormat, "", &x.name), script::statements(&[d::create_external_file_format(x)]), Vec::new());
     }
     for x in &db.external_tables {
         let mut v = vec![d::create_external_table(x)];
         v.extend(script::authorization(None, &x.schema, &x.name, x.owner.as_deref(), o));
-        add(key(ObjectType::ExternalTable, &x.schema, &x.name), v, grants(db, "OBJECT", Some(&x.schema), &x.name, o));
+        add(key(ObjectType::ExternalTable, &x.schema, &x.name), script::statements(&v), grants(db, "OBJECT", Some(&x.schema), &x.name, o));
     }
     out.extend(images);
     out

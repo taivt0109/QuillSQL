@@ -430,26 +430,170 @@ fn sql_compare_reads_our_snapshots_as_identical() {
     }
 }
 
-/// SQL Compare reads our scripts folders of the fixtures as identical to their databases.
+/// The databases the scripts-folder format is checked on: the compare fixtures, the other
+/// objects (CLR included), `folder_format.sql`, and database 1 of the differential scenarios
+/// whose objects have layout rules of their own. Each with whether it is also checked without
+/// IgnoreFileGroups and IgnoreFillFactor.
+fn folder_fixtures() -> Vec<(String, String, bool)> {
+    let clr = |hex: &str| format!("0x{}", hex.trim());
+    let objects = include_str!("fixtures/objects/objects.sql").replace("{CLR}", &clr(include_str!("fixtures/objects/clr.hex")));
+    let mut out = vec![
+        ("QD_fixfolder_Shop".to_string(), SHOP.to_string(), false),
+        ("QD_fixfolder_Changed".into(), format!("{SHOP}\nGO\n{SHOP_CHANGES}"), false),
+        ("QD_fixfolder_XmlSpatial".into(), XML_SPATIAL.into(), false),
+        ("QD_fixfolder_Bindings".into(), BINDINGS.into(), false),
+        ("QD_fixfolder_Followup".into(), followup::FOLLOWUP.into(), false),
+        ("QD_fixfolder_Objects".into(), objects, true),
+        ("QD_fixfolder_Format".into(), include_str!("fixtures/compare/folder_format.sql").into(), true),
+    ];
+    for scenario in [
+        "schema-columnstore",
+        "schema-history-index",
+        "schema-indexes",
+        "schema-legacy-rule-default",
+        "schema-memory-optimized",
+        "schema-partitioning",
+        "schema-security-policy",
+        "schema-sequence-synonym",
+        "schema-temporal",
+        "schema-xml-schema-collection",
+        "schema-dbo-grant",
+        "schema-dbo-xprop",
+        "schema-service-broker",
+        "schema-table-type",
+        "schema-trigger-settings",
+    ] {
+        let path = format!("{}/tests/fixtures/differential/{scenario}/db1.sql", env!("CARGO_MANIFEST_DIR"));
+        let name = format!("QD_fixfolder_{}", scenario.trim_start_matches("schema-").replace('-', "_"));
+        // `{db}` is replaced by the database's name when it is created.
+        let script = std::fs::read_to_string(&path).unwrap();
+        out.push((name, script, scenario == "schema-partitioning"));
+    }
+    out
+}
+
+/// Every option set in force by default except the filegroup and fill factor ones.
+const WITH_FILEGROUPS: &str = "DecryptPost2kEncryptedObjects,IgnoreWhiteSpace,IgnoreWithElementOrder,IgnoreUserProperties,IgnoreDatabaseAndServerName";
+
+/// Runs SQLCompare.exe with database 1 or database 2 on the test server.
+fn sql_compare(exe: &str, server: &Server, side: u8, database: &str, args: &[String]) -> (i32, String) {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args).arg(format!("/server{side}:{}", server.host)).arg(format!("/database{side}:{}", unique(database)));
+    if let Auth::Sql { user, password } = &server.auth {
+        cmd.arg(format!("/username{side}:{user}")).arg(format!("/password{side}:{password}"));
+    }
+    let out = cmd.output().unwrap();
+    (out.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+}
+
+/// Files under `dir`, relative, with `/` separators.
+fn tree(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let rel = p.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
+                out.insert(rel, std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// What differs between SQL Compare's folder and ours: missing and extra files, and the first
+/// differing line of each file (the project GUID of RedGateDatabaseInfo.xml is new every time).
+fn tree_differences(theirs: &Path, ours: &Path) -> Vec<String> {
+    let (a, b) = (tree(theirs), tree(ours));
+    let mut out = Vec::new();
+    for k in a.keys().filter(|k| !b.contains_key(*k)) {
+        out.push(format!("only SQL Compare writes {k}"));
+    }
+    for k in b.keys().filter(|k| !a.contains_key(*k)) {
+        out.push(format!("only we write {k}"));
+    }
+    let guid = |s: &[u8]| -> Vec<u8> {
+        let text = String::from_utf8_lossy(s).to_string();
+        match (text.find("<ProjectGuid>"), text.find("</ProjectGuid>")) {
+            (Some(x), Some(y)) => format!("{}{}", &text[..x], &text[y..]).into_bytes(),
+            _ => s.to_vec(),
+        }
+    };
+    for (k, x) in &a {
+        let Some(y) = b.get(k) else { continue };
+        let (x, y) = if k == "RedGateDatabaseInfo.xml" { (guid(x), guid(y)) } else { (x.clone(), y.clone()) };
+        if x != y {
+            let lines = |v: &[u8]| v.split(|c| *c == b'\n').map(|l| String::from_utf8_lossy(l).to_string()).collect::<Vec<_>>();
+            let (lx, ly) = (lines(&x), lines(&y));
+            let n = lx.iter().zip(&ly).position(|(p, q)| p != q).unwrap_or(lx.len().min(ly.len()));
+            out.push(format!("{k} line {}: SQL Compare {:?}, ours {:?}", n + 1, lx.get(n), ly.get(n)));
+        }
+    }
+    out
+}
+
+/// `quill schema /makescripts` writes the same folder as SQL Compare's `/makescripts`, byte for
+/// byte (QUILL_TEST_SQLCOMPARE: the path to SQLCompare.exe).
+#[test]
+fn makescripts_matches_sql_compare_byte_for_byte() {
+    let Some(server) = server() else { return };
+    let Ok(exe) = std::env::var("QUILL_TEST_SQLCOMPARE") else { return };
+    let mut problems = Vec::new();
+    for (name, script, filegroups) in folder_fixtures() {
+        server.create(&name, &script.replace("{db}", &unique(&name)));
+        let lists: &[Option<&str>] = if filegroups { &[None, Some(WITH_FILEGROUPS)] } else { &[None] };
+        for (n, options) in lists.iter().enumerate() {
+            let (theirs, ours) = (temp(&format!("{name}-{n}-rg")), temp(&format!("{name}-{n}-q")));
+            let opts: Vec<String> = options.iter().map(|o| format!("/options:{o}")).collect();
+            let (code, out) = sql_compare(&exe, &server, 1, &name, &[vec![format!("/makescripts:{}", theirs.display())], opts.clone()].concat());
+            assert_eq!(code, 0, "{name}: {out}");
+            let (code, out) = quill(&server, "schema", &[1], &[vec![format!("/database1:{}", unique(&name)), format!("/makescripts:{}", ours.display())], opts].concat());
+            assert_eq!(code, 0, "{name}: {out}");
+            problems.extend(tree_differences(&theirs, &ours).into_iter().map(|d| format!("{name} {options:?}: {d}")));
+            let _ = std::fs::remove_dir_all(&theirs);
+            let _ = std::fs::remove_dir_all(&ours);
+        }
+        server.drop(&name);
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// SQL Compare reads our scripts folders of the fixtures as identical to their databases, and
+/// we read SQL Compare's as identical too.
 #[test]
 fn sql_compare_reads_our_scripts_folders_as_identical() {
     let Some(server) = server() else { return };
     let Ok(exe) = std::env::var("QUILL_TEST_SQLCOMPARE") else { return };
-    for (name, script) in [("QD_fixsourcesfollowup_RgShop", SHOP), ("QD_fixsourcesfollowup_RgFolder", followup::FOLLOWUP)] {
-        server.create(name, script);
-        let dir = temp(name);
-        folder::write_all(&server.read(name), &dir, &Options::default_set()).unwrap();
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg(format!("/scripts1:{}", dir.display())).arg(format!("/server2:{}", server.host)).arg(format!("/database2:{}", unique(name)));
-        if let Auth::Sql { user, password } = &server.auth {
-            cmd.arg(format!("/username2:{user}")).arg(format!("/password2:{password}"));
+    let mut problems = Vec::new();
+    let fixtures = folder_fixtures().into_iter().map(|(n, s, _)| (format!("{n}_Rd"), s));
+    for (name, script) in fixtures.chain([("QD_fixsourcesfollowup_RgShop".to_string(), SHOP.to_string())]) {
+        server.create(&name, &script.replace("{db}", &unique(&name)));
+        let (ours, theirs) = (temp(&name), temp(&format!("{name}-rg")));
+        folder::write_all(&server.read(&name), &ours, &Options::default_set()).unwrap();
+        let (code, out) = sql_compare(&exe, &server, 1, &name, &[format!("/makescripts:{}", theirs.display())]);
+        assert_eq!(code, 0, "{name}: {out}");
+        // 63: the databases are identical. SQL Compare does not read every folder of its own
+        // as identical either (it drops a comment before CREATE DEFAULT): a folder that is
+        // byte for byte its own gets the same answer.
+        let (code, out) = sql_compare(&exe, &server, 2, &name, &[format!("/scripts1:{}", ours.display())]);
+        if code != 63 {
+            let (own, _) = sql_compare(&exe, &server, 2, &name, &[format!("/scripts1:{}", theirs.display())]);
+            if own != code || !tree_differences(&theirs, &ours).is_empty() {
+                problems.push(format!("SQL Compare reading our folder of {name}: {code}\n{out}"));
+            }
         }
-        let out = cmd.output().unwrap();
-        server.drop(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        // 63: the databases are identical.
-        assert_eq!(out.status.code(), Some(63), "{name}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let (code, out) = quill(&server, "schema", &[2], &[format!("/scripts1:{}", theirs.display()), format!("/database2:{}", unique(&name))]);
+        if code != 63 {
+            problems.push(format!("quill reading SQL Compare's folder of {name}: {code}\n{out}"));
+        }
+        server.drop(&name);
+        let _ = std::fs::remove_dir_all(&ours);
+        let _ = std::fs::remove_dir_all(&theirs);
     }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
 #[test]
