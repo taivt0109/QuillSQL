@@ -132,7 +132,7 @@ mod tests {
     fn literals_with_a_flat_table() {
         let mut src = vec![0x99u8; 256];
         let mut bits: Vec<bool> = Vec::new();
-        for c in [b'A', b'B'] {
+        for c in *b"AB" {
             for i in (0..9).rev() {
                 bits.push((c as u16 >> i) & 1 == 1);
             }

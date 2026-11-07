@@ -79,14 +79,15 @@ impl Compressed {
     pub fn open(inner: Arc<dyn Medium>) -> Result<Compressed, String> {
         let total = inner.len();
         let mut segments = Vec::new();
-        let (mut raw, mut logical) = (16u64, 0u64);
-        // The first block starts after the signature and zero padding.
+        let mut logical = 0u64;
+        // The first block (the tape header) follows the signature somewhere in the first 4 KB;
+        // the bytes before it are not initialized.
         let mut buf = vec![0u8; 4096];
-        let n = read_full(&*inner, raw, &mut buf);
-        match buf[..n].iter().position(|&b| b != 0) {
-            Some(p) => raw += p as u64,
-            None => return Err("the compressed backup holds no data".into()),
-        }
+        let n = read_full(&*inner, 0, &mut buf);
+        let mut raw = (16..n.saturating_sub(28))
+            .step_by(4)
+            .find(|&p| first_block(&buf[p..n]))
+            .ok_or("the compressed backup holds no data")? as u64;
         while raw < total {
             let mut h = [0u8; 28];
             let got = read_full(&*inner, raw, &mut h);
@@ -115,7 +116,7 @@ impl Compressed {
                 }
                 _ => {
                     // Padding to the next 4 KB boundary.
-                    if raw % STORED_BLOCK == 0 {
+                    if raw.is_multiple_of(STORED_BLOCK) {
                         break;
                     }
                     raw = (raw / STORED_BLOCK + 1) * STORED_BLOCK;
@@ -151,6 +152,22 @@ impl Compressed {
         cache.insert(i, data.clone());
         Ok(data)
     }
+}
+
+/// Whether a compressed block starts `b` and holds the tape header.
+fn first_block(b: &[u8]) -> bool {
+    let header = match b[0] {
+        0x21 if b[4..8] == [0xff; 4] => 28,
+        0x81 => 8,
+        _ => return false,
+    };
+    let (ulen, clen) = ((b[1] as usize) << 9, u16::from_le_bytes([b[2], b[3]]) as usize);
+    if ulen == 0 || clen < 256 || header + clen > b.len() {
+        return false;
+    }
+    let mut src = b[header..header + clen].to_vec();
+    src.extend_from_slice(&[0; 8]);
+    xpress::decompress(&src, ulen).is_ok_and(|d| d.starts_with(b"TAPE"))
 }
 
 impl Medium for Compressed {
@@ -445,7 +462,7 @@ mod tests {
     fn dates_and_lsns() {
         // 2026-11-07 06:04:05
         let y = 2026u32;
-        let b = [(y >> 6) as u8, (((y & 0x3f) << 2) | (11 >> 2)) as u8, (((11 & 3) << 6) | (7 << 1)) as u8, (6 << 4 | 4 >> 2) as u8, ((4 & 3) << 6 | 5) as u8];
+        let b = [(y >> 6) as u8, (((y & 0x3f) << 2) | (11 >> 2)) as u8, (((11 & 3) << 6) | (7 << 1)) as u8, (6 << 4 | 4 >> 2) as u8, 5];
         assert_eq!(mtf_date(&b).unwrap().to_string(), "2026-11-07 06:04:05");
         assert_eq!(Lsn(37, 160, 1).to_string(), "00000037:00000160:0001");
     }

@@ -252,7 +252,7 @@ fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
 
 fn execute(args: &Args) -> Result<u8, ArgError> {
     // Dependency checks first, as SQLDataCompare.exe does.
-    if !["project", "database2", "connection2", "snapshot2", "makescripts", "scripts2", "sourcecontrol2"].iter().any(|s| args.has(s)) {
+    if !["project", "database2", "connection2", "snapshot2", "backup2", "makescripts", "scripts2", "sourcecontrol2"].iter().any(|s| args.has(s)) {
         return Err(ArgError::new(
             exit::USAGE,
             "You must specify one of the following argument(s): /project, /database2, /backup2, /scripts2, /makescripts, /sourcecontrol2, /sca2, /empty2",

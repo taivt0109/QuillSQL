@@ -7,6 +7,7 @@ mod binxml;
 pub mod catalog;
 pub mod collation;
 pub mod compressed;
+mod events;
 pub mod mtf;
 pub mod pages;
 pub mod record;
