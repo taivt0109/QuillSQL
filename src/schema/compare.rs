@@ -1071,9 +1071,8 @@ impl<'a> Comparer<'a> {
 
     pub(super) fn module_text(&self, d: &mut Diffs, a: &str, b: &str, enc_a: bool, enc_b: bool) {
         let o = self.opts;
-        // With AddWithEncryption the source is deployed encrypted: an unencrypted target differs.
-        let enc_a = enc_a || (o.has(Opt::AddWithEncryption) && !o.has(Opt::IgnoreWithEncryption) && !has_with_encryption(a));
-        let enc_b = enc_b || (o.has(Opt::AddWithEncryption) && !o.has(Opt::IgnoreWithEncryption) && has_with_encryption(b));
+        // AddWithEncryption changes only the deployment: SQL Compare 15 still reports an
+        // unencrypted pair identical (differential scenario schema-add-with-encryption).
         if enc_a || enc_b {
             // Without decryption only the flag can be compared.
             d.prop("Encrypted", enc_a, enc_b);
@@ -1400,7 +1399,7 @@ impl<'a> Comparer<'a> {
             let mut v: Vec<(String, String)> = db
                 .permissions
                 .iter()
-                .filter(|p| p.class == "DATABASE" && self.same_name(&p.grantee, name))
+                .filter(|p| p.class == "DATABASE" && self.same_name(&p.grantee, name) && !is_builtin_grant(p))
                 .map(|p| (self.key(&format!("{} {}", p.state, p.action())), p.grant_sql()))
                 .collect();
             v.sort();
@@ -1609,6 +1608,13 @@ fn compression(s: &Storage) -> String {
         .join(", ")
 }
 
+/// What every database grants to public when it is created.
+fn is_builtin_grant(p: &Permission) -> bool {
+    p.grantee == "public"
+        && p.state == "GRANT"
+        && matches!(p.permission.as_str(), "VIEW ANY COLUMN ENCRYPTION KEY DEFINITION" | "VIEW ANY COLUMN MASTER KEY DEFINITION")
+}
+
 /// `DOMAIN\name` without the domain.
 fn without_domain(name: &str) -> &str {
     name.rsplit('\\').next().unwrap_or(name)
@@ -1652,15 +1658,6 @@ fn strip_with_append(text: &str) -> String {
     };
     let from = if pair[0] > 0 && tokens[pair[0] - 1].kind == Tok::Space { pair[0] - 1 } else { pair[0] };
     tokens.iter().enumerate().filter(|(i, _)| *i < from || *i > pair[1]).map(|(_, t)| t.text.as_str()).collect()
-}
-
-/// The module header says WITH ENCRYPTION (alone or among other options).
-fn has_with_encryption(text: &str) -> bool {
-    use super::text::Tok;
-    let tokens = text::tokenize(text);
-    let words: Vec<&str> = tokens.iter().filter(|t| t.kind == Tok::Word).map(|t| t.text.as_str()).collect();
-    let body = words.iter().position(|w| w.eq_ignore_ascii_case("AS")).unwrap_or(words.len());
-    words[..body].iter().any(|w| w.eq_ignore_ascii_case("ENCRYPTION"))
 }
 
 fn strip_with_encryption(text: &str) -> String {
@@ -1785,3 +1782,7 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     }
     prev[b.len()]
 }
+
+#[cfg(test)]
+#[path = "compare_model_tests.rs"]
+mod model_tests;

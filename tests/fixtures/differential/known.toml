@@ -1,82 +1,40 @@
 # Known differences between quill and the Vendor tools; see README.md.
 
 [[known]]
-scenario = "*"
-oracle = "names"
-finding = "new"
-reason = "quill brackets principal, schema and DDL-trigger names in report fqn/console (role-[App], schema-[App], ddltrigger-[T]); Vendor writes them bare (role-App)"
-
-[[known]]
 scenario = "schema-dbo-grant"
 oracle = "check"
 finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+reason = "compared now (schema-model); the deployment is still missing (schema-deploy): GRANT/REVOKE ON SCHEMA::dbo"
 
 [[known]]
 scenario = "schema-dbo-grant"
 oracle = "converge-quill"
 finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "diffset"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "exit"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "names"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+reason = "compared now (schema-model); the deployment is still missing (schema-deploy): GRANT/REVOKE ON SCHEMA::dbo"
 
 [[known]]
 scenario = "schema-dbo-grant"
 oracle = "outcome"
 finding = "schema-model H1"
-reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+reason = "compared now (schema-model); the deployment is still missing (schema-deploy): GRANT/REVOKE ON SCHEMA::dbo"
 
 [[known]]
 scenario = "schema-dbo-xprop"
 oracle = "check"
 finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+reason = "compared now (schema-model); the deployment is still missing (schema-deploy): extended property on schema dbo"
 
 [[known]]
 scenario = "schema-dbo-xprop"
 oracle = "converge-quill"
 finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "diffset"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "exit"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "names"
-finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+reason = "compared now (schema-model); the deployment is still missing (schema-deploy): extended property on schema dbo"
 
 [[known]]
 scenario = "schema-dbo-xprop"
 oracle = "outcome"
 finding = "schema-model H1"
-reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+reason = "compared now (schema-model); the deployment is still missing (schema-deploy): extended property on schema dbo"
 
 [[known]]
 scenario = "schema-staticdata"
@@ -95,24 +53,6 @@ scenario = "schema-staticdata"
 oracle = "exit"
 finding = "sources-cli H4"
 reason = "/include:StaticData does nothing: no data comparison, exit 63 instead of 0, lookup rows not deployed"
-
-[[known]]
-scenario = "schema-security"
-oracle = "diffset"
-finding = "new"
-reason = "quill reports user Loader as different because its role membership differs; Vendor attributes membership to the role only"
-
-[[known]]
-scenario = "schema-triggers"
-oracle = "converge-vendor"
-finding = "new"
-reason = "quill compares the trigger text literally: Vendor deploys CREATE TRIGGER [dbo].[T_Ins] ON [dbo].[T] and quill then reports the table different from the source text CREATE TRIGGER dbo.T_Ins ON dbo.T"
-
-[[known]]
-scenario = "schema-empty-target"
-oracle = "converge-vendor"
-finding = "new"
-reason = "same as schema-triggers: bracketed trigger header written by Vendor makes quill report the table different"
 
 [[known]]
 scenario = "data-views-backup"
@@ -449,3 +389,21 @@ scenario = "data-temporal"
 oracle = "warnings"
 finding = "new"
 reason = "quill prints 'Excluded ValidFrom because it is GENERATED ALWAYS AS $AsRowStart' with an unfilled placeholder; Vendor prints nothing"
+
+[[known]]
+scenario = "schema-security"
+oracle = "check"
+finding = "new"
+reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
+
+[[known]]
+scenario = "schema-security"
+oracle = "converge-quill"
+finding = "new"
+reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
+
+[[known]]
+scenario = "schema-security"
+oracle = "outcome"
+finding = "new"
+reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
