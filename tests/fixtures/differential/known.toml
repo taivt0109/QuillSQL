@@ -1,42 +1,6 @@
 # Known differences between quill and the Redgate tools; see README.md.
 
 [[known]]
-scenario = "schema-dbo-grant"
-oracle = "check"
-finding = "schema-model H1"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): GRANT/REVOKE ON SCHEMA::dbo"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "converge-quill"
-finding = "schema-model H1"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): GRANT/REVOKE ON SCHEMA::dbo"
-
-[[known]]
-scenario = "schema-dbo-grant"
-oracle = "outcome"
-finding = "schema-model H1"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): GRANT/REVOKE ON SCHEMA::dbo"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "check"
-finding = "schema-model H1"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): extended property on schema dbo"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "converge-quill"
-finding = "schema-model H1"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): extended property on schema dbo"
-
-[[known]]
-scenario = "schema-dbo-xprop"
-oracle = "outcome"
-finding = "schema-model H1"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): extended property on schema dbo"
-
-[[known]]
 scenario = "schema-staticdata"
 oracle = "check"
 finding = "sources-cli H4"
@@ -389,21 +353,3 @@ scenario = "data-temporal"
 oracle = "warnings"
 finding = "new"
 reason = "quill prints 'Excluded ValidFrom because it is GENERATED ALWAYS AS $AsRowStart' with an unfilled placeholder; Redgate prints nothing"
-
-[[known]]
-scenario = "schema-security"
-oracle = "check"
-finding = "new"
-reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
-
-[[known]]
-scenario = "schema-security"
-oracle = "converge-quill"
-finding = "new"
-reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
-
-[[known]]
-scenario = "schema-security"
-oracle = "outcome"
-finding = "new"
-reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"

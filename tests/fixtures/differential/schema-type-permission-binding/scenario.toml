@@ -1,4 +1,3 @@
 kind = "schema"
 about = "GRANT on an alias type and a rule bound to another alias type, only in db1"
 finding = "schema-model M7"
-oracles = ["diffset", "names", "exit"]

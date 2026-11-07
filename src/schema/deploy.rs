@@ -529,7 +529,9 @@ impl<'a> Planner<'a> {
                 self.group(Phase::DropSchemas, "Dropping schemas", vec![self.ex.schema(name, Check::Drop, &sql)]);
             }
             DiffKind::Different => {
-                if let Some(s) = self.src.schemas.iter().find(|s| s.name == *name) {
+                if let Some(s) = self.src.schemas.iter().find(|s| s.name == *name)
+                    && self.tgt.schemas.iter().find(|t| self.same(&t.name, name)).is_none_or(|t| !self.same(&t.owner, &s.owner))
+                {
                     self.group(Phase::CreateSchemas, "Altering schemas", vec![format!("ALTER AUTHORIZATION ON SCHEMA::{} TO {}", quote(name), quote(&s.owner))]);
                 }
             }
@@ -541,6 +543,16 @@ impl<'a> Planner<'a> {
         let s = self.src.types.iter().find(|t| t.schema == d.name.schema && t.name == d.name.name);
         let tn = self.target_name(d);
         let t = self.tgt.types.iter().find(|t| t.schema == tn.schema && t.name == tn.name);
+        // Only bindings, permissions, properties or the owner differ: the type stays.
+        if let (Some(s), Some(t)) = (s, t)
+            && ddl::create_type(s) == ddl::create_type(t)
+        {
+            if !self.opts.has(Opt::IgnoreBindings) {
+                self.rebind_type(&d.name, &t.bound_default, &s.bound_default, false);
+                self.rebind_type(&d.name, &t.bound_rule, &s.bound_rule, true);
+            }
+            return;
+        }
         if let Some(t) = t {
             // Columns that use the type go over to its base type while it is re-created.
             if t.kind == UserTypeKind::Alias {
@@ -567,16 +579,28 @@ impl<'a> Planner<'a> {
             }
             let sql = self.ex.user_type(&d.name, Check::Create, &ddl::create_type(s));
             self.group(Phase::CreateTypes, "Creating types", vec![sql]);
+            self.recreate.insert(d.name.clone());
             // Defaults and rules bound to the type itself.
             if !self.opts.has(Opt::IgnoreBindings) {
-                let ty = literal(&d.name.quoted());
-                if let Some(df) = &s.bound_default {
-                    self.group(Phase::BindColumns, "Binding defaults to types", vec![format!("EXEC sp_bindefault {}, {ty}", literal(df))]);
-                }
-                if let Some(r) = &s.bound_rule {
-                    self.group(Phase::BindColumns, "Binding rules to types", vec![format!("EXEC sp_bindrule {}, {ty}", literal(r))]);
-                }
+                self.rebind_type(&d.name, &None, &s.bound_default, false);
+                self.rebind_type(&d.name, &None, &s.bound_rule, true);
             }
+        }
+    }
+
+    /// sp_unbind… / sp_bind… of a default or rule object on an alias type.
+    fn rebind_type(&mut self, ty: &ObjectName, old: &Option<String>, new: &Option<String>, rule: bool) {
+        if old == new {
+            return;
+        }
+        let kind = if rule { "rules" } else { "defaults" };
+        let name = literal(&ty.quoted());
+        if old.is_some() {
+            let sql = format!("EXEC sp_unbind{} {name}", if rule { "rule" } else { "efault" });
+            self.group(Phase::UnbindColumns, format!("Unbinding {kind} from types"), vec![sql]);
+        }
+        if let Some(o) = new {
+            self.group(Phase::BindColumns, format!("Binding {kind} to types"), vec![format!("EXEC sp_bind{} {}, {name}", if rule { "rule" } else { "efault" }, literal(o))]);
         }
     }
 
@@ -1803,6 +1827,13 @@ impl<'a> Planner<'a> {
         self.module_step(Phase::CreateObjects, format!("Altering {name}"), statements, &ModuleSettings::default());
         self.step(Phase::CreateDefaults, format!("Altering {name}"), after_defaults);
         self.sub_objects(s, t);
+        // The history table's own indexes and constraints.
+        if let (Some(x), Some(y)) = (&s.temporal, &t.temporal)
+            && self.key(&x.history_table.to_string()) == self.key(&y.history_table.to_string())
+            && let (Some(hs), Some(ht)) = (self.src.table(&x.history_table.schema, &x.history_table.name), self.tgt.table(&y.history_table.schema, &y.history_table.name))
+        {
+            self.sub_objects(hs, ht);
+        }
         self.change_tracking(s, t);
         self.bind_columns(s, Some(&rebind), true);
         self.table_parts(s, Some(t));
@@ -2370,7 +2401,7 @@ impl<'a> Planner<'a> {
         }
         for d in selected {
             let class = match d.object_type {
-                ObjectType::Role | ObjectType::User => continue,
+                ObjectType::Role | ObjectType::User => "USER",
                 ObjectType::Table => "TABLE",
                 ObjectType::View => "VIEW",
                 ObjectType::Function => "FUNCTION",
@@ -2414,7 +2445,9 @@ impl<'a> Planner<'a> {
                 let existing = tgt_props.iter().find(|tp| tp.name == sp.name && tp.minor_type == sp.minor_type && tp.minor_name == sp.minor_name);
                 match existing {
                     None => self.add_xprop(sp, &levels(sp)),
-                    Some(tp) if tp.value != sp.value => self.update_xprop(sp, &levels(sp)),
+                    Some(tp) if tp.value != sp.value || (tp.value_type.is_some() && sp.value_type.is_some() && !tp.value_type.as_deref().unwrap_or_default().eq_ignore_ascii_case(sp.value_type.as_deref().unwrap_or_default())) => {
+                        self.update_xprop(sp, &levels(sp))
+                    }
                     _ => {}
                 }
             }
@@ -2451,6 +2484,13 @@ impl<'a> Planner<'a> {
         Some(out)
     }
 
+    /// SQL Compare's warning for a user it creates or alters (or adds to a role) that has no login.
+    fn user_warnings(&mut self, u: &Principal) {
+        if u.login.is_none() && matches!(u.kind.as_str(), "SQL_USER" | "WINDOWS_USER" | "WINDOWS_GROUP") && !u.name.eq_ignore_ascii_case("guest") {
+            self.warn(warn::user_without_login(&u.name));
+        }
+    }
+
     fn create_user_statement(&mut self, s: &Principal) -> Option<String> {
         let q = quote(&s.name);
         let schema = s.default_schema.as_deref().filter(|x| *x != "dbo").map(|x| format!(" WITH DEFAULT_SCHEMA={}", quote(x))).unwrap_or_default();
@@ -2471,9 +2511,7 @@ impl<'a> Planner<'a> {
             }
             ("WINDOWS_USER" | "WINDOWS_GROUP" | "EXTERNAL_USER" | "EXTERNAL_GROUP", Some(login)) => create(format!(" FOR LOGIN {}", quote(login))),
             ("SQL_USER" | "WINDOWS_USER" | "WINDOWS_GROUP", None) => {
-                if s.name != "guest" {
-                    self.warn(warn::user_without_login(&s.name));
-                }
+                self.user_warnings(s);
                 create(" WITHOUT LOGIN".into())
             }
             ("EXTERNAL_USER" | "EXTERNAL_GROUP", _) => create(" FROM EXTERNAL PROVIDER".into()),
@@ -2590,6 +2628,9 @@ impl<'a> Planner<'a> {
             }
         } else if let (Some(s), Some(t)) = (s, t) {
             let mut sql = Vec::new();
+            if !s.is_role() {
+                self.user_warnings(s);
+            }
             if !s.is_role() && !self.opts.has(Opt::IgnoreUserProperties) && (s.kind != t.kind || s.certificate != t.certificate || s.asymmetric_key != t.asymmetric_key) {
                 self.warn(warn::user_unsyncable(&s.name));
             }
@@ -2654,6 +2695,9 @@ impl<'a> Planner<'a> {
         let same_member = |p: &Self, a: &str, b: &str| p.same(a, b) || p.same(&bare(a), &bare(b));
         for m in &wanted {
             if !current.iter().any(|c| same_member(self, &c.name, &m.name)) {
+                if !m.is_role() {
+                    self.user_warnings(m);
+                }
                 let sql = self.member_sql(role, &m.name, true);
                 self.group(Phase::RoleMembers, format!("Altering members of role {role}"), vec![sql]);
             }
