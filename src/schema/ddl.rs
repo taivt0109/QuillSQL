@@ -960,14 +960,45 @@ pub fn xprop_levels(p: &ExtendedProperty, schema_map: impl Fn(&str) -> String) -
     args.join(", ")
 }
 
+/// A property value that is not a string goes through a variable of its sql_variant base type:
+/// `DECLARE @xp int\r\nSELECT @xp=5\r\n`. Empty for strings and NULL.
+pub fn xprop_variable(p: &ExtendedProperty) -> String {
+    let (Some(v), Some(ty)) = (p.value.as_deref(), p.value_type.as_deref()) else { return String::new() };
+    let ty = ty.to_ascii_lowercase();
+    let declared = match ty.as_str() {
+        "nvarchar" | "varchar" | "nchar" | "char" | "sysname" => return String::new(),
+        "varbinary" | "binary" => format!("{ty} ({})", (v.len().saturating_sub(2) / 2).max(1)),
+        "decimal" | "numeric" => {
+            let digits = v.trim_start_matches('-');
+            let scale = digits.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
+            let precision = (digits.len() - usize::from(scale > 0)).max(18);
+            format!("{ty} ({precision}, {scale})")
+        }
+        _ => ty.clone(),
+    };
+    let value = match ty.as_str() {
+        "varbinary" | "binary" | "tinyint" | "smallint" | "int" | "bigint" | "bit" | "decimal" | "numeric" | "float" | "real" | "money" | "smallmoney" => v.to_string(),
+        _ => literal(v),
+    };
+    format!("DECLARE @xp {declared}\r\nSELECT @xp={value}\r\n")
+}
+
+/// The value argument: `@xp` after xprop_variable, a string literal (plain for varchar) or NULL.
+fn xprop_value(p: &ExtendedProperty) -> String {
+    match (p.value.as_deref(), p.value_type.as_deref()) {
+        (None, _) => "NULL".into(),
+        _ if !xprop_variable(p).is_empty() => "@xp".into(),
+        (Some(v), Some(t)) if t.eq_ignore_ascii_case("varchar") => format!("'{}'", v.replace('\'', "''")),
+        (Some(v), _) => literal(v),
+    }
+}
+
 pub fn add_xprop(p: &ExtendedProperty, levels: &str) -> String {
-    let value = p.value.as_deref().map(literal).unwrap_or_else(|| "NULL".into());
-    format!("EXEC sp_addextendedproperty {}, {value}, {levels}", literal(&p.name))
+    format!("EXEC sp_addextendedproperty {}, {}, {levels}", literal(&p.name), xprop_value(p))
 }
 
 pub fn update_xprop(p: &ExtendedProperty, levels: &str) -> String {
-    let value = p.value.as_deref().map(literal).unwrap_or_else(|| "NULL".into());
-    format!("EXEC sp_updateextendedproperty {}, {value}, {levels}", literal(&p.name))
+    format!("{}EXEC sp_updateextendedproperty {}, {}, {levels}", xprop_variable(p), literal(&p.name), xprop_value(p))
 }
 
 pub fn drop_xprop(p: &ExtendedProperty, levels: &str) -> String {

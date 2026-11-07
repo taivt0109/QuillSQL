@@ -24,6 +24,8 @@ use crate::db::{literal, quote};
 
 mod objects;
 mod rename;
+#[cfg(test)]
+mod tests_fix;
 mod unbind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -484,6 +486,14 @@ impl<'a> Planner<'a> {
                 self.warn(warn::filegroups_unsupported());
             }
         }
+        // Live SQL Server 2008 and 2008 R2 databases on either side.
+        let old = |server: &ServerInfo| {
+            server.major_version > 0
+                && matches!(Features::of(server, 0, 0, false).family, super::features::Family::Sql2008 | super::features::Family::Sql2008R2)
+        };
+        if old(&self.src.server) || old(&self.tgt.server) {
+            self.warn(warn::old_server());
+        }
         if self.selective_xml {
             self.step(
                 Phase::PreTransaction,
@@ -556,6 +566,16 @@ impl<'a> Planner<'a> {
             }
             let sql = self.ex.user_type(&d.name, Check::Create, &ddl::create_type(s));
             self.group(Phase::CreateTypes, "Creating types", vec![sql]);
+            // Defaults and rules bound to the type itself.
+            if !self.opts.has(Opt::IgnoreBindings) {
+                let ty = literal(&d.name.quoted());
+                if let Some(df) = &s.bound_default {
+                    self.group(Phase::BindColumns, "Binding defaults to types", vec![format!("EXEC sp_bindefault {}, {ty}", literal(df))]);
+                }
+                if let Some(r) = &s.bound_rule {
+                    self.group(Phase::BindColumns, "Binding rules to types", vec![format!("EXEC sp_bindrule {}, {ty}", literal(r))]);
+                }
+            }
         }
     }
 
@@ -626,7 +646,7 @@ impl<'a> Planner<'a> {
         if self.rerunnable() {
             self.drop_xprop(p, levels);
         }
-        let sql = self.ex.extended_property(&p.name, levels, Check::Create, &ddl::add_xprop(p, levels));
+        let sql = ddl::xprop_variable(p) + &self.ex.extended_property(&p.name, levels, Check::Create, &ddl::add_xprop(p, levels));
         self.push(Step { group: true, try_catch: true, ..Step::new(Phase::ExtendedProperties, "Creating extended properties", vec![sql]) });
     }
 
@@ -977,6 +997,13 @@ impl<'a> Planner<'a> {
         if s.graph.is_some() && !self.has(Feature::Graph) {
             self.warn(warn::target::graph(&name));
         }
+        if s.remote_data_archive {
+            if !self.has(Feature::Stretch) {
+                self.warn(warn::stretch::unsupported(&name));
+            } else if !self.tgt.tables.iter().any(|t| t.remote_data_archive) {
+                self.warn(warn::stretch::make_sure_enabled());
+            }
+        }
         for c in &s.columns {
             if c.masking_function.is_some() && !self.has(Feature::DataMasking) && !self.opts.has(Opt::IgnoreDynamicDataMasking) {
                 self.warn(warn::target::masking(&name, &c.name));
@@ -1291,6 +1318,19 @@ impl<'a> Planner<'a> {
                 return Some(vec![warn::rebuild::filestream_filegroup(&name)]);
             }
         }
+        // FILESTREAM data needs a unique index on the ROWGUIDCOL column; changing or dropping
+        // that index means a rebuild.
+        if let Some(fs) = t.columns.iter().find(|c| c.filestream)
+            && let Some(guid) = t.columns.iter().find(|c| c.rowguidcol)
+        {
+            let single = |ix: &Index| (ix.unique || ix.primary_key || ix.unique_constraint) && ix.columns.len() == 1 && self.same(&ix.columns[0].name, &guid.name);
+            if let Some(ix) = t.indexes.iter().find(|ix| single(ix)) {
+                let kept = s.indexes.iter().any(|a| self.same(&a.name, &ix.name) && single(a) && a.kind == ix.kind && a.primary_key == ix.primary_key && a.unique_constraint == ix.unique_constraint);
+                if !kept {
+                    return Some(vec![warn::rebuild::filestream(&name, &fs.name)]);
+                }
+            }
+        }
         let modified: Vec<&str> = pairs
             .iter()
             .filter_map(|(a, b)| match (a, b) {
@@ -1405,9 +1445,15 @@ impl<'a> Planner<'a> {
             return;
         }
         let pairs = self.column_pairs(s, t);
-        if let Some(why) = self.rebuild_reason(s, t, &pairs) {
+        // Stretch Database comes off a table only through a rebuild.
+        let why = self.rebuild_reason(s, t, &pairs).or_else(|| (t.remote_data_archive && !s.remote_data_archive).then(Vec::new));
+        if let Some(why) = why {
             for w in why {
                 self.warn(w);
+            }
+            if t.remote_data_archive {
+                let name = t.object_name().to_string();
+                self.warn(if s.remote_data_archive { warn::stretch::rebuild_alter(&name) } else { warn::stretch::rebuild_removal(&name) });
             }
             if s.temporal.is_some() || t.temporal.is_some() {
                 self.rebuild_temporal(s, t, &pairs);
@@ -2515,11 +2561,12 @@ impl<'a> Planner<'a> {
                     }
                 },
             }
-            for r in &s.member_of {
-                let sql = self.member_sql(r, &s.name, true);
-                self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
+            if s.is_role() {
+                self.role_members(&s.name, None);
             }
-            self.database_permissions(&s.name, &[]);
+            if s.is_role() || !self.opts.has(Opt::IgnoreUsers) {
+                self.database_permissions(&s.name, &[]);
+            }
             if s.no_connect && !s.is_role() && !self.opts.has(Opt::IgnorePermissions) {
                 self.step(Phase::Permissions, "", vec![format!("REVOKE CONNECT FROM {q}")]);
             }
@@ -2571,26 +2618,50 @@ impl<'a> Planner<'a> {
                 sql.push(format!("ALTER AUTHORIZATION ON ROLE::{q} TO {}", quote(s.owner.as_deref().unwrap_or("dbo"))));
             }
             self.principal_step(s, String::new(), sql);
-            let added: Vec<&String> = s.member_of.iter().filter(|r| !t.member_of.iter().any(|x| self.same(x, r))).collect();
-            let removed: Vec<&String> = t.member_of.iter().filter(|r| !s.member_of.iter().any(|x| self.same(x, r))).collect();
-            for r in added {
-                let sql = self.member_sql(r, &s.name, true);
-                self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
+            if s.is_role() {
+                self.role_members(&s.name, Some(&t.name));
             }
-            for r in removed {
-                let sql = self.member_sql(r, &s.name, false);
-                self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
+            if s.is_role() || !self.opts.has(Opt::IgnoreUsers) {
+                let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &t.name)).cloned().collect();
+                self.database_permissions(&s.name, &existing);
             }
-            let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &t.name)).cloned().collect();
-            self.database_permissions(&s.name, &existing);
             if !s.is_role() && s.no_connect != t.no_connect && !self.opts.has(Opt::IgnorePermissions) {
                 let sql = if s.no_connect { format!("REVOKE CONNECT FROM {q}") } else { format!("GRANT CONNECT TO {q}") };
                 self.step(Phase::Permissions, "", vec![sql]);
             }
-        } else if s.is_none() && t.is_none() && (d.name.name.eq_ignore_ascii_case("public") || d.name.name.eq_ignore_ascii_case("guest")) {
-            // The fixed principals are not in the model; only their database permissions differ.
-            let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &d.name.name)).cloned().collect();
+        } else if s.is_none() && t.is_none() {
+            // Fixed roles and public / guest are not in the model: only their members and
+            // database permissions can differ.
+            if d.object_type == ObjectType::Role {
+                self.role_members(&d.name.name, Some(&tn.name));
+            }
+            let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &tn.name)).cloned().collect();
             self.database_permissions(&d.name.name, &existing);
+        }
+    }
+
+    /// ALTER ROLE ADD / DROP MEMBER so the role has the source's members (under IgnoreUsers,
+    /// only roles count as members). `target` is the role's name in the target, if it is there.
+    fn role_members(&mut self, role: &str, target: Option<&str>) {
+        let roles_only = self.opts.has(Opt::IgnoreUsers);
+        let members = |db: &'a Database, r: &str| -> Vec<&'a Principal> {
+            db.principals.iter().filter(|m| m.member_of.iter().any(|x| x == r) && (!roles_only || m.is_role())).collect()
+        };
+        let wanted = members(self.src, role);
+        let current = target.map(|t| members(self.tgt, t)).unwrap_or_default();
+        let bare = |n: &str| n.rsplit('\u{5c}').next().unwrap_or(n).to_string();
+        let same_member = |p: &Self, a: &str, b: &str| p.same(a, b) || p.same(&bare(a), &bare(b));
+        for m in &wanted {
+            if !current.iter().any(|c| same_member(self, &c.name, &m.name)) {
+                let sql = self.member_sql(role, &m.name, true);
+                self.group(Phase::RoleMembers, format!("Altering members of role {role}"), vec![sql]);
+            }
+        }
+        for c in &current {
+            if !wanted.iter().any(|m| same_member(self, &c.name, &m.name)) {
+                let sql = self.member_sql(target.unwrap_or(role), &c.name, false);
+                self.group(Phase::RoleMembers, format!("Altering members of role {role}"), vec![sql]);
+            }
         }
     }
 
@@ -3266,7 +3337,7 @@ mod tests {
         tgt.tables[0].columns[0].nullable = false;
         let s = script(&src, &tgt, &Options::default_set());
         assert!(s.sql.contains("CREATE TABLE [dbo].[RG_Recovery_8_T]"), "{}", s.sql);
-        assert!(has_warning(&s, "recovered from a failed deployment"));
+        assert!(has_warning(&s, "recovered from a failed QuillSQL Compare deployment"));
         assert!(has_warning(&s, "Cannot alter IDENTITY property on column [a] on table [dbo].[T]"), "{:?}", s.warnings);
     }
 
