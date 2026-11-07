@@ -834,9 +834,16 @@ pub fn apply(source: &Database, target: &Database, differences: &[Difference]) -
                         db.permissions.push(Permission { grantee: name.clone(), ..p.clone() });
                     }
                 }
-                if d.kind == DiffKind::OnlyIn2 {
+                if d.kind == DiffKind::OnlyIn2 || d.object_type == ObjectType::Role {
                     for p in &mut db.principals {
                         p.member_of.retain(|r| !eq(r, name));
+                    }
+                }
+                // Membership is compared on the role (fixed roles too): its members follow database 1.
+                if d.object_type == ObjectType::Role && from_source {
+                    let members: Vec<&str> = source.principals.iter().filter(|p| p.member_of.iter().any(|r| eq(r, &n1.name))).map(|p| p.name.as_str()).collect();
+                    for p in db.principals.iter_mut().filter(|p| members.iter().any(|m| eq(m, &p.name))) {
+                        p.member_of.push(name.clone());
                     }
                 }
             }
