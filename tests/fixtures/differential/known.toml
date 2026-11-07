@@ -236,12 +236,6 @@ reason = "Redgate's backup reader crashes on this backup (FormatException in its
 
 [[known]]
 scenario = "data-where-scripts"
-oracle = "check"
-finding = "data H3"
-reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-where-scripts"
 oracle = "converge-quill"
 finding = "data H3"
 reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
@@ -269,24 +263,6 @@ scenario = "data-where-scripts"
 oracle = "outcome"
 finding = "data H3"
 reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-where-live"
-oracle = "check"
-finding = "new"
-reason = "quill ignores Set*WhereClause actions whose TableName is Redgate's pair form [dbo].[Orders]:[dbo].[Orders] (the form Redgate needs), so the whole table is compared and deployed"
-
-[[known]]
-scenario = "data-where-live"
-oracle = "converge-redgate"
-finding = "new"
-reason = "quill ignores Set*WhereClause actions whose TableName is Redgate's pair form [dbo].[Orders]:[dbo].[Orders] (the form Redgate needs), so the whole table is compared and deployed"
-
-[[known]]
-scenario = "data-where-live"
-oracle = "diffset"
-finding = "new"
-reason = "quill ignores Set*WhereClause actions whose TableName is Redgate's pair form [dbo].[Orders]:[dbo].[Orders] (the form Redgate needs), so the whole table is compared and deployed"
 
 [[known]]
 scenario = "data-project-where-excludecolumns"
