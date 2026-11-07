@@ -45,6 +45,7 @@ pub async fn read(conn: &mut Connection) -> Result<Database, String> {
     r.partitions(conn).await?;
     r.foreign_keys(conn).await?;
     r.check_constraints(conn).await?;
+    r.file_tables(conn).await?;
     r.modules(conn, &v).await?;
     r.triggers(conn).await?;
     r.sequences(conn).await?;
@@ -102,6 +103,8 @@ pub(super) struct Reader {
     pub(super) modified: HashMap<ObjectName, String>,
     /// object_id → definition text from sys.sql_modules.
     pub(super) modules: HashMap<i32, Module>,
+    /// Explicit owners (sys.objects.principal_id) of schema-scoped objects.
+    pub(super) authorizations: HashMap<ObjectName, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +120,7 @@ pub(super) struct Module {
     pub(super) definition: Option<String>,
     pub(super) clr_method: Option<String>,
     pub(super) execute_as: Option<String>,
+    pub(super) settings: ModuleSettings,
 }
 
 // Column readers. Every query casts to a small set of types, but SQL Server picks the
@@ -207,13 +211,16 @@ impl Reader {
         let rows = db::query(
             conn,
             "SELECT o.object_id, RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name, o.parent_object_id,
-                    CONVERT(nvarchar(23), o.modify_date, 121)
+                    CONVERT(nvarchar(23), o.modify_date, 121), USER_NAME(o.principal_id)
              FROM sys.objects AS o WHERE o.type NOT IN ('S', 'IT')",
         )
         .await?;
         for r in &rows {
             self.objects.insert(i(r, 0), (s(r, 1), ObjectName::new(&s(r, 2), &s(r, 3))));
             self.modified.insert(ObjectName::new(&s(r, 2), &s(r, 3)), s(r, 5));
+            if let Some(owner) = text(r, 6) {
+                self.authorizations.insert(ObjectName::new(&s(r, 2), &s(r, 3)), owner);
+            }
             if i(r, 4) != 0 {
                 self.parents.insert(i(r, 0), i(r, 4));
             }
@@ -230,7 +237,10 @@ impl Reader {
             "SELECT SCHEMA_NAME(t.schema_id), t.name, t.is_table_type, t.is_assembly_type,
                     TYPE_NAME(t.system_type_id), CAST(t.max_length AS int), CAST(t.precision AS int),
                     CAST(t.scale AS int), t.is_nullable, tt.type_table_object_id, {mo},
-                    QUOTENAME(a.name) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(at.assembly_class) COLLATE DATABASE_DEFAULT
+                    QUOTENAME(a.name) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(at.assembly_class) COLLATE DATABASE_DEFAULT,
+                    USER_NAME(t.principal_id),
+                    QUOTENAME(OBJECT_SCHEMA_NAME(NULLIF(t.default_object_id, 0))) + N'.' + QUOTENAME(OBJECT_NAME(NULLIF(t.default_object_id, 0))),
+                    QUOTENAME(OBJECT_SCHEMA_NAME(NULLIF(t.rule_object_id, 0))) + N'.' + QUOTENAME(OBJECT_NAME(NULLIF(t.rule_object_id, 0)))
              FROM sys.types AS t
              LEFT JOIN sys.table_types AS tt ON tt.user_type_id = t.user_type_id
              LEFT JOIN sys.assembly_types AS at ON at.user_type_id = t.user_type_id
@@ -240,7 +250,7 @@ impl Reader {
             mo = v.pick(SQL2014, "ISNULL(tt.is_memory_optimized, 0)", "CAST(0 AS bit)"),
         );
         for r in db::query(conn, &sql).await? {
-            let mut ty = UserType { schema: s(&r, 0), name: s(&r, 1), nullable: flag(&r, 8), ..Default::default() };
+            let mut ty = UserType { schema: s(&r, 0), name: s(&r, 1), nullable: flag(&r, 8), owner: text(&r, 12), ..Default::default() };
             if flag(&r, 2) {
                 ty.kind = UserTypeKind::Table;
                 ty.memory_optimized = flag(&r, 10);
@@ -251,6 +261,8 @@ impl Reader {
                 ty.clr_class = text(&r, 11);
             } else {
                 ty.base_type = Some(system_type(&s(&r, 4), i(&r, 5), i(&r, 6), i(&r, 7)));
+                ty.bound_default = text(&r, 13);
+                ty.bound_rule = text(&r, 14);
             }
             self.db.types.push(ty);
         }
@@ -262,7 +274,8 @@ impl Reader {
             "SELECT t.object_id, SCHEMA_NAME(t.schema_id), t.name, t.lock_escalation_desc,
                     ds.name, RTRIM(ds.type), lob.name, fs.name,
                     {mo}, {durability}, {temporal}, {history}, {retention}, {node}, {edge},
-                    CASE WHEN ct.object_id IS NULL THEN NULL ELSE CAST(ct.is_track_columns_updated_on AS int) END
+                    CASE WHEN ct.object_id IS NULL THEN NULL ELSE CAST(ct.is_track_columns_updated_on AS int) END,
+                    t.large_value_types_out_of_row, {stretch}
              FROM sys.tables AS t
              JOIN sys.objects AS o ON o.object_id = t.object_id
              OUTER APPLY (SELECT TOP (1) i.data_space_id FROM sys.indexes AS i
@@ -287,6 +300,8 @@ impl Reader {
             edge = v.pick(SQL2017, "t.is_edge", "CAST(0 AS bit)"),
             user = USER_OBJECT,
             external = v.pick(SQL2016, "AND t.is_external = 0", ""),
+            // Stretch Database: SQL Server 2016 to 2022 only.
+            stretch = if (SQL2016..=16).contains(&v.major) { "t.is_remote_data_archive_enabled" } else { "CAST(0 AS bit)" },
         );
         let mut history: Vec<(usize, i32)> = Vec::new();
         for r in db::query(conn, &sql).await? {
@@ -297,6 +312,8 @@ impl Reader {
                 text_filegroup: text(&r, 6),
                 filestream_filegroup: text(&r, 7),
                 memory_optimized: flag(&r, 8),
+                large_value_types_out_of_row: flag(&r, 16),
+                remote_data_archive: flag(&r, 17),
                 ..Default::default()
             };
             t.storage.data_space = text(&r, 4);
@@ -816,7 +833,7 @@ impl Reader {
                         view.definition = definition.clone().unwrap_or_default();
                         view.encrypted = encrypted;
                         view.schema_bound = flag(&r, 7);
-                        view.settings = settings;
+                        view.settings = settings.clone();
                     }
                 }
                 "TR" | "TA" => {}
@@ -838,7 +855,7 @@ impl Reader {
                         definition: definition.clone().unwrap_or_default(),
                         encrypted,
                         schema_bound: flag(&r, 7),
-                        settings,
+                        settings: settings.clone(),
                         execute_as: text(&r, 8),
                         native_compilation: flag(&r, 9),
                         clr_method: text(&r, 10),
@@ -847,7 +864,7 @@ impl Reader {
                     });
                 }
             }
-            self.modules.insert(id, Module { definition, clr_method: text(&r, 10), execute_as: text(&r, 8) });
+            self.modules.insert(id, Module { definition, clr_method: text(&r, 10), execute_as: text(&r, 8), settings });
         }
         Ok(())
     }
@@ -875,6 +892,8 @@ impl Reader {
             let definition = module.and_then(|m| m.definition.clone());
             let clr_method = module.and_then(|m| m.clr_method.clone());
             let execute_as = module.and_then(|m| m.execute_as.clone());
+            // CLR triggers have no SET options of their own.
+            let settings = module.filter(|m| m.clr_method.is_none()).map(|m| m.settings.clone()).unwrap_or_default();
             let mut events = Vec::new();
             for (col, event) in [(6, "INSERT"), (7, "UPDATE"), (8, "DELETE")] {
                 if flag(&r, col) {
@@ -895,7 +914,7 @@ impl Reader {
                 not_for_replication: flag(&r, 5),
                 events,
                 order,
-                settings: ModuleSettings::default(),
+                settings,
                 clr_method,
                 execute_as,
             };
@@ -991,7 +1010,9 @@ impl Reader {
     async fn extended_properties(&mut self, conn: &mut Connection) -> Result<(), String> {
         let rows = db::query(
             conn,
-            "SELECT ep.class, ep.major_id, ep.minor_id, ep.name, CONVERT(nvarchar(max), ep.value),
+            "SELECT ep.class, ep.major_id, ep.minor_id, ep.name,
+                    CASE WHEN SQL_VARIANT_PROPERTY(ep.value, 'BaseType') IN ('binary', 'varbinary')
+                         THEN CONVERT(nvarchar(max), CONVERT(varbinary(max), ep.value), 1) ELSE CONVERT(nvarchar(max), ep.value) END,
                     CASE ep.class WHEN 3 THEN SCHEMA_NAME(ep.major_id)
                                   WHEN 6 THEN (SELECT SCHEMA_NAME(t.schema_id) + NCHAR(1) + t.name FROM sys.types AS t WHERE t.user_type_id = ep.major_id)
                                   WHEN 7 THEN (SELECT x.name COLLATE DATABASE_DEFAULT FROM sys.indexes AS x WHERE x.object_id = ep.major_id AND x.index_id = ep.minor_id)
@@ -1006,20 +1027,42 @@ impl Reader {
                                   WHEN 18 THEN (SELECT b.name COLLATE DATABASE_DEFAULT FROM sys.remote_service_bindings AS b WHERE b.remote_service_binding_id = ep.major_id)
                                   WHEN 19 THEN (SELECT r.name COLLATE DATABASE_DEFAULT FROM sys.routes AS r WHERE r.route_id = ep.major_id)
                                   WHEN 20 THEN (SELECT d.name COLLATE DATABASE_DEFAULT FROM sys.partition_schemes AS d WHERE d.data_space_id = ep.major_id)
-                                  WHEN 21 THEN (SELECT f.name COLLATE DATABASE_DEFAULT FROM sys.partition_functions AS f WHERE f.function_id = ep.major_id) END
+                                  WHEN 21 THEN (SELECT f.name COLLATE DATABASE_DEFAULT FROM sys.partition_functions AS f WHERE f.function_id = ep.major_id)
+                                  WHEN 4 THEN (SELECT dp.name COLLATE DATABASE_DEFAULT FROM sys.database_principals AS dp WHERE dp.principal_id = ep.major_id)
+                                  WHEN 8 THEN (SELECT SCHEMA_NAME(t.schema_id) + NCHAR(1) + t.name COLLATE DATABASE_DEFAULT + NCHAR(1) + c.name COLLATE DATABASE_DEFAULT
+                                               FROM sys.table_types AS t JOIN sys.columns AS c ON c.object_id = t.type_table_object_id AND c.column_id = ep.minor_id
+                                               WHERE t.user_type_id = ep.major_id) END,
+                    CONVERT(nvarchar(128), SQL_VARIANT_PROPERTY(ep.value, 'BaseType'))
              FROM sys.extended_properties AS ep
-             WHERE ep.class IN (0, 1, 2, 3, 5, 6, 7, 10, 15, 16, 17, 18, 19, 20, 21)
+             WHERE ep.class IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 15, 16, 17, 18, 19, 20, 21)
              ORDER BY ep.class, ep.major_id, ep.minor_id, ep.name",
         )
         .await?;
         for r in rows {
-            let mut p = ExtendedProperty { name: s(&r, 3), value: text(&r, 4), ..Default::default() };
+            let mut p = ExtendedProperty { name: s(&r, 3), value: text(&r, 4), value_type: text(&r, 6), ..Default::default() };
             let (major, minor, extra) = (i(&r, 1), i(&r, 2), text(&r, 5));
             match i(&r, 0) {
                 0 => p.class = "DATABASE".into(),
                 3 => {
                     p.class = "SCHEMA".into();
                     p.schema = extra;
+                }
+                // Users and roles: level 0 USER.
+                4 => {
+                    let Some(name) = extra else { continue };
+                    p.class = "USER".into();
+                    p.object = Some(name);
+                }
+                // Columns of table types: TYPE at level 1, COLUMN at level 2.
+                8 => {
+                    let Some(parts) = extra else { continue };
+                    let mut it = parts.splitn(3, '\u{1}');
+                    let (Some(schema), Some(name), Some(column)) = (it.next(), it.next(), it.next()) else { continue };
+                    p.class = "TYPE".into();
+                    p.schema = Some(schema.to_string());
+                    p.object = Some(name.to_string());
+                    p.minor_type = Some("COLUMN".into());
+                    p.minor_name = Some(column.to_string());
                 }
                 6 | 10 => {
                     let Some((schema, name)) = extra.as_deref().and_then(|e| e.split_once('\u{1}')) else { continue };
@@ -1169,12 +1212,13 @@ impl Reader {
                                  WHEN 24 THEN (SELECT k.name COLLATE DATABASE_DEFAULT FROM sys.symmetric_keys AS k WHERE k.symmetric_key_id = p.major_id)
                                  WHEN 25 THEN (SELECT c.name COLLATE DATABASE_DEFAULT FROM sys.certificates AS c WHERE c.certificate_id = p.major_id)
                                  WHEN 26 THEN (SELECT k.name COLLATE DATABASE_DEFAULT FROM sys.asymmetric_keys AS k WHERE k.asymmetric_key_id = p.major_id)
-                                 WHEN 29 THEN (SELECT f.name COLLATE DATABASE_DEFAULT FROM sys.fulltext_stoplists AS f WHERE f.stoplist_id = p.major_id) END
+                                 WHEN 29 THEN (SELECT f.name COLLATE DATABASE_DEFAULT FROM sys.fulltext_stoplists AS f WHERE f.stoplist_id = p.major_id)
+                                 WHEN 31 THEN (SELECT l.name COLLATE DATABASE_DEFAULT FROM sys.registered_search_property_lists AS l WHERE l.property_list_id = p.major_id) END
              FROM sys.database_permissions AS p
              JOIN sys.database_principals AS g ON g.principal_id = p.grantee_principal_id
-             WHERE (p.class IN (0, 1, 3, 5, 6, 10, 15, 16, 17, 18, 19, 23, 24, 25, 26, 29))
+             WHERE (p.class IN (0, 1, 3, 5, 6, 10, 15, 16, 17, 18, 19, 23, 24, 25, 26, 29, 31))
                AND (p.minor_id = 0 OR p.class = 1) AND g.name NOT IN (N'dbo', N'sys', N'INFORMATION_SCHEMA')
-               AND NOT (p.class = 0 AND p.permission_name = 'CONNECT' AND p.state = 'G')
+               AND NOT (p.class = 0 AND p.permission_name = 'CONNECT' AND p.state = 'G' AND g.name <> N'guest')
              ORDER BY p.class, p.major_id, g.name, p.permission_name, p.minor_id",
         )
         .await?;
@@ -1215,6 +1259,48 @@ impl Reader {
                 }
             }
             self.db.permissions.push(p);
+        }
+        Ok(())
+    }
+
+    /// FileTables: their options, and the constraints and indexes SQL Server made for them,
+    /// which are left out (they come with `AS FILETABLE`).
+    async fn file_tables(&mut self, conn: &mut Connection) -> Result<(), String> {
+        if matches!(self.db.server.engine_edition, 5 | 8) {
+            return Ok(());
+        }
+        let rows = db::query(
+            conn,
+            "SELECT f.object_id, f.directory_name, f.filename_collation_name FROM sys.filetables AS f",
+        )
+        .await?;
+        for r in rows {
+            let Some(Owner::Table(t)) = self.owners.get(&i(&r, 0)).copied() else { continue };
+            self.db.tables[t].file_table = Some(FileTable { directory: s(&r, 1), filename_collation: s(&r, 2), primary_key: None });
+        }
+        let rows = db::query(
+            conn,
+            "SELECT d.parent_object_id, o.name, RTRIM(o.type) FROM sys.filetable_system_defined_objects AS d
+             JOIN sys.objects AS o ON o.object_id = d.object_id",
+        )
+        .await?;
+        for r in rows {
+            let Some(Owner::Table(t)) = self.owners.get(&i(&r, 0)).copied() else { continue };
+            let (name, kind) = (s(&r, 1), s(&r, 2));
+            let table = &mut self.db.tables[t];
+            if kind == "PK"
+                && let Some(f) = table.file_table.as_mut()
+            {
+                f.primary_key = Some(name.clone());
+            }
+            table.indexes.retain(|x| x.name != name);
+            table.check_constraints.retain(|x| x.name != name);
+            table.foreign_keys.retain(|x| x.name != name);
+            for c in &mut table.columns {
+                if c.default.as_ref().is_some_and(|d| d.name == name) {
+                    c.default = None;
+                }
+            }
         }
         Ok(())
     }
@@ -1299,6 +1385,28 @@ impl Reader {
         for r in &mut db.routines {
             r.modified = modified(&r.schema, &r.name);
         }
+        let owner = |schema: &str, name: &str| self.authorizations.get(&ObjectName::new(schema, name)).cloned();
+        for t in &mut db.tables {
+            t.owner = owner(&t.schema, &t.name);
+        }
+        for v in &mut db.views {
+            v.owner = owner(&v.schema, &v.name);
+        }
+        for r in &mut db.routines {
+            r.owner = owner(&r.schema, &r.name);
+        }
+        for x in &mut db.sequences {
+            x.owner = owner(&x.schema, &x.name);
+        }
+        for x in &mut db.synonyms {
+            x.owner = owner(&x.schema, &x.name);
+        }
+        for x in &mut db.security_policies {
+            x.owner = owner(&x.schema, &x.name);
+        }
+        for x in &mut db.external_tables {
+            x.owner = owner(&x.schema, &x.name);
+        }
         for t in &mut db.tables {
             if t.graph.is_some() {
                 graph_indexes(t);
@@ -1346,6 +1454,7 @@ fn securable_class(class: i32) -> &'static str {
         25 => "CERTIFICATE",
         26 => "ASYMMETRIC KEY",
         29 => "FULLTEXT STOPLIST",
+        31 => "SEARCH PROPERTY LIST",
         _ => "OBJECT",
     }
 }
