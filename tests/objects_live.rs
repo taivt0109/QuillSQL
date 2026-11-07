@@ -306,6 +306,40 @@ fn objects_round_trip_through_scripts_folders() {
     server.drop(b);
 }
 
+/// Keys, a certificate and a user for it on top of the fixture.
+const KEYS: &str = "CREATE CERTIFICATE QuillCert ENCRYPTION BY PASSWORD = 'Str0ng!Pass1' WITH SUBJECT = 'Quill', EXPIRY_DATE = '20300101';
+GO
+CREATE SYMMETRIC KEY QuillKey WITH ALGORITHM = AES_256 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+GO
+CREATE ASYMMETRIC KEY QuillAsym WITH ALGORITHM = RSA_2048 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+GO
+CREATE USER QuillCertUser FOR CERTIFICATE QuillCert;";
+
+#[test]
+fn objects_round_trip_through_snapshots() {
+    use quillsql::sources::{snp, snp_write};
+    let Some(server) = server() else { return };
+    let a = "QD_objects_Snap";
+    server.create(a, &format!("{}\nGO\n{KEYS}", objects()));
+    let live = catalog::read_database(&server.spec(a)).unwrap();
+    let identical = |x: &catalog::Database, opts: &Options, what: &str| {
+        let c = schema::compare(x, &live, opts, &Mappings::default());
+        let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal).collect();
+        assert!(left.is_empty(), "{what}: {left:#?}");
+    };
+    // Ours, keys and certificates included.
+    let ours = snp::read(&snp_write::write(&live)).unwrap();
+    identical(&ours, &Options::default_set().without(Opt::IgnoreFileGroups), "our snapshot");
+    assert_eq!(ours.certificates, live.certificates);
+    assert_eq!(ours.symmetric_keys, live.symmetric_keys);
+    assert_eq!(ours.asymmetric_keys, live.asymmetric_keys);
+    // SQL Compare's snapshot of the same script, run by sqlcmd (QUOTED_IDENTIFIER off; keys
+    // made then differ).
+    let theirs = snp::read(include_bytes!("fixtures/objects/rg_objects.snp")).unwrap();
+    identical(&theirs, &options().with(Opt::IgnoreQuotedIdentifiersAndAnsiNullSettings), "SQL Compare snapshot");
+    server.drop(a);
+}
+
 fn count(server: &Server, database: &str, sql: &str) -> String {
     let rt = db::runtime().unwrap();
     rt.block_on(async {
