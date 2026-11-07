@@ -251,6 +251,13 @@ namespace QuillSql.Vsix
         private UIElement Suggestions()
         {
             var s = _settings;
+            var prefixes = new TextBox { Text = s.IgnoredPrefixes ?? "", Width = 240, MinHeight = 24, VerticalContentAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+            var ownAliases = new TextBox { Text = s.OwnAliases ?? "", AcceptsReturn = true, FontFamily = Theme.Mono, Height = 80, Width = 360, HorizontalAlignment = HorizontalAlignment.Left, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 4, 0, 0) };
+            _apply.Add(() =>
+            {
+                s.IgnoredPrefixes = prefixes.Text.Trim();
+                s.OwnAliases = ownAliases.Text.Replace("\r", "").Trim();
+            });
             return Stack(
                 Check("Show suggestions automatically as you type", s.AutoShowSuggestions, v => s.AutoShowSuggestions = v, "When off, press Ctrl+Space to open the list."),
                 Heading("Insert the selected suggestion with"),
@@ -265,8 +272,14 @@ namespace QuillSql.Vsix
                 Check("Write AS before the alias", s.AliasWithAs, v => s.AliasWithAs = v),
                 Check("Insert object names with their schema (dbo.Customers)", s.QualifyObjectNames, v => s.QualifyObjectNames = v),
                 Check("Fill in the whole definition after ALTER PROCEDURE, VIEW or FUNCTION", s.GenerateAlter, v => s.GenerateAlter = v),
+                Heading("Aliases"),
+                Row(Label("Prefixes left out of aliases"), prefixes),
+                Note("Separated by commas. With tbl, tblCustomer gets the alias c instead of tc."),
+                Label("Your own aliases, one \"Table = alias\" a line"),
+                ownAliases,
                 Heading("List"),
                 Check("Show the definition of the selected table, view or procedure next to the list", s.ShowDefinitionBox, v => s.ShowDefinitionBox = v),
+                Check("Show the parameters of a function or procedure while typing its arguments", s.ParameterHints, v => s.ParameterHints = v),
                 Check("List sys and INFORMATION_SCHEMA views before their schema is typed", s.ShowSystemObjects, v => s.ShowSystemObjects = v),
                 ButtonFor("Refresh suggestions now", (o, e) =>
                 {
@@ -598,7 +611,7 @@ namespace QuillSql.Vsix
                 }
             };
             return Stack(
-                Note("Query windows whose \"server / database\" contains the text get a colored document tab and a colored bar above the editor. The most specific match wins: a database before its server, a server before a word. Tip: right-click a server or database in Object Explorer to color it."),
+                Note("Query windows whose \"server / database\" contains the text get a colored document tab. The most specific match wins: a database before its server, a server before a word. Tip: right-click a server or database in Object Explorer to color it."),
                 presets,
                 grid,
                 Note("Examples: prod #C62828 PRODUCTION · uat #EF6C00 UAT · test #2E7D32 TEST. Delete a row with the Delete key."));
@@ -608,10 +621,15 @@ namespace QuillSql.Vsix
         {
             var model = new ComboBox { IsEditable = true, ItemsSource = new[] { "", "sonnet", "opus", "haiku" }, Text = _ai.Model ?? "", Width = 240, MinHeight = 24, HorizontalAlignment = HorizontalAlignment.Left };
             var language = new TextBox { Text = _ai.Language ?? "", Width = 240, MinHeight = 24, VerticalContentAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+            var timeout = new TextBox { Text = _ai.ToolTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture), Width = 80, MinHeight = 24, VerticalContentAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
             _apply.Add(() =>
             {
                 _ai.Model = model.Text.Trim();
                 _ai.Language = language.Text.Trim();
+                if (int.TryParse(timeout.Text.Trim(), out var seconds))
+                {
+                    _ai.ToolTimeout = Math.Max(10, Math.Min(600, seconds));
+                }
             });
             var claude = AiAssistant.FindClaude();
             var status = new StackPanel { Orientation = Orientation.Horizontal };
@@ -625,7 +643,9 @@ namespace QuillSql.Vsix
                 statusPill,
                 Row(Label("Model (empty: your default)"), model),
                 Row(Label("Answer language"), language),
-                Note("For example Vietnamese or English. Explanations and SQL comments are written in it."));
+                Note("For example Vietnamese or English. Explanations and SQL comments are written in it."),
+                Row(Label("Time limit of a database lookup (seconds)"), timeout),
+                Note("How long one lookup of the AI (a search, a plan, Query Store...) may run, from 10 to 600. Raise it for large databases; keep it low on busy production servers. Measuring a query may take twice as long."));
         }
 
         private UIElement Snippets()

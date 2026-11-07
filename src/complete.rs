@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::keywords::{is_reserved, FUNCTIONS};
+use crate::keywords::{is_reserved, DATA_TYPES, FUNCTIONS};
 use crate::lexer::{lex_partial, Kind, Token};
 use crate::snippets::Snippet;
 use crate::transform::{missing_terminators, upper_words};
@@ -18,6 +18,8 @@ pub struct Schema {
     pub default_schema: String,
     pub schemas: Vec<String>,
     pub databases: Vec<String>,
+    /// Linked servers, for four-part names.
+    pub linked_servers: Vec<String>,
     pub objects: Vec<DbObject>,
     pub foreign_keys: Vec<ForeignKey>,
 }
@@ -43,6 +45,9 @@ pub struct DbObject {
     pub kind: String,
     pub columns: Vec<Column>,
     pub params: Vec<Param>,
+    /// Another database's object, named with the database (`Other.dbo.t`); empty for this one's.
+    #[serde(skip)]
+    pub database: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -79,8 +84,77 @@ pub struct Completion {
     /// UTF-16 offset where the replaced text starts; it ends at the caret.
     pub start: usize,
     pub items: Vec<Item>,
+    /// The item to select as the list opens: one that matches what was typed for sure (the whole
+    /// word, its start, or the initials of its parts). None when the matches are only guesses,
+    /// so Enter and Tab keep their usual meaning instead of inserting a guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<usize>,
 }
 
+/// How well a label matches what was typed: 0 the whole word, 1 its start, 2 the initials of
+/// its parts (`cid` for CustomerId, `od` for OrderDetail), 3 somewhere inside; None for no match.
+fn match_quality(label: &str, typed: &str) -> Option<u8> {
+    let label = label.trim_start_matches('@');
+    let lower = label.to_ascii_lowercase();
+    let needle = typed.trim_start_matches('@').to_ascii_lowercase();
+    if needle.is_empty() {
+        return Some(1);
+    }
+    if lower == needle {
+        return Some(0);
+    }
+    if lower.starts_with(&needle) {
+        return Some(1);
+    }
+    if camel_match(&label_parts(label), &needle.chars().collect::<Vec<_>>()) {
+        return Some(2);
+    }
+    if needle.len() >= 2 && lower.contains(&needle) {
+        return Some(3);
+    }
+    None
+}
+
+/// The parts of a name, lowercased: words split at underscores, dots, spaces and case changes
+/// (CustomerId: customer, id; HTTPStatus: http, status).
+fn label_parts(label: &str) -> Vec<Vec<char>> {
+    let chars: Vec<char> = label.chars().collect();
+    let mut parts: Vec<Vec<char>> = Vec::new();
+    let mut current = Vec::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        let previous = if i > 0 { chars[i - 1] } else { ' ' };
+        let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+        let new_part = c.is_uppercase() && (previous.is_lowercase() || previous.is_ascii_digit() || (previous.is_uppercase() && next_lower));
+        if new_part && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+        current.extend(c.to_lowercase());
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Whether the typed letters start the first part and then, in order, the start of later parts:
+/// each part used gives one or more of its first letters (`cid`: C-ustomer, I-d; `custid`).
+fn camel_match(parts: &[Vec<char>], needle: &[char]) -> bool {
+    fn rest(parts: &[Vec<char>], needle: &[char]) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        let Some((part, later)) = parts.split_first() else { return false };
+        let most = part.len().min(needle.len());
+        (1..=most).rev().any(|take| part[..take] == needle[..take] && (take == needle.len() || (0..later.len()).any(|skip| rest(&later[skip..], &needle[take..]))))
+    }
+    parts.len() > 1 && rest(parts, needle)
+}
 const MAX_ITEMS: usize = 300;
 
 const STATEMENT_KEYWORDS: &[&str] = &[
@@ -88,11 +162,436 @@ const STATEMENT_KEYWORDS: &[&str] = &[
     "BEGIN", "END", "WHILE", "RETURN", "CREATE", "ALTER", "DROP", "TRUNCATE", "PRINT", "USE",
 ];
 
+/// Keywords inside conditions, select lists and the clauses that follow them.
+const EXPRESSION_KEYWORDS: &[&str] = &[
+    "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END", "AS",
+    "ASC", "DESC", "DISTINCT", "TOP", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "UNION", "UNION ALL", "JOIN",
+    "INNER JOIN", "LEFT JOIN", "OVER", "PARTITION BY", "COLLATE", "OFFSET", "FETCH",
+];
+
 /// What may follow a table and its alias in FROM.
 const CLAUSE_KEYWORDS: &[&str] = &[
     "WHERE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "CROSS APPLY", "OUTER APPLY",
     "GROUP BY", "ORDER BY", "HAVING", "UNION", "UNION ALL", "EXCEPT", "INTERSECT", "OPTION",
 ];
+
+/// What may begin a statement.
+const STATEMENT_START: &[&str] = &[
+    "SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "DECLARE", "SET", "EXEC", "IF", "BEGIN", "END", "WHILE", "RETURN",
+    "CREATE", "ALTER", "DROP", "TRUNCATE TABLE", "PRINT", "USE", "MERGE", "BEGIN TRAN", "COMMIT", "ROLLBACK", "RAISERROR",
+    "THROW", "WAITFOR", "OPEN", "FETCH", "CLOSE", "DEALLOCATE", "GRANT", "REVOKE", "DENY", "DBCC", "BREAK", "CONTINUE",
+];
+
+/// What may follow a complete operand in a condition.
+const CONDITION_NEXT: &[&str] = &["AND", "OR", "IS", "IN", "LIKE", "BETWEEN", "NOT"];
+
+const CASE_NEXT: &[&str] = &["THEN", "WHEN", "ELSE", "END", "AND", "OR", "IS", "IN", "LIKE", "BETWEEN", "NOT"];
+
+/// What may follow a condition in WHERE, ON or HAVING, besides more of it.
+const AFTER_CONDITION: &[&str] = &["GROUP BY", "ORDER BY", "HAVING", "UNION", "UNION ALL", "EXCEPT", "INTERSECT", "OPTION"];
+
+const AFTER_JOIN_CONDITION: &[&str] = &[
+    "WHERE", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "CROSS APPLY", "OUTER APPLY",
+];
+
+const CREATE_WHAT: &[&str] = &[
+    "TABLE", "PROCEDURE", "VIEW", "FUNCTION", "INDEX", "NONCLUSTERED INDEX", "CLUSTERED INDEX", "UNIQUE INDEX",
+    "TRIGGER", "OR ALTER", "SCHEMA", "TYPE", "SYNONYM", "SEQUENCE", "STATISTICS", "DATABASE", "LOGIN", "USER", "ROLE",
+];
+
+const ALTER_WHAT: &[&str] = &[
+    "TABLE", "PROCEDURE", "VIEW", "FUNCTION", "INDEX", "TRIGGER", "DATABASE", "SCHEMA", "SEQUENCE", "LOGIN", "USER", "ROLE",
+];
+
+const DROP_WHAT: &[&str] = &[
+    "TABLE", "PROCEDURE", "VIEW", "FUNCTION", "INDEX", "TRIGGER", "SCHEMA", "TYPE", "SYNONYM", "SEQUENCE", "STATISTICS",
+    "DATABASE", "LOGIN", "USER", "ROLE",
+];
+
+const BEGIN_NEXT: &[&str] = &["TRAN", "TRANSACTION", "TRY", "CATCH", "DISTRIBUTED TRANSACTION"];
+
+const SET_OPTIONS: &[&str] = &[
+    "NOCOUNT ON", "XACT_ABORT ON", "TRANSACTION ISOLATION LEVEL", "STATISTICS IO ON", "STATISTICS TIME ON",
+    "IDENTITY_INSERT", "ANSI_NULLS ON", "QUOTED_IDENTIFIER ON", "ROWCOUNT", "LOCK_TIMEOUT", "DEADLOCK_PRIORITY",
+    "DATEFORMAT", "DATEFIRST", "LANGUAGE", "ARITHABORT ON", "SHOWPLAN_XML ON", "STATISTICS XML ON",
+];
+
+const TABLE_HINTS: &[&str] = &[
+    "NOLOCK", "READUNCOMMITTED", "UPDLOCK", "ROWLOCK", "HOLDLOCK", "READPAST", "TABLOCK", "TABLOCKX", "PAGLOCK",
+    "XLOCK", "NOWAIT", "SERIALIZABLE", "REPEATABLEREAD", "READCOMMITTED", "READCOMMITTEDLOCK", "INDEX", "FORCESEEK",
+    "FORCESCAN", "NOEXPAND", "SNAPSHOT",
+];
+
+const QUERY_HINTS: &[&str] = &[
+    "RECOMPILE", "MAXDOP", "OPTIMIZE FOR UNKNOWN", "OPTIMIZE FOR", "FORCE ORDER", "HASH JOIN", "LOOP JOIN",
+    "MERGE JOIN", "HASH GROUP", "ORDER GROUP", "MAXRECURSION", "KEEPFIXED PLAN", "FAST", "USE HINT", "QUERYTRACEON",
+];
+
+/// Data types listed first, the ones most written.
+const COMMON_TYPES: &[&str] = &[
+    "INT", "NVARCHAR", "VARCHAR", "DATETIME", "DATETIME2", "DATE", "BIT", "DECIMAL", "BIGINT", "UNIQUEIDENTIFIER",
+    "MONEY", "NUMERIC", "FLOAT", "CHAR", "NCHAR", "TINYINT", "SMALLINT", "TIME", "VARBINARY", "XML",
+];
+
+/// Built-in functions listed first among those matching, the ones most called.
+const COMMON_FUNCTIONS: &[&str] = &[
+    "COUNT", "SUM", "MAX", "MIN", "AVG", "ISNULL", "COALESCE", "CAST", "CONVERT", "GETDATE", "DATEADD", "DATEDIFF",
+    "LEN", "SUBSTRING", "REPLACE", "LTRIM", "RTRIM", "TRIM", "UPPER", "LOWER", "ROW_NUMBER", "CONCAT", "FORMAT", "IIF",
+    "NULLIF", "ROUND", "ABS", "YEAR", "MONTH", "DAY", "DATEPART", "DATENAME", "EOMONTH", "SYSDATETIME", "GETUTCDATE",
+    "NEWID", "STRING_AGG", "STRING_SPLIT", "CHARINDEX", "LEFT", "RIGHT", "STUFF", "RANK", "DENSE_RANK", "LAG", "LEAD",
+    "TRY_CAST", "TRY_CONVERT", "OBJECT_ID", "OBJECT_NAME", "DB_NAME", "SCOPE_IDENTITY", "COUNT_BIG",
+];
+
+/// What comes next at the caret when only certain words can: keywords, or a data type.
+enum Next {
+    /// Keywords, most likely first; `true` adds the declared variables (after `SET`).
+    Words(Vec<&'static str>, bool),
+    /// Data types, then these words.
+    Types(Vec<&'static str>),
+    /// The columns of the table named by tokens `[from, to)`.
+    Columns(usize, usize),
+    /// Tables and views.
+    Tables,
+    /// Any object a permission is granted on.
+    Securables,
+}
+
+const ALTER_TABLE_NEXT: &[&str] = &[
+    "ADD", "ALTER COLUMN", "DROP COLUMN", "ADD CONSTRAINT", "DROP CONSTRAINT", "WITH CHECK ADD CONSTRAINT", "NOCHECK CONSTRAINT",
+    "CHECK CONSTRAINT", "ENABLE TRIGGER", "DISABLE TRIGGER", "REBUILD", "SWITCH TO", "SET",
+];
+
+const CONSTRAINT_KINDS: &[&str] = &["PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK", "DEFAULT"];
+
+/// What may follow a column's data type in `CREATE TABLE`.
+const COLUMN_OPTIONS: &[&str] = &[
+    "NOT NULL", "NULL", "PRIMARY KEY", "IDENTITY(1,1)", "DEFAULT", "UNIQUE", "CONSTRAINT", "REFERENCES", "CHECK", "COLLATE",
+];
+
+const PERMISSIONS: &[&str] = &[
+    "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE", "ALTER", "CONTROL", "VIEW DEFINITION", "REFERENCES", "TAKE OWNERSHIP",
+];
+
+const MERGE_WHEN: &[&str] = &["MATCHED", "NOT MATCHED", "NOT MATCHED BY SOURCE", "NOT MATCHED BY TARGET"];
+
+/// The tokens `[at, end)` of the (multipart) name starting at `at`.
+fn name_range(head: &[Token], at: usize, limit: usize) -> (usize, usize) {
+    let mut j = at;
+    if j < limit && (is_name(&head[j]) || head[j].kind == Kind::Variable) {
+        j += 1;
+        while j + 1 < limit && head[j].kind == Kind::Dot && is_name(&head[j + 1]) {
+            j += 2;
+        }
+    }
+    (at, j)
+}
+
+/// Suggestions inside DDL, permissions and MERGE: what `ALTER TABLE t`, `CREATE INDEX ... ON t (`,
+/// `GRANT ... ON`, a column of `CREATE TABLE` or `WHEN` in MERGE go on with.
+fn ddl_words(head: &[Token], k: usize, lo: usize, p: usize) -> Option<Next> {
+    let prev = |j: usize| (lo..j).rev().find(|&i| !head[i].is_comment());
+    let next = |j: usize| (j + 1..k).find(|&i| !head[i].is_comment());
+    let word = |i: Option<usize>| i.filter(|&i| head[i].kind == Kind::Word).map(|i| head[i].text.to_ascii_uppercase()).unwrap_or_default();
+    let words = |w: &[&'static str]| Some(Next::Words(w.to_vec(), false));
+    let first_at = (lo..k).find(|&i| !head[i].is_comment())?;
+    let first = word(Some(first_at));
+    let second = next(first_at);
+    let (pw, qw) = (word(Some(p)), word(prev(p)));
+    let open = opener(head, lo, p + 1);
+    let before_open = open.and_then(prev);
+    // The name before `(` at `o`, as a token range.
+    let name_before = |o: usize| -> Option<(usize, usize)> {
+        let mut j = prev(o)?;
+        if !is_name(&head[j]) {
+            return None;
+        }
+        while j >= 2 && head[j - 1].kind == Kind::Dot && is_name(&head[j - 2]) {
+            j -= 2;
+        }
+        Some((j, o))
+    };
+
+    match first.as_str() {
+        "ALTER" if word(second) == "TABLE" => {
+            let (ts, te) = name_range(head, next(second?)?, k);
+            if te == ts {
+                return None;
+            }
+            if p + 1 == te {
+                return words(ALTER_TABLE_NEXT);
+            }
+            match pw.as_str() {
+                "COLUMN" if matches!(qw.as_str(), "ALTER" | "DROP") => return Some(Next::Columns(ts, te)),
+                "ADD" => return words(&["CONSTRAINT", "PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK", "DEFAULT", "INDEX"]),
+                "CONSTRAINT" => return words(&[]),
+                "ENABLE" | "DISABLE" => return words(&["TRIGGER"]),
+                "REFERENCES" => return Some(Next::Tables),
+                "PRIMARY" | "FOREIGN" => return words(&["KEY"]),
+                _ => {}
+            }
+            if is_name(&head[p]) && qw == "CONSTRAINT" && word(prev(p).and_then(prev)) == "ADD" {
+                return words(CONSTRAINT_KINDS);
+            }
+            if matches!(head[p].kind, Kind::LParen | Kind::Comma)
+                && let Some(o) = open
+            {
+                if matches!(word(before_open).as_str(), "KEY" | "UNIQUE" | "CLUSTERED" | "NONCLUSTERED") {
+                    return Some(Next::Columns(ts, te));
+                }
+                // `REFERENCES other (`: the columns of the other table.
+                let (s, e) = name_before(o)?;
+                return (word(prev(s)) == "REFERENCES").then_some(Next::Columns(s, e));
+            }
+            let key_list = |o: Option<usize>| o.and_then(prev).is_some_and(|b| word(Some(b)) == "KEY") && word(o.and_then(prev).and_then(prev)) == "FOREIGN";
+            if head[p].kind == Kind::RParen && key_list(opener(head, lo, p)) {
+                return words(&["REFERENCES"]);
+            }
+            None
+        }
+        "CREATE" if (first_at..p).any(|i| word(Some(i)) == "INDEX") => {
+            let on = (first_at..=p).find(|&i| word(Some(i)) == "ON")?;
+            if p == on {
+                return Some(Next::Tables);
+            }
+            let (ts, te) = name_range(head, next(on)?, k);
+            if matches!(head[p].kind, Kind::LParen | Kind::Comma)
+                && let Some(o) = open
+                && (o == te || word(before_open) == "INCLUDE")
+            {
+                return Some(Next::Columns(ts, te));
+            }
+            if head[p].kind == Kind::RParen {
+                return words(&["INCLUDE", "WHERE", "WITH"]);
+            }
+            None
+        }
+        "CREATE" | "DECLARE" if open.is_some() => {
+            let o = open?;
+            // Inside the column list of `CREATE TABLE t (` or `DECLARE @t TABLE (`.
+            let b = before_open?;
+            let table = word(Some(b)) == "TABLE" || (first == "CREATE" && word(name_before(o).and_then(|(s, _)| prev(s))) == "TABLE");
+            if !table {
+                return None;
+            }
+            let element = (o..p).rev().find(|&i| head[i].kind == Kind::Comma && opener(head, lo, i + 1) == Some(o)).unwrap_or(o);
+            if p == element {
+                return words(&["CONSTRAINT", "PRIMARY KEY", "UNIQUE", "INDEX", "FOREIGN KEY", "CHECK"]);
+            }
+            let starts = word(next(element));
+            if matches!(starts.as_str(), "CONSTRAINT" | "PRIMARY" | "UNIQUE" | "INDEX" | "FOREIGN" | "CHECK") {
+                return match pw.as_str() {
+                    "PRIMARY" | "FOREIGN" => words(&["KEY"]),
+                    "REFERENCES" => Some(Next::Tables),
+                    _ if qw == "CONSTRAINT" => words(CONSTRAINT_KINDS),
+                    _ => None,
+                };
+            }
+            // `Id int |`: the column's options; the type itself comes from next_words.
+            if next(element).and_then(next).is_some_and(|ty| p >= ty) {
+                return match pw.as_str() {
+                    "NOT" => words(&["NULL"]),
+                    "PRIMARY" => words(&["KEY"]),
+                    "REFERENCES" => Some(Next::Tables),
+                    "DEFAULT" | "IDENTITY" | "COLLATE" | "CHECK" => words(&[]),
+                    _ if head[p].kind == Kind::LParen => None,
+                    _ => words(COLUMN_OPTIONS),
+                };
+            }
+            None
+        }
+        "GRANT" | "REVOKE" | "DENY" => {
+            let on = (first_at..p).find(|&i| word(Some(i)) == "ON");
+            let to = (first_at..p).any(|i| matches!(word(Some(i)).as_str(), "TO" | "FROM"));
+            match pw.as_str() {
+                "ON" => Some(Next::Securables),
+                "TO" | "FROM" => words(&[]),
+                _ if on.is_none() && (p == first_at || head[p].kind == Kind::Comma) => words(PERMISSIONS),
+                _ if on.is_none() => words(&["ON", "TO"]),
+                _ if !to && head[p].kind != Kind::Dot => words(&["TO"]),
+                _ => None,
+            }
+        }
+        "MERGE" => match pw.as_str() {
+            "WHEN" => words(MERGE_WHEN),
+            "NOT" if qw == "WHEN" => words(&["MATCHED"]),
+            "MATCHED" => words(&["THEN", "AND", "BY SOURCE", "BY TARGET"]),
+            "SOURCE" | "TARGET" if qw == "BY" => words(&["THEN", "AND"]),
+            "THEN" => words(&["UPDATE SET", "DELETE", "INSERT"]),
+            _ => None,
+        },
+        "UPDATE" if pw == "STATISTICS" => Some(Next::Tables),
+        "DROP" if pw == "EXISTS" && qw == "IF" && matches!(word(second).as_str(), "TABLE" | "VIEW") => Some(Next::Tables),
+        _ => None,
+    }
+}
+
+/// The `(` still open at `to`, searching back to `from`.
+fn opener(head: &[Token], from: usize, to: usize) -> Option<usize> {
+    let mut depth = 0;
+    for j in (from..to).rev() {
+        match head[j].kind {
+            Kind::RParen => depth += 1,
+            Kind::LParen if depth == 0 => return Some(j),
+            Kind::LParen => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether token `i` ends a value: a name, literal, variable or closing parenthesis.
+fn ends_operand(head: &[Token], i: usize) -> bool {
+    match head[i].kind {
+        Kind::Number | Kind::Str | Kind::Variable | Kind::RParen | Kind::Bracket | Kind::Quoted => true,
+        Kind::Word => {
+            let w = head[i].text.to_ascii_uppercase();
+            !is_reserved(&w) || matches!(w.as_str(), "NULL" | "ASC" | "DESC" | "CURRENT_TIMESTAMP" | "CURRENT_USER" | "SESSION_USER" | "SYSTEM_USER")
+        }
+        _ => false,
+    }
+}
+
+/// The words that can come at the caret when the syntax allows only some: after `INNER`, `IS`,
+/// `ORDER`, `CREATE`, inside `WITH (`, at the start of a statement, or after a complete operand
+/// (`c.Name |` goes on with an operator or a clause, not with another column). None leaves the
+/// usual suggestions.
+fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Option<Next> {
+    let lo = stmt_start.min(k);
+    let prev = |j: usize| (lo..j).rev().find(|&i| !head[i].is_comment());
+    let word = |i: Option<usize>| i.filter(|&i| head[i].kind == Kind::Word).map(|i| head[i].text.to_ascii_uppercase()).unwrap_or_default();
+    let words = |w: &[&'static str]| Some(Next::Words(w.to_vec(), false));
+    let Some(p) = prev(k) else { return words(STATEMENT_START) };
+    let q = prev(p);
+    let first_at = (lo..k).find(|&i| !head[i].is_comment()).unwrap_or(lo);
+    let first = word(Some(first_at));
+    let (pw, qw) = (word(Some(p)), word(q));
+    let in_from = matches!(clause, "FROM" | "JOIN");
+    let ups: Vec<String> = (lo..p).map(|i| if head[i].kind == Kind::Word { head[i].text.to_ascii_uppercase() } else { String::new() }).collect();
+    let case_open = ups.iter().filter(|w| *w == "CASE").count() > ups.iter().filter(|w| *w == "END").count();
+    let routine = matches!(first.as_str(), "CREATE" | "ALTER") && ups.iter().any(|w| matches!(w.as_str(), "PROC" | "PROCEDURE" | "FUNCTION" | "TRIGGER"));
+    let routine_header = routine && !(lo..p).any(|i| word(Some(i)) == "AS" && opener(head, lo, i).is_none());
+    let with_statements = |w: &[&'static str]| Some(Next::Words(w.iter().chain(STATEMENT_START).copied().collect(), false));
+
+    if let Some(ddl) = ddl_words(head, k, lo, p) {
+        return Some(ddl);
+    }
+
+    match head[p].kind {
+        Kind::Word => match pw.as_str() {
+            "INNER" if in_from => return words(&["JOIN"]),
+            "LEFT" | "RIGHT" | "FULL" if in_from => return words(&["JOIN", "OUTER JOIN"]),
+            "OUTER" | "CROSS" if in_from => return words(&["JOIN", "APPLY"]),
+            "ORDER" | "GROUP" | "PARTITION" => return words(&["BY"]),
+            "INSERT" => return words(&["INTO"]),
+            "CREATE" => return words(CREATE_WHAT),
+            "OR" if qw == "CREATE" => return words(&["ALTER"]),
+            "ALTER" if p == first_at => return words(ALTER_WHAT),
+            "DROP" if p == first_at => return words(DROP_WHAT),
+            "DROP" if first == "ALTER" => return words(&["COLUMN", "CONSTRAINT"]),
+            "IS" => return words(&["NULL", "NOT NULL"]),
+            "NOT" if qw == "IS" => return words(&["NULL"]),
+            "NOT" if q.is_some_and(|q| ends_operand(head, q)) => return words(&["IN", "LIKE", "BETWEEN"]),
+            "BEGIN" => return with_statements(BEGIN_NEXT),
+            "COMMIT" | "ROLLBACK" => return words(&["TRAN", "TRANSACTION"]),
+            "TRAN" | "TRANSACTION" | "TRY" | "CATCH" | "ELSE" if !case_open => return words(STATEMENT_START),
+            "END" if !case_open => return with_statements(&["TRY", "CATCH", "ELSE"]),
+            "TOP" => return words(&[]),
+            "UNION" => return words(&["ALL", "SELECT"]),
+            "ALL" if qw == "UNION" => return words(&["SELECT"]),
+            "EXCEPT" | "INTERSECT" => return words(&["SELECT"]),
+            "SET" if p == first_at => return Some(Next::Words(SET_OPTIONS.to_vec(), true)),
+            "AS" if opener(head, lo, p).is_some_and(|o| matches!(word(prev(o)).as_str(), "CAST" | "TRY_CAST")) => return Some(Next::Types(Vec::new())),
+            "AS" if routine && opener(head, lo, p).is_none() => return words(STATEMENT_START),
+            _ => {}
+        },
+        Kind::LParen => match word(prev(p)).as_str() {
+            "WITH" => return words(TABLE_HINTS),
+            "OPTION" => return words(QUERY_HINTS),
+            "OVER" => return words(&["PARTITION BY", "ORDER BY"]),
+            "EXISTS" => return words(&["SELECT"]),
+            "CONVERT" | "TRY_CONVERT" => return Some(Next::Types(Vec::new())),
+            _ => {}
+        },
+        Kind::Comma => {
+            if let Some(o) = opener(head, lo, p) {
+                match word(prev(o)).as_str() {
+                    "WITH" => return words(TABLE_HINTS),
+                    "OPTION" => return words(QUERY_HINTS),
+                    _ => {}
+                }
+            }
+        }
+        Kind::Variable if first == "DECLARE" && (qw == "DECLARE" || q.is_some_and(|q| head[q].kind == Kind::Comma)) => {
+            return Some(Next::Types(vec!["TABLE", "CURSOR FOR"]));
+        }
+        Kind::Variable if routine_header => return Some(Next::Types(Vec::new())),
+        _ => {}
+    }
+
+    // A column being defined: `CREATE TABLE t (Id |` or `DECLARE @t TABLE (Id |`.
+    if is_name(&head[p])
+        && !(head[p].kind == Kind::Word && is_reserved(&pw))
+        && q.is_some_and(|q| matches!(head[q].kind, Kind::LParen | Kind::Comma))
+        && let Some(o) = opener(head, lo, p)
+    {
+        let before = prev(o);
+        let table = word(before) == "TABLE"
+            || (first == "CREATE" && before.and_then(prev).is_some_and(|b| word(Some(b)) == "TABLE" || head[b].kind == Kind::Dot));
+        if table && matches!(first.as_str(), "CREATE" | "DECLARE") {
+            return Some(Next::Types(Vec::new()));
+        }
+    }
+
+    if !ends_operand(head, p) {
+        return None;
+    }
+    // `TOP 10 |` and `TOP (10) |` go on with the select list (for a `)`, the `(` open before it is its own).
+    if qw == "TOP" || (head[p].kind == Kind::RParen && opener(head, lo, p).is_some_and(|o| word(prev(o)) == "TOP")) {
+        return None;
+    }
+    let mut out: Vec<&'static str> = Vec::new();
+    if case_open {
+        out.extend(CASE_NEXT);
+    }
+    if clause.is_empty()
+        && let Some(o) = opener(head, lo, p + 1)
+    {
+        // Inside parentheses: a condition in brackets goes on as one; a function's arguments do not.
+        let b = prev(o);
+        let condition = b.is_none_or(|b| head[b].kind == Kind::LParen)
+            || matches!(word(b).as_str(), "WHERE" | "AND" | "OR" | "NOT" | "ON" | "HAVING" | "WHEN" | "IF" | "WHILE");
+        if condition {
+            out.extend(CONDITION_NEXT);
+        }
+        return if out.is_empty() { None } else { Some(Next::Words(out, false)) };
+    }
+    match clause {
+        "WHERE" | "ON" | "HAVING" => {
+            if first == "MERGE" {
+                out.extend(["WHEN MATCHED THEN", "WHEN NOT MATCHED THEN", "WHEN NOT MATCHED BY SOURCE THEN"]);
+            }
+            out.extend(CONDITION_NEXT);
+            if clause == "ON" {
+                out.extend(AFTER_JOIN_CONDITION);
+            }
+            out.extend(AFTER_CONDITION);
+        }
+        "SELECT" => out.extend(["AS", "FROM", "INTO", "UNION", "UNION ALL", "ORDER BY"]),
+        "ORDER" => out.extend(["ASC", "DESC", "OFFSET", "OPTION", "ROWS", "RANGE"]),
+        "GROUP" => out.extend(["HAVING", "ORDER BY", "WITH ROLLUP", "UNION", "UNION ALL", "OPTION"]),
+        "SET" if first == "UPDATE" => out.extend(["FROM", "WHERE", "OUTPUT"]),
+        "INSERT" | "INTO" if head[p].kind == Kind::RParen => return words(&["VALUES", "SELECT", "OUTPUT", "EXEC", "DEFAULT VALUES"]),
+        "SET" | "VALUES" | "" => {
+            if matches!(first.as_str(), "IF" | "WHILE") {
+                out.extend(CONDITION_NEXT);
+                out.push("BEGIN");
+            }
+        }
+        _ => return None,
+    }
+    out.extend(STATEMENT_START);
+    Some(Next::Words(out, false))
+}
 
 /// Whether the name before token `k` is an alias already written after a table: `t x` or `t AS x`.
 fn alias_written(head: &[Token], k: usize) -> bool {
@@ -352,7 +851,7 @@ impl Analysis {
         while j < end {
             let w = self.up[j].as_str();
             let introduces = self.tokens[j].kind == Kind::Word
-                && (matches!(w, "FROM" | "JOIN" | "APPLY" | "USING" | "INTO" | "UPDATE")
+                && (matches!(w, "FROM" | "JOIN" | "APPLY" | "USING" | "INTO" | "UPDATE" | "DELETE")
                     || (w == "MERGE" && self.up.get(j + 1).is_some_and(|n| n != "JOIN")));
             let comma_in_from = in_from && self.tokens[j].kind == Kind::Comma;
             if self.tokens[j].kind == Kind::Word && matches!(w, "WHERE" | "GROUP" | "ORDER" | "HAVING" | "ON" | "SET" | "SELECT" | "UNION") {
@@ -377,7 +876,7 @@ impl Analysis {
                     source.columns = self.select_columns(j + 1, close);
                 }
                 j = close + 1;
-            } else if is_name(&self.tokens[j]) && !(self.tokens[j].kind == Kind::Word && is_reserved(&self.up[j])) {
+            } else if (is_name(&self.tokens[j]) && !(self.tokens[j].kind == Kind::Word && is_reserved(&self.up[j]))) || self.tokens[j].kind == Kind::Variable {
                 source.parts.push(bare(&self.tokens[j]));
                 j += 1;
                 while j + 1 < end && self.tokens[j].kind == Kind::Dot {
@@ -452,6 +951,76 @@ impl Analysis {
         false
     }
 
+    /// Temporary tables and table variables the script defines: `CREATE TABLE #t (...)`,
+    /// `DECLARE @t TABLE (...)` and `SELECT ... INTO #t FROM ...`.
+    pub fn local_tables(&self, schema: Option<&Schema>) -> Vec<DbObject> {
+        let n = self.tokens.len();
+        let mut out: Vec<DbObject> = Vec::new();
+        for j in 0..n {
+            let temp = |i: usize| i < n && is_name(&self.tokens[i]) && self.tokens[i].text.starts_with('#');
+            let defined = if self.up[j] == "TABLE" && j > 0 && self.up[j - 1] == "CREATE" && temp(j + 1) {
+                Some((j + 1, j + 2))
+            } else if self.tokens[j].kind == Kind::Variable && j > 0 && (self.up[j - 1] == "DECLARE" || self.tokens[j - 1].kind == Kind::Comma) && self.up.get(j + 1).is_some_and(|w| w == "TABLE") {
+                Some((j, j + 2))
+            } else {
+                None
+            };
+            if let Some((name, open)) = defined {
+                if open < n && self.tokens[open].kind == Kind::LParen {
+                    let close = self.matching(open, n);
+                    out.push(DbObject { schema: String::new(), name: self.tokens[name].text.clone(), kind: "table".into(), columns: self.column_definitions(open, close), ..DbObject::default() });
+                }
+                continue;
+            }
+            if self.up[j] == "INTO" && temp(j + 1) {
+                let (start, end) = self.statement_at(self.starts[j]);
+                let Some(select) = (start..j).rev().find(|&i| self.up[i] == "SELECT") else { continue };
+                let names = self.select_columns(select, end);
+                let mut columns: Vec<Column> = names.iter().map(|c| Column { name: c.clone(), ..Column::default() }).collect();
+                // `SELECT *` (or `t.*`) takes the columns of the sources.
+                let star = (select..j).any(|i| self.tokens[i].kind == Kind::Op && self.tokens[i].text == "*");
+                if star && let Some(schema) = schema {
+                    for source in self.sources(start, end).iter().filter(|s| s.at > j) {
+                        for (name, ty) in source_columns(source, Some(schema)) {
+                            if !columns.iter().any(|c| eq(&c.name, &name)) {
+                                columns.push(Column { name, data_type: ty, ..Column::default() });
+                            }
+                        }
+                    }
+                }
+                out.push(DbObject { schema: String::new(), name: self.tokens[j + 1].text.clone(), kind: "table".into(), columns, ..DbObject::default() });
+            }
+        }
+        out
+    }
+
+    /// The columns defined between `(` at `open` and `)` at `close`: `Id int NOT NULL, Code varchar(10)`.
+    fn column_definitions(&self, open: usize, close: usize) -> Vec<Column> {
+        // While the list is still being typed there is no `)`: it ends with the text.
+        let close = close.min(self.tokens.len());
+        let mut columns = Vec::new();
+        let mut element = open + 1;
+        let mut j = open + 1;
+        while j <= close {
+            if j == close || self.tokens[j].kind == Kind::Comma {
+                if element < j && is_name(&self.tokens[element]) && !matches!(self.up[element].as_str(), "CONSTRAINT" | "PRIMARY" | "UNIQUE" | "INDEX" | "CHECK" | "FOREIGN" | "PERIOD") {
+                    let mut ty = self.tokens.get(element + 1).filter(|_| element + 1 < j).map(|t| t.text.to_ascii_lowercase()).unwrap_or_default();
+                    if element + 2 < j && self.tokens[element + 2].kind == Kind::LParen {
+                        let end = self.matching(element + 2, close);
+                        ty.push_str(&self.tokens[element + 2..=end.min(j - 1)].iter().map(|t| t.text.as_str()).collect::<String>());
+                    }
+                    columns.push(Column { name: bare(&self.tokens[element]), data_type: ty, ..Column::default() });
+                }
+                element = j + 1;
+            } else if self.tokens[j].kind == Kind::LParen {
+                j = self.matching(j, close);
+                continue;
+            }
+            j += 1;
+        }
+        columns
+    }
+
     pub fn declared_variables(&self, before: usize) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         for j in 0..self.tokens.len() {
@@ -486,6 +1055,14 @@ enum Context {
     Functions,
     /// After a table and its alias: the next clause, or a new statement.
     AfterSource,
+    /// Only certain keywords can come next.
+    Keywords,
+    /// A data type comes next.
+    Types,
+    /// The columns of one table, named in the statement (`ALTER TABLE t ALTER COLUMN`, `ON t (`).
+    TableColumns,
+    /// Any object, for `GRANT ... ON`.
+    Securables,
     Nothing,
 }
 
@@ -505,6 +1082,27 @@ pub(crate) fn sample_value(data_type: &str) -> &'static str {
 }
 
 /// A short alias from a name's initials (`OrderLines` -> `ol`), unique among `taken`.
+/// The alias for a table picked in a suggestion: the user's own for that name, or else one made
+/// from the name without its prefix.
+fn alias_with(name: &str, taken: &[String], options: &CompleteOptions) -> String {
+    let free = |a: &str| !is_reserved(&a.to_ascii_uppercase()) && !taken.iter().any(|t| eq(t, a));
+    if let Some(own) = options.aliases.iter().find(|(n, _)| eq(n, name)).map(|(_, a)| a.as_str()).filter(|a| !a.is_empty()) {
+        if free(own) {
+            return own.to_string();
+        }
+        return (2..).map(|n| format!("{own}{n}")).find(|a| free(a)).expect("unbounded");
+    }
+    let bare = name.trim_start_matches('#');
+    let stripped = options
+        .ignored_prefixes
+        .iter()
+        .filter(|p| !p.is_empty() && bare.len() > p.len() && bare.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p)))
+        .map(|p| &bare[p.len()..])
+        .min_by_key(|rest| rest.len())
+        .unwrap_or(bare);
+    alias_for(stripped, taken)
+}
+
 pub(crate) fn alias_for(name: &str, taken: &[String]) -> String {
     let mut base = String::new();
     let mut prev: Option<char> = None;
@@ -582,6 +1180,12 @@ fn writable(o: &DbObject) -> Vec<&Column> {
 }
 
 pub(crate) fn object_matches(o: &DbObject, parts: &[String], schema: &Schema) -> bool {
+    // `db.schema.name` must be in that database; a shorter name, in this one.
+    let database = if parts.len() >= 3 { parts[parts.len() - 3].as_str() } else { "" };
+    let in_database = if database.is_empty() || eq(database, &schema.database) { o.database.is_empty() } else { eq(&o.database, database) };
+    if !in_database {
+        return false;
+    }
     match parts {
         [name] => eq(&o.name, name) && (eq(&o.schema, &schema.default_schema) || schema.default_schema.is_empty()),
         [.., s, name] if s.is_empty() => eq(&o.name, name),
@@ -594,7 +1198,7 @@ pub(crate) fn resolve<'s>(source: &Source, schema: &'s Schema) -> Option<&'s DbO
     let exact = schema.objects.iter().find(|o| object_matches(o, &source.parts, schema));
     // An unqualified name falls back to any schema, as SQL Server resolves it via the default schema first.
     exact.or_else(|| match source.parts.as_slice() {
-        [name] => schema.objects.iter().find(|o| eq(&o.name, name)),
+        [name] => schema.objects.iter().find(|o| eq(&o.name, name) && o.database.is_empty()),
         _ => None,
     })
 }
@@ -646,14 +1250,15 @@ fn wants(context: Context, kind: &str) -> bool {
         Context::Expression => matches!(kind, "scalar_function" | "table" | "view"),
         Context::Views => kind == "view",
         Context::Functions => matches!(kind, "scalar_function" | "table_function"),
-        Context::InsertColumns | Context::InsertTarget | Context::ExecArgs | Context::AfterSource | Context::Nothing => false,
+        Context::Securables => kind != "synonym",
+        Context::InsertColumns | Context::InsertTarget | Context::ExecArgs | Context::AfterSource | Context::Keywords | Context::Types | Context::TableColumns | Context::Nothing => false,
     }
 }
 
 /// Lower ranks sort first.
 fn rank(kind: &str, context: Context) -> u8 {
     match (context, kind) {
-        (_, "join" | "body") => 0,
+        (_, "join" | "body" | "picker") => 0,
         (Context::Expression, "column") => 1,
         (Context::Expression, "alias") => 2,
         (Context::Expression, "variable") => 3,
@@ -663,7 +1268,7 @@ fn rank(kind: &str, context: Context) -> u8 {
         (_, "snippet") => 5,
         (_, "global_variable") => 8,
         (_, "keyword") => 9,
-        (_, "schema" | "database") => 6,
+        (_, "schema" | "database" | "server") => 6,
         _ => 4,
     }
 }
@@ -675,7 +1280,7 @@ fn object_at(tokens: &[Token], from: usize, to: usize, schema: &Schema) -> Optio
 }
 
 /// Choices the user can change in the options.
-#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CompleteOptions {
     /// Give a table picked after FROM or JOIN an alias: `Customers` becomes `Customers AS c`.
@@ -686,11 +1291,22 @@ pub struct CompleteOptions {
     pub qualify_object_names: bool,
     /// List sys and INFORMATION_SCHEMA views without typing their schema first.
     pub show_system_objects: bool,
+    /// Prefixes left out of generated aliases: `tblCustomer` gets `c`, not `tc`.
+    pub ignored_prefixes: Vec<String>,
+    /// The alias to give these tables, by name: `Customers` → `cu`.
+    pub aliases: std::collections::HashMap<String, String>,
 }
 
 impl Default for CompleteOptions {
     fn default() -> Self {
-        CompleteOptions { assign_aliases: true, alias_with_as: true, qualify_object_names: true, show_system_objects: false }
+        CompleteOptions {
+            assign_aliases: true,
+            alias_with_as: true,
+            qualify_object_names: true,
+            show_system_objects: false,
+            ignored_prefixes: ["tbl", "vw", "tb_", "t_", "v_"].map(String::from).to_vec(),
+            aliases: Default::default(),
+        }
     }
 }
 
@@ -710,8 +1326,13 @@ pub fn complete_with(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
 }
 
 pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, snippets: &[Snippet], options: CompleteOptions) -> Completion {
+    complete_across(text, caret_utf16, schema, &[], snippets, options)
+}
+
+/// Like `complete_full`, with the metadata of other databases the script names (`Other.dbo.t`).
+pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, others: &[&Schema], snippets: &[Snippet], options: CompleteOptions) -> Completion {
     let caret = utf16_to_byte(text, caret_utf16);
-    let none = |at: usize| Completion { start: byte_to_utf16(text, at), items: Vec::new() };
+    let none = |at: usize| Completion { start: byte_to_utf16(text, at), items: Vec::new(), selected: None };
     let before = &text[..caret];
 
     // Never suggest inside a string or comment.
@@ -744,6 +1365,12 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
     };
     let variable = variable || (prefix.is_empty() && before.ends_with('@'));
 
+    // `GO` alone on its line ends a batch (the lexer reads it as one): offering GOTO or GROUPING
+    // right after it would let Enter replace it.
+    if touching && head.last().is_some_and(|t| t.kind == Kind::Go) {
+        return none(caret);
+    }
+
     // A qualifier such as `t.` or `dbo.` right before the word.
     let mut qualifier: Vec<String> = Vec::new();
     while k >= 2 && head[k - 1].kind == Kind::Dot && is_name(&head[k - 2]) {
@@ -759,7 +1386,7 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
 
     // `INSERT [INTO] name ` or `EXEC name ` with the caret after a space.
     let after_target = |intro: &[&str]| -> Option<usize> {
-        if touching || k == 0 || !is_name(&head[k - 1]) {
+        if touching || k == 0 || !is_name(&head[k - 1]) || (head[k - 1].kind == Kind::Word && is_reserved(&head[k - 1].text.to_ascii_uppercase())) {
             return None;
         }
         let mut j = k - 1;
@@ -770,12 +1397,29 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         intro.contains(&w.as_str()).then_some(j)
     };
     let insert_target = after_target(&["INTO", "INSERT"]).filter(|_| prefix.is_empty() && qualifier.is_empty());
-    let exec_target = after_target(&["EXEC", "EXECUTE"]).filter(|_| prefix.is_empty() && qualifier.is_empty());
+    // `EXEC name a, |` also goes on with the parameters not yet written.
+    let exec_more = (prefix.is_empty() && qualifier.is_empty() && matches!(prev_word, Some((Kind::Comma, _))))
+        .then(|| (stmt_start..k).find(|&i| !head[i].is_comment()))
+        .flatten()
+        .filter(|&i| matches!(head[i].text.to_ascii_uppercase().as_str(), "EXEC" | "EXECUTE") && opener(&head, i, k).is_none())
+        .map(|i| i + 1);
+    let exec_target = after_target(&["EXEC", "EXECUTE"]).filter(|_| prefix.is_empty() && qualifier.is_empty()).or(exec_more);
+
+    let next = if variable || !qualifier.is_empty() || insert_target.is_some() || exec_target.is_some() {
+        None
+    } else {
+        next_words(&head, k, stmt_start, &clause)
+    };
 
     let context = match &prev_word {
         _ if variable => Context::Expression,
         _ if insert_target.is_some() => Context::InsertTarget,
         _ if exec_target.is_some() => Context::ExecArgs,
+        _ if matches!(next, Some(Next::Words(..))) => Context::Keywords,
+        _ if matches!(next, Some(Next::Types(_))) => Context::Types,
+        _ if matches!(next, Some(Next::Columns(..))) => Context::TableColumns,
+        _ if matches!(next, Some(Next::Tables)) => Context::TableSource,
+        _ if matches!(next, Some(Next::Securables)) => Context::Securables,
         Some((Kind::Word, w)) if matches!(w.as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO" | "TABLE" | "MERGE" | "USING" | "APPLY") => Context::TableSource,
         Some((Kind::Word, w)) if matches!(w.as_str(), "EXEC" | "EXECUTE" | "PROC" | "PROCEDURE") => Context::Procedure,
         Some((Kind::Word, w)) if w == "VIEW" => Context::Views,
@@ -793,7 +1437,22 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
 
     let mut items: Vec<Item> = Vec::new();
     let default = Schema::default();
-    let meta = schema.unwrap_or(&default);
+    // Temporary tables and table variables of the script count as tables.
+    let local = a.local_tables(schema);
+    let merged: Schema;
+    let meta = if local.is_empty() && others.is_empty() {
+        schema.unwrap_or(&default)
+    } else {
+        let mut m = schema.cloned().unwrap_or_default();
+        m.objects.extend(local);
+        // Other databases' objects resolve names such as `Other.dbo.t` in FROM.
+        for other in others {
+            m.objects.extend(other.objects.iter().map(|o| DbObject { database: other.database.clone(), ..o.clone() }));
+        }
+        merged = m;
+        &merged
+    };
+    let schema = Some(meta);
     let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let line_start = before[..prefix_start].rfind('\n').map_or(0, |i| i + 1);
     let column = before[line_start..prefix_start].chars().count();
@@ -812,12 +1471,15 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         && (matches!(prev_upper, "FROM" | "JOIN") || (matches!(prev_word, Some((Kind::Comma, _))) && clause == "FROM"));
     let taken: Vec<String> = sources.iter().filter(|s| s.at < k || a.starts[s.at] > caret).map(|s| s.reference.clone()).collect();
     let with_alias = |item: &mut Item, name: &str| {
-        let alias = alias_for(name, &taken);
+        let alias = alias_with(name, &taken, &options);
         if !eq(&alias, name) {
             item.insert = format!("{}{}{alias}", item.insert, if options.alias_with_as { " AS " } else { " " });
         }
     };
     let qualify = options.qualify_object_names;
+    // In a select list, before anything is typed: check several columns at once.
+    let picking = clause == "SELECT" && prefix.is_empty() && !variable;
+    let picker = || Item { label: "(choose columns…)".into(), insert: String::new(), kind: "picker", detail: "check the columns to insert".into() };
 
     if variable {
         for (name, ty) in a.declared_variables(prefix_start) {
@@ -828,8 +1490,17 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
             while to < a.tokens.len() && (is_name(&a.tokens[to]) || a.tokens[to].kind == Kind::Dot) && a.starts[to] < prefix_start {
                 to += 1;
             }
+            // `@Name =` in the call names a parameter already given; it is not a variable either,
+            // unless the script uses it before the call.
+            let named: Vec<&str> = (to..a.tokens.len())
+                .take_while(|&j| a.starts[j] < prefix_start)
+                .filter(|&j| a.tokens[j].kind == Kind::Variable && a.tokens.get(j + 1).is_some_and(|t| t.text == "="))
+                .map(|j| a.tokens[j].text.as_str())
+                .collect();
+            let used_before = |name: &str| (0..stmt_start).any(|j| a.tokens[j].kind == Kind::Variable && eq(&a.tokens[j].text, name));
+            items.retain(|it| it.kind != "variable" || !named.iter().any(|n| eq(n, &it.label)) || used_before(&it.label));
             if let Some(proc) = object_at(&a.tokens, stmt_start + 1, to, meta) {
-                for p in &proc.params {
+                for p in proc.params.iter().filter(|p| !named.iter().any(|n| eq(n, &p.name))) {
                     items.push(Item { label: p.name.clone(), insert: format!("{} = ", p.name), kind: "parameter", detail: p.data_type.clone() });
                 }
             }
@@ -847,20 +1518,47 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
             .map(|s| source_columns(s, schema))
             .find(|c| !c.is_empty());
         if let Some(columns) = aliased {
+            if picking && columns.len() > 1 {
+                items.push(picker());
+            }
             for (name, ty) in columns {
                 items.push(Item { label: name.clone(), insert: quote(&name), kind: "column", detail: ty });
             }
-        } else if meta.schemas.iter().any(|s| eq(s, q)) || meta.objects.iter().any(|o| eq(&o.schema, q)) {
+        } else if let Some(other) = others.iter().find(|o| qualifier.len() == 1 && eq(&o.database, q)) {
+            // `Other.` goes on with a schema of that database.
+            for s in &other.schemas {
+                items.push(Item { label: s.clone(), insert: quote(s), kind: "schema", detail: format!("{} schema", other.database) });
+            }
+        } else if let Some(other) = others.iter().find(|o| qualifier.len() == 2 && eq(&o.database, &qualifier[0])) {
             let wanted = |kind: &str| match context {
-                Context::Expression => true,
+                Context::Expression => kind != "procedure",
                 c => wants(c, kind),
             };
-            for o in meta.objects.iter().filter(|o| eq(&o.schema, q) && wanted(&o.kind)) {
+            for o in other.objects.iter().filter(|o| eq(&o.schema, q) && wanted(&o.kind)) {
+                let mut item = object_item(o, other, true);
+                item.detail = format!("{}.{}", other.database, item.detail);
+                if aliasing && matches!(o.kind.as_str(), "table" | "view" | "synonym") {
+                    with_alias(&mut item, &o.name);
+                }
+                items.push(item);
+            }
+        } else if meta.schemas.iter().any(|s| eq(s, q)) || meta.objects.iter().any(|o| eq(&o.schema, q) && o.database.is_empty()) {
+            let o_kind_in_expression = |kind: &str| kind != "procedure";
+            let wanted = |kind: &str| match context {
+                Context::Expression => o_kind_in_expression(kind),
+                c => wants(c, kind),
+            };
+            for o in meta.objects.iter().filter(|o| eq(&o.schema, q) && o.database.is_empty() && wanted(&o.kind)) {
                 let mut item = object_item(o, meta, true);
                 if aliasing && matches!(o.kind.as_str(), "table" | "view" | "synonym") {
                     with_alias(&mut item, &o.name);
                 }
                 items.push(item);
+            }
+        } else if qualifier.len() == 1 && eq(q, &meta.database) {
+            // `Shop.` goes on with a schema of the database.
+            for s in &meta.schemas {
+                items.push(Item { label: s.clone(), insert: quote(s), kind: "schema", detail: "schema".into() });
             }
         } else if let Some(src) = sources.iter().find(|s| s.parts.last().is_some_and(|p| eq(p, q))) {
             for (name, ty) in source_columns(src, schema) {
@@ -869,8 +1567,8 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         }
     } else {
         match context {
-            Context::TableSource | Context::Procedure | Context::Views | Context::Functions => {
-                for o in meta.objects.iter().filter(|o| wants(context, &o.kind) && (options.show_system_objects || !is_system(o))) {
+            Context::TableSource | Context::Procedure | Context::Views | Context::Functions | Context::Securables => {
+                for o in meta.objects.iter().filter(|o| wants(context, &o.kind) && o.database.is_empty() && (options.show_system_objects || !is_system(o))) {
                     let mut item = object_item(o, meta, false);
                     if qualify && !o.schema.is_empty() {
                         item.insert = format!("{}.{}", quote(&o.schema), quote(&o.name));
@@ -886,8 +1584,8 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                 }
                 if prev_upper == "JOIN" {
                     let taken: Vec<String> = sources.iter().map(|s| s.reference.clone()).collect();
-                    for o in meta.objects.iter().filter(|o| matches!(o.kind.as_str(), "table" | "view")) {
-                        let alias = alias_for(&o.name, &taken);
+                    for o in meta.objects.iter().filter(|o| matches!(o.kind.as_str(), "table" | "view") && o.database.is_empty()) {
+                        let alias = alias_with(&o.name, &taken, &options);
                         for e in &earlier {
                             let Some(eo) = resolve(e, meta) else { continue };
                             if let Some((cond, fk)) = join_conditions((&alias, o), (&e.reference, eo), meta).into_iter().next() {
@@ -898,6 +1596,9 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                             }
                         }
                     }
+                }
+                if prev_upper == "TABLE" && a.up.get(stmt_start).is_some_and(|w| w == "DROP") {
+                    items.push(Item { label: "IF EXISTS".into(), insert: "IF EXISTS".into(), kind: "keyword", detail: String::new() });
                 }
                 if context == Context::TableSource {
                     for cte in a.ctes(stmt_start, stmt_end) {
@@ -910,6 +1611,14 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                 }
                 for s in &meta.schemas {
                     items.push(Item { label: s.clone(), insert: quote(s), kind: "schema", detail: "schema".into() });
+                }
+                if matches!(context, Context::TableSource) {
+                    for d in meta.databases.iter().filter(|d| !eq(d, &meta.database)) {
+                        items.push(Item { label: d.clone(), insert: quote(d), kind: "database", detail: "database".into() });
+                    }
+                    for l in &meta.linked_servers {
+                        items.push(Item { label: l.clone(), insert: quote(l), kind: "server", detail: "linked server".into() });
+                    }
                 }
             }
             Context::InsertTarget => {
@@ -930,12 +1639,15 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
             }
             Context::ExecArgs => {
                 let from = exec_target.expect("context");
-                if let Some(o) = object_at(&head, from, k, meta) {
-                    if !o.params.is_empty() {
+                let (_, to) = name_range(&head, from, k);
+                // Parameters already given by name are not offered again.
+                let written: Vec<&str> = head[to..k].iter().filter(|t| t.kind == Kind::Variable).map(|t| t.text.as_str()).collect();
+                if let Some(o) = object_at(&head, from, to, meta) {
+                    if !o.params.is_empty() && exec_more.is_none() {
                         let align = " ".repeat(column);
                         items.push(Item { label: "(all parameters)".into(), insert: parameter_list(&o.params, &align, nl), kind: "body", detail: format!("{}.{}", o.schema, o.name) });
                     }
-                    for p in &o.params {
+                    for p in o.params.iter().filter(|p| !written.iter().any(|w| eq(w, &p.name))) {
                         items.push(Item { label: p.name.clone(), insert: format!("{} = ", p.name), kind: "parameter", detail: p.data_type.clone() });
                     }
                 }
@@ -978,6 +1690,9 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                     .iter()
                     .flat_map(|s| source_columns(s, schema).into_iter().map(move |(c, t)| (s.reference.clone(), c, t)))
                     .collect();
+                if picking && all.len() > 1 {
+                    items.push(picker());
+                }
                 for (reference, name, ty) in &all {
                     let ambiguous = all.iter().filter(|(_, n, _)| eq(n, name)).count() > 1;
                     let insert = if ambiguous { format!("{}.{}", quote(reference), quote(name)) } else { quote(name) };
@@ -987,7 +1702,7 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                 for s in &sources {
                     items.push(Item { label: s.reference.clone(), insert: quote(&s.reference), kind: "alias", detail: s.parts.join(".") });
                 }
-                for o in meta.objects.iter().filter(|o| o.kind == "scalar_function") {
+                for o in meta.objects.iter().filter(|o| o.kind == "scalar_function" && o.database.is_empty()) {
                     let mut item = object_item(o, meta, false);
                     // Scalar functions must be called with their schema.
                     item.insert = format!("{}.{}()", quote(&o.schema), quote(&o.name));
@@ -998,13 +1713,44 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
                     let insert = if NILADIC.contains(f) { f.to_string() } else { format!("{f}()") };
                     items.push(Item { label: f.to_string(), insert, kind: "function", detail: "built-in function".into() });
                 }
-                for kw in STATEMENT_KEYWORDS {
+                for kw in STATEMENT_KEYWORDS.iter().chain(EXPRESSION_KEYWORDS) {
                     items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
                 }
             }
             Context::AfterSource => {
-                for kw in CLAUSE_KEYWORDS.iter().chain(STATEMENT_KEYWORDS) {
+                for kw in CLAUSE_KEYWORDS.iter().chain(STATEMENT_START) {
                     items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
+                }
+            }
+            Context::Keywords => {
+                if let Some(Next::Words(words, variables)) = &next {
+                    for kw in words {
+                        items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
+                    }
+                    if *variables {
+                        for (name, ty) in a.declared_variables(prefix_start) {
+                            items.push(Item { label: name.clone(), insert: name, kind: "variable", detail: ty });
+                        }
+                    }
+                }
+            }
+            Context::TableColumns => {
+                if let Some(Next::Columns(from, to)) = next
+                    && let Some(o) = object_at(&head, from, to, meta)
+                {
+                    for c in &o.columns {
+                        items.push(Item { label: c.name.clone(), insert: quote(&c.name), kind: "column", detail: c.data_type.clone() });
+                    }
+                }
+            }
+            Context::Types => {
+                if let Some(Next::Types(words)) = &next {
+                    for t in DATA_TYPES {
+                        items.push(Item { label: t.to_string(), insert: t.to_string(), kind: "type", detail: "data type".into() });
+                    }
+                    for kw in words {
+                        items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
+                    }
                 }
             }
             Context::Nothing => {}
@@ -1017,30 +1763,48 @@ pub fn complete_full(text: &str, caret_utf16: usize, schema: Option<&Schema>, sn
         }
     }
 
-    // Rank: prefix matches, then substring matches; then by kind and name.
-    let p = prefix.to_ascii_lowercase();
-    let mut scored: Vec<(u8, u8, bool, Item)> = items
+    // Words in the order they are most likely: the keyword lists are written that way.
+    let likely: Vec<&str> = match (context, &next) {
+        (Context::Keywords, Some(Next::Words(words, _))) => words.clone(),
+        (Context::Types, _) => COMMON_TYPES.to_vec(),
+        (Context::AfterSource, _) => CLAUSE_KEYWORDS.iter().chain(STATEMENT_START).copied().collect(),
+        (Context::Expression, _) => COMMON_FUNCTIONS.to_vec(),
+        _ => Vec::new(),
+    };
+    let likely = |it: &Item| if it.kind == "column" { usize::MAX } else { likely.iter().position(|w| w.eq_ignore_ascii_case(&it.label)).unwrap_or(usize::MAX) };
+
+    // Rank: prefix matches, then substring matches; then by kind, how likely, and name.
+    let mut scored: Vec<(u8, u8, bool, usize, Item)> = items
         .into_iter()
         .filter_map(|it| {
+            let exact_or_prefix = match_quality(&it.label, &prefix)?;
+            // A keyword is found by its start or initials: `an` is AND, not the end of GRANT.
+            if exact_or_prefix == 3 && it.kind == "keyword" {
+                return None;
+            }
+            // The whole word ranks with its start; both come before initials and inner matches.
+            let quality = if exact_or_prefix == 0 { 1 } else { exact_or_prefix };
             let label = it.label.to_ascii_lowercase();
             let label = label.trim_start_matches('@');
-            let needle = p.trim_start_matches('@');
-            let quality = if needle.is_empty() || label.starts_with(needle) {
-                0
-            } else if needle.len() >= 3 && label.contains(needle) {
-                1
-            } else {
-                return None;
-            };
+            let needle = prefix.to_ascii_lowercase();
+            let needle = needle.trim_start_matches('@');
             // System catalog views sort after the database's own objects.
             let system = it.detail.starts_with("sys.") || it.detail.starts_with("INFORMATION_SCHEMA.");
-            let exact_snippet = it.kind == "snippet" && label == needle;
-            let rank = if exact_snippet { 0 } else { rank(it.kind, context) };
-            Some((quality, rank, system, it))
+            // A whole word typed in another case (`join`, `customerid`) comes first, so Tab or Enter
+            // gives it its proper case instead of a longer name that starts with it.
+            let exact = !needle.is_empty() && label == needle;
+            let rank = if exact { 0 } else { rank(it.kind, context) };
+            Some((quality, rank, system, likely(&it), it))
         })
         .collect();
-    scored.sort_by_key(|x| (x.0, x.1, x.2, x.3.label.to_ascii_lowercase()));
-    scored.dedup_by(|x, y| x.3.insert == y.3.insert && x.3.kind == y.3.kind);
-    let items = scored.into_iter().take(MAX_ITEMS).map(|(_, _, _, it)| it).collect();
-    Completion { start: byte_to_utf16(text, prefix_start), items }
+    // Among names that start with what was typed, the shortest is the likeliest: `tabl` is tables
+    // before table_types.
+    let length = |it: &Item| if prefix.is_empty() { 0 } else { it.label.len() };
+    scored.sort_by_key(|x| (x.0, x.1, x.2, x.3, length(&x.4), x.4.label.to_ascii_lowercase()));
+    scored.dedup_by(|x, y| x.4.insert == y.4.insert && x.4.kind == y.4.kind);
+    let items: Vec<Item> = scored.into_iter().take(MAX_ITEMS).map(|(_, _, _, _, it)| it).collect();
+    // Select the first item only when something was typed and it matches for sure; a list of guesses,
+    // or one opened by a space before anything is typed, starts with nothing selected.
+    let selected = items.first().filter(|it| !prefix.is_empty() && match_quality(&it.label, &prefix).is_some_and(|q| q <= 2)).map(|_| 0);
+    Completion { start: byte_to_utf16(text, prefix_start), items, selected }
 }

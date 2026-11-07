@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Shell;
@@ -25,8 +26,15 @@ namespace QuillSql.Vsix
     {
         private static Popup _open;
         private static Span _openSpan;
+        /// <summary>Holds the card inside the open popup, so the details can replace the title.</summary>
+        private static Border _host;
+        /// <summary>A pinned card stays open until it is closed with its button or Esc.</summary>
+        private static bool _pinned;
+
 
         public static bool IsOpen => _open?.IsOpen == true;
+
+        public static bool IsPinned => IsOpen && _pinned;
 
         public static void Close()
         {
@@ -34,7 +42,23 @@ namespace QuillSql.Vsix
             {
                 _open.IsOpen = false;
                 _open = null;
+                _host = null;
+                _pinned = false;
             }
+        }
+
+
+        /// <summary>Ctrl+click on a name: its card, pinned.</summary>
+        public static void ShowPinned(IWpfTextView view, int position)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var target = ConnectionResolver.TryGetActive();
+            if (target == null || !target.CanQuery)
+            {
+                EditorContext.Status("connect the query window first: the card is read from the database.");
+                return;
+            }
+            Lookup(view, position, target, true, true, () => EditorContext.Status("put the caret on a table, view, procedure or function."));
         }
 
         private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_' || c == '#' || c == '$';
@@ -53,7 +77,7 @@ namespace QuillSql.Vsix
                 EditorContext.Status("open a query window connected with Windows or SQL Server authentication first.");
                 return true;
             }
-            Lookup(view, view.Caret.Position.BufferPosition.Position, target, false, () => EditorContext.Status("put the caret on a table, view, procedure or function."));
+            Lookup(view, view.Caret.Position.BufferPosition.Position, target, false, false, () => EditorContext.Status("put the caret on a table, view, procedure or function."));
             return true;
         }
 
@@ -70,14 +94,15 @@ namespace QuillSql.Vsix
                 otherwise();
                 return;
             }
-            if (IsOpen && _openSpan.Contains(position))
+            // A pinned card stays until it is closed; hovering does not replace it.
+            if (IsPinned || (IsOpen && _openSpan.Contains(position)))
             {
                 return;
             }
-            Lookup(view, position, target, true, otherwise);
+            Lookup(view, position, target, true, false, otherwise);
         }
 
-        private static void Lookup(IWpfTextView view, int position, ConnectionTarget target, bool mouse, Action notFound)
+        private static void Lookup(IWpfTextView view, int position, ConnectionTarget target, bool mouse, bool pinned, Action notFound)
         {
             var key = Commands.MetadataKey(out _);
             var snapshot = view.TextSnapshot;
@@ -110,7 +135,7 @@ namespace QuillSql.Vsix
                 // Show the title at once; a large table or a remote server can take a while to describe.
                 var fullName = found.Schema + "." + found.Name;
                 var details = ObjectScripts.Cached(target, fullName);
-                var frame = Open(view, details != null ? ObjectScripts.Card(details) : ObjectScripts.Loading(found.Schema, found.Name, found.Kind), new Span(start, end - start), mouse);
+                var host = Open(view, details != null ? ObjectScripts.Card(details) : ObjectScripts.Loading(found.Schema, found.Name, found.Kind), new Span(start, end - start), mouse, pinned);
                 if (details == null)
                 {
                     await TaskScheduler.Default;
@@ -123,7 +148,7 @@ namespace QuillSql.Vsix
                         Log.Error("reading object details", ex);
                     }
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                    if (frame == null || _open?.Child != frame)
+                    if (host == null || _host != host)
                     {
                         return;
                     }
@@ -133,13 +158,13 @@ namespace QuillSql.Vsix
                         notFound();
                         return;
                     }
-                    frame.Child = ObjectScripts.Card(details);
+                    host.Child = ObjectScripts.Card(details);
                 }
                 Log.Verbose("object card: " + details.FullName + "; " + ObjectScripts.StorageLine(details));
             }).FileAndForget("quillsql/objectcard");
         }
 
-        private static Border Open(IWpfTextView view, UIElement card, Span span, bool mouse)
+        private static Border Open(IWpfTextView view, UIElement card, Span span, bool mouse, bool pinned)
         {
             Close();
             var line = view.TextViewLines?.GetTextViewLineContainingBufferPosition(new SnapshotPoint(view.TextSnapshot, span.Start));
@@ -148,7 +173,17 @@ namespace QuillSql.Vsix
                 return null;
             }
             var left = mouse ? line.GetCharacterBounds(new SnapshotPoint(view.TextSnapshot, span.Start)).Left : view.Caret.Left;
-            var frame = new Border { Child = card, BorderThickness = new Thickness(1), Padding = new Thickness(10, 8, 10, 8) };
+            // The card with its buttons in the top right corner: pin (until pinned) and close.
+            var host = new Border { Child = card };
+            var pinButton = CornerButton("\uE718", Loc.T("Pin: keep the card open (or Ctrl+click a name)"));
+            var closeButton = CornerButton("\uE711", Loc.T("Close (Esc)"));
+            var corner = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, -4, -6, 0) };
+            corner.Children.Add(pinButton);
+            corner.Children.Add(closeButton);
+            var layout = new Grid();
+            layout.Children.Add(host);
+            layout.Children.Add(corner);
+            var frame = new Border { Child = layout, BorderThickness = new Thickness(1), Padding = new Thickness(10, 8, 10, 8) };
             frame.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.ToolTipBrushKey);
             frame.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ToolTipBorderBrushKey);
             frame.SetResourceReference(TextElement.ForegroundProperty, EnvironmentColors.ToolTipTextBrushKey);
@@ -172,6 +207,11 @@ namespace QuillSql.Vsix
             var watch = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             watch.Tick += (s, e) =>
             {
+                if (_pinned)
+                {
+                    watch.Stop();
+                    return;
+                }
                 var onName = name.Contains(Mouse.GetPosition(view.VisualElement));
                 var onCard = new Rect(0, 0, frame.ActualWidth, frame.ActualHeight).Contains(Mouse.GetPosition(frame));
                 away = onName || onCard ? 0 : away + 1;
@@ -180,35 +220,91 @@ namespace QuillSql.Vsix
                     Close();
                 }
             };
-            if (mouse)
+            void pin()
+            {
+                _pinned = true;
+                watch.Stop();
+                popup.StaysOpen = true;
+                pinButton.Visibility = Visibility.Collapsed;
+                frame.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ControlLinkTextBrushKey);
+            }
+            pinButton.MouseLeftButtonUp += (s, e) => pin();
+            closeButton.MouseLeftButtonUp += (s, e) => Close();
+            if (pinned)
+            {
+                pin();
+            }
+            else if (mouse)
             {
                 watch.Start();
             }
 
-            void close(object s, EventArgs e) => Close();
-            void scrolled(object s, TextViewLayoutChangedEventArgs e)
+            // Unpinned cards close when the text moves under them; pinned ones only when closed.
+            void close(object s, EventArgs e)
             {
-                if (e.VerticalTranslation || e.HorizontalTranslation)
+                if (!_pinned)
                 {
                     Close();
                 }
             }
+            void closed(object s, EventArgs e) => Close();
+            void scrolled(object s, TextViewLayoutChangedEventArgs e)
+            {
+                if (!_pinned && (e.VerticalTranslation || e.HorizontalTranslation))
+                {
+                    Close();
+                }
+            }
+            // A pinned card would float over other applications; hide it while SSMS is in the background.
+            void away_(object s, EventArgs e) => frame.Visibility = Visibility.Hidden;
+            void back(object s, EventArgs e) => frame.Visibility = Visibility.Visible;
+            var app = Application.Current;
             view.Caret.PositionChanged += close;
             view.TextBuffer.Changed += close;
-            view.Closed += close;
+            view.Closed += closed;
             view.LayoutChanged += scrolled;
+            if (app != null)
+            {
+                app.Deactivated += away_;
+                app.Activated += back;
+            }
             popup.Closed += (s, e) =>
             {
                 watch.Stop();
                 view.LayoutChanged -= scrolled;
                 view.Caret.PositionChanged -= close;
                 view.TextBuffer.Changed -= close;
-                view.Closed -= close;
+                view.Closed -= closed;
+                if (app != null)
+                {
+                    app.Deactivated -= away_;
+                    app.Activated -= back;
+                }
             };
             _open = popup;
             _openSpan = span;
+            _host = host;
+            _pinned = pinned;
             popup.IsOpen = true;
-            return frame;
+            return host;
+        }
+
+        private static TextBlock CornerButton(string glyph, string tip)
+        {
+            var button = new TextBlock
+            {
+                Text = glyph,
+                FontFamily = Theme.Icons,
+                FontSize = 11,
+                Padding = new Thickness(5, 4, 5, 4),
+                Opacity = 0.6,
+                Cursor = Cursors.Hand,
+                Background = Brushes.Transparent,
+                ToolTip = tip,
+            };
+            button.MouseEnter += (s, e) => button.Opacity = 1;
+            button.MouseLeave += (s, e) => button.Opacity = 0.6;
+            return button;
         }
     }
 }

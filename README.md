@@ -142,13 +142,31 @@ As you type, a list offers:
 - procedures after `EXEC`, objects after `schema.`;
 - columns after `alias.` or `table.`, and the columns of every table in the statement inside
   `SELECT`, `WHERE` and `ON` (a name found in two tables is inserted with its alias);
-- columns inside `INSERT INTO t (`, and the variables declared in the script after `@`.
+- columns inside `INSERT INTO t (`, and the variables declared in the script after `@`;
+- the columns of temporary tables and table variables the script defines (`CREATE TABLE #t`,
+  `DECLARE @t TABLE`, `SELECT ... INTO #t`);
+- objects of another database of the server after `OtherDb.` and `OtherDb.dbo.`, with their
+  columns; linked servers after `FROM`;
+- only the words that can come next: after `c.Name ` the operators and clauses (AND, LIKE, IS,
+  ORDER BY...), after `INNER` JOIN, after `IS` NULL, after `ORDER BY c.Name ` ASC and DESC, data types
+  after `CAST(x AS` and `DECLARE @x`, table hints in `WITH (`, query hints in `OPTION (`, and the
+  statements where one starts;
+- in DDL and permissions: what follows `ALTER TABLE t`, the table's columns after `ALTER COLUMN`,
+  in `CREATE INDEX ... ON t (` and `INCLUDE (`, column options in `CREATE TABLE`, objects after
+  `GRANT ... ON`; `WHEN MATCHED THEN` and its actions in MERGE;
+- after `EXEC name a, `, the parameters not given yet.
+
+The first item is selected only when what you typed matches it for sure: the whole word, its start,
+or the initials of its parts (`cid` for CustomerId). Otherwise nothing is selected and Enter and
+Tab keep their usual meaning. The item picked for some letters is selected first the next time.
 
 Up/Down moves, Enter or Tab inserts, Esc closes, Ctrl+Space opens the list. Next to the list, a
 box shows the definition of the selected table, view or procedure. Which keys insert (Tab, Enter,
 Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
-background the first time a database is used and follows `USE`; **Tools > QuillSQL > Refresh T-SQL
-Suggestions** reloads it after schema changes.
+background the first time a database is used and follows `USE`. When tables, columns or other
+objects change, by you or anyone else, it reloads by itself: a light check runs at most once a
+minute while you type, and at once on Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions**
+reloads everything.
 
 The list also writes code:
 
@@ -160,7 +178,19 @@ The list also writes code:
 - built-in and scalar functions with their parentheses, the caret inside: `GETDATE()`;
 - after `EXEC`, the procedure with all its parameters, one per line with its type;
 - after `INSERT INTO table `, the column list and a `VALUES` row with a placeholder per column;
-  after `UPDATE table SET `, every column (identity, computed and rowversion columns are skipped).
+  after `UPDATE table SET `, every column (identity, computed and rowversion columns are skipped);
+- in a select list, **(choose columns…)** opens a list of check boxes to insert several columns at
+  once;
+- aliases leave out prefixes such as `tbl` (`tblCustomer AS c`), or use your own per table; both are
+  set in Options.
+
+While you type the arguments of a function or procedure, a tip above the line shows its
+parameters, the current one in bold (Esc closes it).
+
+F12 on a procedure, view or function created `WITH ENCRYPTION` offers to decrypt it. QuillSQL then
+reads the definition over the dedicated admin connection (DAC), which needs a sysadmin login and,
+when SSMS runs on another computer, "remote admin connections" turned on; nothing is changed on
+the server. SQL Server Express and LocalDB start without the DAC.
 
 While you type, `'`, `[` and `/*` are closed for you (and `(` if you turn it on); typing the
 closing character moves over it.
@@ -233,6 +263,31 @@ windows for a conversation on one topic: ask, then keep asking, and Claude remem
 - **New chat** starts another topic; **History** reopens an earlier one to continue it. Chats
   are kept in `%LOCALAPPDATA%\QuillSQL\chats`.
 - Enter sends, Shift+Enter starts a new line, Esc stops an answer.
+- **Each conversation is about one query window**, shown above the box: "Ask about:
+  SQLQuery3.sql server / database". A new chat takes the tab you have open; once you have asked,
+  it stays on that window even when you switch tabs, and shows "You are in SQLQuery5.sql · Add
+  it · Ask only about it" instead of guessing. **Add tab** puts more windows in the conversation,
+  to compare queries, even on different servers; × removes one. Claude reads the queries from
+  those windows ("this query" is enough), each plan and lookup runs on the connection of the
+  window it is about, and each step names that window.
+- **Claude looks things up itself.** While it answers, Claude can read the connected database
+  through read-only tools: find objects and columns, describe a table (columns, keys, indexes,
+  partitions), read a definition, index usage, missing-index hints, statistics, an estimated plan,
+  Query Store, the queries running now and the server settings. Each lookup shows as a step under
+  the answer; click it to see what Claude read.
+  In depth, it can also find which queries use an index, queries that got slower, what queries
+  wait on, plan warnings (implicit conversions, spills, key lookups...), parameter sniffing,
+  procedure statistics, memory grants, CPU/IO/memory use, blocking chains, locks, open
+  transactions, recent deadlocks, unused and duplicate indexes, foreign keys without an index,
+  heaps, stale statistics, page splits and lock waits per index, file latency, log and tempdb use,
+  identity columns close to their limit, recent schema changes and connections.
+- **Let AI read data** (off by default) also lets Claude run read-only SELECTs, measure a query
+  and profile a column, at most 200 rows, in a transaction that is always rolled back; statements
+  that write are refused.
+- Each lookup may take at most 60 seconds; change it in **Options > AI** (10 to 600).
+- Nothing needs installing or configuring in Claude Code: QuillSQL serves these tools from SSMS
+  on 127.0.0.1, only during an answer, behind a one-time token, and passes them to `claude` for
+  that answer only.
 
 The commands below start a new topic in the chat with the right context, so you can ask follow-up
 questions:
@@ -254,8 +309,8 @@ step. Optional settings in
 
 ### Safety at a glance
 
-- **Colored tabs**: query windows connected to servers you mark get a colored document tab and a
-  colored bar above the editor. Right-click a server or a database in Object Explorer and choose
+- **Colored tabs**: query windows connected to servers you mark get a colored document tab.
+  Right-click a server or a database in Object Explorer and choose
   **QuillSQL: Tab Color...** (or use **Tab Color for This Connection...** in the QuillSQL menu),
   pick Production, Staging, UAT, Development, Test or any color, for that database or for every
   database on the server. Options > Tab colors also colors servers by a word in their name, and
@@ -273,7 +328,10 @@ step. Optional settings in
   indexes and where they are stored, and a **Script** tab with Copy and Open buttons. A
   partitioned table says so at the top: column, partition function, `RANGE LEFT`/`RIGHT`, scheme,
   and a **Partitions** tab with each partition's range, rows and filegroup. **F12** opens the
-  script in a new window, including the partition function and scheme.
+  script in a new window, including the partition function and scheme. Hold **Ctrl** and names
+  of objects are underlined like links: **Ctrl+click** opens the card pinned, so it stays open
+  while you read it, type or move around, until you close it with ✕ or Esc. The pin button on a
+  hovered card does the same.
 - **Run with care**: running a `DELETE` or `UPDATE` without `WHERE` asks first, with Cancel as the
   default answer. `TRUNCATE TABLE` and `DROP` can be added in Options.
 - **Highlighting**: every use of the variable, alias or name under the caret is highlighted.
@@ -304,8 +362,10 @@ QuillSQL runs on your machine and talks only to:
 - **Claude**, through your Claude Code CLI, only when you run an AI command. It sends your
   request, the selection or script, and the names and types of the tables it uses; the plan
   commands add row counts, index definitions and a plan summary (which includes literal and
-  parameter values from the query); Query Store review adds the slowest queries' text. Table rows
-  are never sent.
+  parameter values from the query); Query Store review adds the slowest queries' text. In the AI
+  chat, Claude can also look up metadata, statistics, plans, Query Store and the running queries
+  through the read-only tools. Table rows are sent only if you turn on **Let AI read data**, and
+  then only the rows of the SELECTs Claude runs (at most 200 each).
 
 Query history stays in `%LOCALAPPDATA%\QuillSQL\history.jsonl` (the last 5000 entries). It holds
 the full text of your scripts, so delete it if they contain secrets.
@@ -434,8 +494,10 @@ installed copies offer the update within a day.
 
 - QuillSQL reads T-SQL as tokens rather than a full parse. It covers everyday queries, DML and
   DDL; unusual syntax may get no suggestion, rewrite or warning, but it is not changed wrongly.
-- With Microsoft Entra logins, features that need metadata are unavailable; formatting, snippets,
-  colors and history still work.
+- With Microsoft Entra logins, QuillSQL connects with the sign-in SSMS keeps for the query
+  window, asking SSMS for a fresh access token each time it connects, so an expired token is
+  renewed the same way SSMS renews it. If SSMS cannot renew it silently, run a query in the window
+  to sign in again. This relies on SSMS internals and is new: report it if a window is not read.
 - Compare's Microsoft Entra sign-in: "integrated" takes the token of the account signed in to the
   Azure CLI (`az login`) rather than Windows' own single sign-on, and "MFA" uses the device-code
   page (microsoft.com/devicelogin). Federated (ADFS) password sign-in is not supported. Entra

@@ -21,6 +21,8 @@ namespace QuillSql.Vsix
         /// <summary>The context sent with a user message, shown on request.</summary>
         [DataMember(Name = "context")] public string Context { get; set; }
         [DataMember(Name = "time")] public DateTime Time { get; set; } = DateTime.Now;
+        /// <summary>What the AI looked up in the database for an answer, as short labels.</summary>
+        [DataMember(Name = "steps")] public List<string> Steps { get; set; }
     }
 
     /// <summary>One conversation on one topic, saved in %LOCALAPPDATA%\QuillSQL\chats.</summary>
@@ -30,6 +32,10 @@ namespace QuillSql.Vsix
         [DataMember(Name = "id")] public string Id { get; set; } = Guid.NewGuid().ToString("N");
         [DataMember(Name = "title")] public string Title { get; set; }
         [DataMember(Name = "connection")] public string Connection { get; set; }
+        /// <summary>The tab name of the query window the conversation is about.</summary>
+        [DataMember(Name = "window")] public string Window { get; set; }
+        /// <summary>The tab names of all the query windows the conversation is about.</summary>
+        [DataMember(Name = "windows")] public List<string> Windows { get; set; }
         /// <summary>The Claude Code session that remembers the conversation.</summary>
         [DataMember(Name = "session")] public string Session { get; set; }
         [DataMember(Name = "updated")] public DateTime Updated { get; set; } = DateTime.Now;
@@ -143,6 +149,20 @@ namespace QuillSql.Vsix
             "You cannot connect to the database and never claim to have run anything. When analyzing a plan, cite its operators, " +
             "estimated against actual rows, warnings and missing-index hints, and never propose an index that already exists. " +
             "Be concise and concrete; the developer can ask for more. " +
+            "Each conversation is about one or more query windows the developer chose; current_query reads them (script, selection, connection). " +
+            "Every database tool runs on one of them: the one you name in its window argument, or the first. When the windows are connected to " +
+            "different databases, always pass window. When the developer says 'this query' or 'my query', read it with current_query instead of asking; " +
+            "open_query_windows and read_query_window show other windows' scripts only. Say which window each plan or finding comes from. " +
+            "When a window is connected you have read-only tools on its database: objects and code (search_objects, find_columns, describe_object, " +
+            "get_definition, dependencies, search_definitions), indexes and statistics (index_usage, missing_indexes, statistics, stats_histogram, " +
+            "index_fragmentation, largest_tables), plans and history (estimated_plan, query_store_top, query_store_search, query_store_query, " +
+            "plan_cache_top) and the server now (current_activity, wait_stats, server_info), and in-depth ones: queries_using_index, query_store_regressed, " +
+            "query_store_waits, plan_warnings, parameter_sniffing, procedure_stats, memory_grants, resource_usage, blocking_chains, locks, open_transactions, " +
+            "deadlocks, unused_indexes, duplicate_indexes, unindexed_foreign_keys, heaps, stale_statistics, index_operational_stats, file_io_latency, " +
+            "log_usage, tempdb_usage, identity_usage, recent_changes, sessions_summary and column_profile. Prefer the most specific tool over writing " +
+            "your own queries on system views: they are tuned and time-limited. Use them whenever you need a fact instead of guessing " +
+            "or asking for it, and say briefly what you looked at. Before advising to change or drop something, check dependencies. " +
+            "run_query and measure_query run the query, so they work only when the developer allows reading data; prefer the other tools. " +
             "End every answer with one last line exactly in the form `" + NextMarker + " question one | question two | question three`: " +
             "up to three short follow-up questions the developer would likely ask next, written as the developer would ask them.";
 
@@ -156,7 +176,7 @@ namespace QuillSql.Vsix
         /// Sends one turn and streams the answer through `delta` (called on a background thread).
         /// Returns the full answer; `session` is set to the conversation's session.
         /// </summary>
-        public static string Send(ref string session, string input, Action<string> delta, CancellationToken cancel)
+        public static string Send(ref string session, string input, Action<string> delta, CancellationToken cancel, string toolsToken = null)
         {
             var claude = AiAssistant.FindClaude() ?? throw new InvalidOperationException(Loc.T("Claude Code CLI was not found. Install it from https://code.claude.com and sign in with `claude` to use the AI commands."));
             var settings = AiAssistant.LoadSettings();
@@ -171,6 +191,14 @@ namespace QuillSql.Vsix
                 "--restricted", "--strict-mcp-config", "--disable-slash-commands",
                 "--output-format", "stream-json", "--verbose", "--include-partial-messages",
             };
+            if (toolsToken != null)
+            {
+                // The database tools served by McpServer; the token reaches claude only through its environment.
+                var toolsFile = Path.Combine(Updater.Folder, "ai-tools.json");
+                File.WriteAllText(toolsFile, "{\"mcpServers\":{\"quillsql\":{\"type\":\"http\",\"url\":\"http://127.0.0.1:" + McpServer.Port
+                    + "/mcp\",\"headers\":{\"Authorization\":\"Bearer ${QUILLSQL_TOOLS_TOKEN}\"}}}}", new UTF8Encoding(false));
+                args.AddRange(new[] { "--mcp-config", toolsFile, "--allowedTools", "mcp__quillsql__*", "--max-turns", "30" });
+            }
             if (!string.IsNullOrEmpty(session))
             {
                 args.Add("--resume");
@@ -197,6 +225,10 @@ namespace QuillSql.Vsix
                 StandardErrorEncoding = new UTF8Encoding(false),
                 WorkingDirectory = work,
             };
+            if (toolsToken != null)
+            {
+                start.EnvironmentVariables["QUILLSQL_TOOLS_TOKEN"] = toolsToken;
+            }
             var watch = Stopwatch.StartNew();
             using (var process = Process.Start(start))
             using (cancel.Register(() =>
@@ -236,7 +268,13 @@ namespace QuillSql.Vsix
                     {
                         continue;
                     }
-                    if (parsed?.Type == "stream_event" && parsed.Event?.Type == "content_block_delta" && parsed.Event.Delta?.Type == "text_delta" && parsed.Event.Delta.Text != null)
+                    if (parsed?.Type == "stream_event" && parsed.Event?.Type == "message_start" && streamed.Length > 0)
+                    {
+                        // Claude answers again after using a tool: start a new paragraph.
+                        streamed.Append("\n\n");
+                        delta("\n\n");
+                    }
+                    else if (parsed?.Type == "stream_event" && parsed.Event?.Type == "content_block_delta" && parsed.Event.Delta?.Type == "text_delta" && parsed.Event.Delta.Text != null)
                     {
                         streamed.Append(parsed.Event.Delta.Text);
                         delta(parsed.Event.Delta.Text);
@@ -261,7 +299,8 @@ namespace QuillSql.Vsix
                     throw new InvalidOperationException("Claude failed: " + (detail.Length > 300 ? detail.Substring(0, 300) : detail));
                 }
                 session = result.SessionId ?? session;
-                return result.Result ?? streamed.ToString();
+                // Everything Claude wrote, including what it said before using tools.
+                return streamed.Length > 0 ? streamed.ToString().Trim() : result.Result ?? "";
             }
         }
 

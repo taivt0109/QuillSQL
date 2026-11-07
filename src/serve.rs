@@ -22,7 +22,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use quillsql::complete::{CompleteOptions, Schema, complete_full, utf16_to_byte};
+use quillsql::complete::{CompleteOptions, Schema, complete_across, utf16_to_byte};
 use quillsql::refactor::{self, Renamed};
 use quillsql::snippets::{self, Env, Snippet};
 use quillsql::{Options, TableAlias, analysis, format, info, plan, script, style, tools};
@@ -183,7 +183,9 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
             let caret = usize_field(request, "caret")?;
             let options: CompleteOptions = serde_json::from_value(request["options"].clone()).unwrap_or_default();
             let schema = state.schemas.get(key);
-            let completion = serde_json::to_value(complete_full(text, caret, schema, &state.snippets, options)).map_err(|e| e.to_string())?;
+            // Other databases the script names, already loaded under these keys.
+            let others: Vec<&Schema> = request["others"].as_array().into_iter().flatten().filter_map(|k| state.schemas.get(k.as_str()?)).collect();
+            let completion = serde_json::to_value(complete_across(text, caret, schema, &others, &state.snippets, options)).map_err(|e| e.to_string())?;
             Ok(with_descriptions(completion, schema))
         }
         "tab" => tab(request, state),
@@ -246,6 +248,11 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
             let (text, count) = analysis::apply_fixes(str_field(request, "text")?, state.schemas.get(key), codes.as_deref());
             Ok(json!({ "text": text, "count": count }))
         }
+        "signature" => {
+            let text = str_field(request, "text")?;
+            let caret = usize_field(request, "caret")?;
+            serde_json::to_value(quillsql::signature::signature_at(text, caret, state.schemas.get(key))).map_err(|e| e.to_string())
+        }
         "hover" => Ok(json!({ "text": info::hover(str_field(request, "text")?, usize_field(request, "caret")?, state.schemas.get(key)) })),
         "occurrences" => Ok(json!({ "ranges": info::occurrences(str_field(request, "text")?, usize_field(request, "caret")?) })),
         "schema_context" => {
@@ -276,10 +283,12 @@ pub fn run(opts: &Options) -> std::io::Result<()> {
     let mut state = State { schemas: HashMap::new(), snippets: load_snippets(), options: opts.clone() };
     for line in stdin.lock().lines() {
         let line = line?;
+        // A .NET client may start the stream with a UTF-8 byte order mark.
+        let line = line.trim_start_matches('\u{feff}');
         if line.trim().is_empty() {
             continue;
         }
-        let reply = match serde_json::from_str::<Value>(&line) {
+        let reply = match serde_json::from_str::<Value>(line) {
             Ok(request) => {
                 let id = request["id"].clone();
                 match handle(&request, &mut state) {

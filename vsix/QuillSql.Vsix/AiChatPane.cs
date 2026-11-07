@@ -15,6 +15,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudio.Threading;
 using TaskScheduler = System.Threading.Tasks.TaskScheduler;
 
@@ -84,10 +85,38 @@ namespace QuillSql.Vsix
         private static int Lines(string text) => text.Split('\n').Length;
 
         /// <summary>
-        /// Takes what is needed from the editor (UI thread). Returns null with `problem` set when the
+        /// Takes what is needed from the conversation's query windows (UI thread): the query, tables
+        /// and plan of each, Query Store of the first. Returns null with `problem` set when the
         /// context cannot be read, or with `problem` null when the user cancelled.
         /// </summary>
-        public static ChatContext Prepare(ChatAttach attach, out string problem)
+        public static ChatContext Prepare(ChatAttach attach, IList<QueryWindow> windows, out string problem)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (windows.Count == 0)
+            {
+                return PrepareOne(attach, null, out problem);
+            }
+            problem = null;
+            var context = new ChatContext();
+            var builds = new List<Func<string>>();
+            for (var i = 0; i < windows.Count; i++)
+            {
+                var one = PrepareOne(i == 0 ? attach : attach & ~ChatAttach.QueryStore, windows[i], out problem);
+                if (one == null)
+                {
+                    return null;
+                }
+                if (context.Labels.Count == 0)
+                {
+                    context.Labels.AddRange(one.Labels);
+                }
+                builds.Add(one.Build);
+            }
+            context.Build = () => string.Join("\n\n====\n\n", builds.Select(b => b()).Where(b => b.Length > 0));
+            return context;
+        }
+
+        private static ChatContext PrepareOne(ChatAttach attach, QueryWindow window, out string problem)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             problem = null;
@@ -96,19 +125,20 @@ namespace QuillSql.Vsix
             {
                 return context;
             }
-            var editor = EditorContext.Active();
-            var connection = ConnectionResolver.TryGetActive();
-            var key = Commands.MetadataKey(out _);
+            // Everything comes from the window the conversation is about, not the one in front.
+            var editor = window?.Editor;
+            var connection = window?.Connection;
+            var key = window?.Key() ?? "";
             var needsEditor = (attach & (ChatAttach.Query | ChatAttach.Schema | ChatAttach.EstimatedPlan | ChatAttach.ActualPlan)) != 0;
             var needsConnection = (attach & (ChatAttach.EstimatedPlan | ChatAttach.ActualPlan | ChatAttach.QueryStore)) != 0;
             if (needsEditor && editor == null)
             {
-                problem = "Open a query window first: the query is read from it.";
+                problem = "Choose the query window to ask about, above the box: the query is read from it.";
                 return null;
             }
             if (needsConnection && (connection == null || !connection.CanQuery))
             {
-                problem = "Connect the query window with Windows or SQL Server authentication first: the plan and Query Store are read from the database.";
+                problem = "Connect the query window first: the plan and Query Store are read from the database.";
                 return null;
             }
             var selected = editor != null && editor.HasSelection;
@@ -117,6 +147,10 @@ namespace QuillSql.Vsix
             string schema = null;
             PlanTarget target = null;
             var parts = new List<string>();
+            if (window != null)
+            {
+                parts.Add("Query window: " + window.Name);
+            }
             if (description != null)
             {
                 parts.Add("Server and database: " + description);
@@ -218,6 +252,8 @@ namespace QuillSql.Vsix
         private const string ExplainGlyph = "\uE897";
         private const string ReviewGlyph = "\uE73E";
         private const string ClockGlyph = "\uE916";
+        private const string ToolGlyph = "\uE721";
+        private const string DataGlyph = "\uE8F1";
 
         private readonly TextBlock _title = new TextBlock { FontWeight = FontWeights.SemiBold, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis };
         private readonly StackPanel _connection = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 3, 0, 0) };
@@ -236,6 +272,17 @@ namespace QuillSql.Vsix
         private readonly Button _send;
         private readonly TextBlock _sendIcon;
         private readonly Dictionary<ChatAttach, ToggleButton> _chips = new Dictionary<ChatAttach, ToggleButton>();
+        private ToggleButton _allowData;
+        /// <summary>The query window the conversation is about, and its tab name.</summary>
+        private readonly List<IVsWindowFrame> _windows = new List<IVsWindowFrame>();
+        private readonly List<string> _windowNames = new List<string>();
+        /// <summary>Whether the user chose the windows; until then a new conversation follows the open tab.</summary>
+        private bool _chosen;
+        private readonly WrapPanel _windowChips = new WrapPanel { VerticalAlignment = VerticalAlignment.Center };
+        /// <summary>Told to the AI with the next message after the user picks another window.</summary>
+        private string _switchNote;
+        private readonly StackPanel _switchHint = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 4) };
+        private readonly DispatcherTimer _follow = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         private ChatThread _thread;
         private CancellationTokenSource _busy;
         private WrapPanel _followUps;
@@ -278,6 +325,7 @@ namespace QuillSql.Vsix
             AddChip(attachRow, ChatAttach.EstimatedPlan, "Estimated plan", "The estimated execution plan, with row counts and indexes. Nothing is run.");
             AddChip(attachRow, ChatAttach.ActualPlan, "Actual plan", "Runs the query once (read-only queries only, after asking) and sends the measured plan.");
             AddChip(attachRow, ChatAttach.QueryStore, "Slow queries", "The 10 most expensive queries of the last 7 days from Query Store.");
+            _allowData = DataChip(attachRow);
             _input.SetResourceReference(Control.BackgroundProperty, EnvironmentColors.ComboBoxBackgroundBrushKey);
             _input.SetResourceReference(Control.ForegroundProperty, EnvironmentColors.ComboBoxTextBrushKey);
             _input.SetResourceReference(Control.BorderBrushProperty, EnvironmentColors.ComboBoxBorderBrushKey);
@@ -318,7 +366,13 @@ namespace QuillSql.Vsix
             DockPanel.SetDock(keys, Dock.Right);
             footer.Children.Add(keys);
             footer.Children.Add(safety);
+            // Which query window the conversation is about: chosen, shown, never guessed.
+            var windowRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var askAbout = new TextBlock { Text = Loc.T("Ask about:"), Opacity = 0.7, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 4, 6, 0) };
+            windowRow.Children.Add(askAbout);
+            windowRow.Children.Add(_windowChips);
             var composer = new StackPanel { Margin = new Thickness(14, 10, 14, 10) };
+            composer.Children.Add(windowRow);
             composer.Children.Add(attachRow);
             composer.Children.Add(box);
             composer.Children.Add(footer);
@@ -332,8 +386,32 @@ namespace QuillSql.Vsix
             root.Children.Add(_scroll);
             Child = root;
 
-            IsVisibleChanged += (s, e) => Refresh();
+            IsVisibleChanged += (s, e) =>
+            {
+                if (IsVisible)
+                {
+                    _follow.Start();
+                }
+                else
+                {
+                    _follow.Stop();
+                }
+                Refresh();
+            };
             GotKeyboardFocus += (s, e) => Refresh();
+            // Notice tab switches: a new conversation follows the open tab, a started one shows a hint.
+            _follow.Tick += (s, e) =>
+            {
+                try
+                {
+                    Refresh();
+                }
+                catch (Exception ex)
+                {
+                    _follow.Stop();
+                    Log.Error("following the query window", ex);
+                }
+            };
             NewTopic(null, ChatAttach.None);
         }
 
@@ -351,6 +429,10 @@ namespace QuillSql.Vsix
                 return;
             }
             _thread = null;
+            _windows.Clear();
+            _windowNames.Clear();
+            _chosen = false;
+            _switchNote = null;
             _messages.Children.Clear();
             _followUps = null;
             _title.Text = Loc.T("New conversation");
@@ -375,6 +457,17 @@ namespace QuillSql.Vsix
                 return;
             }
             _thread = thread;
+            // Back to the windows of the conversation, when tabs of those names are still open.
+            var all = QueryWindows.All();
+            _windows.Clear();
+            _windowNames.Clear();
+            foreach (var name in thread.Windows ?? (thread.Window == null ? new List<string>() : new List<string> { thread.Window }))
+            {
+                _windowNames.Add(name);
+                _windows.Add(all.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase))?.Frame);
+            }
+            _chosen = true;
+            _switchNote = null;
             _messages.Children.Clear();
             _followUps = null;
             _title.Text = thread.Title;
@@ -392,7 +485,17 @@ namespace QuillSql.Vsix
                 else if (m.Role == "assistant")
                 {
                     var answer = AiChat.WithoutNext(m.Text, out var next);
-                    _messages.Children.Add(AssistantMessage(answer, out _));
+                    var view = AssistantMessage(answer, out _);
+                    if (m.Steps != null && m.Steps.Count > 0)
+                    {
+                        var steps = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
+                        foreach (var label in m.Steps)
+                        {
+                            AddStep(steps, label, null)(null, false);
+                        }
+                        view.Children.Insert(1, steps);
+                    }
+                    _messages.Children.Add(view);
                     if (i == thread.Messages.Count - 1)
                     {
                         AddFollowUps(next);
@@ -475,11 +578,20 @@ namespace QuillSql.Vsix
             {
                 return;
             }
+            Refresh();
+            var windows = _windows.Select(QueryWindows.Refresh).ToList();
+            var closed = _windowNames.Where((n, i) => windows[i] == null).ToList();
+            if (closed.Count > 0)
+            {
+                ShowNotice(Loc.T("The query window " + string.Join(", ", closed) + " was closed. Remove it or choose another, above the box."));
+                return;
+            }
+            var window = windows.FirstOrDefault();
             ChatContext context;
             string problem;
             try
             {
-                context = ChatContext.Prepare(attach, out problem);
+                context = ChatContext.Prepare(attach, windows, out problem);
             }
             catch (Exception ex)
             {
@@ -501,10 +613,18 @@ namespace QuillSql.Vsix
                 _thread = new ChatThread
                 {
                     Title = question.Length > 70 ? question.Substring(0, 70) + "..." : question,
-                    Connection = ConnectionResolver.TryGetActive()?.Description,
                 };
                 _title.Text = _thread.Title;
             }
+            _thread.Window = window?.Name;
+            _thread.Windows = windows.Select(w => w.Name).ToList();
+            _thread.Connection = window?.Connection?.Description;
+            if (windows.Count > 0 && context.Labels.Count > 0)
+            {
+                context.Labels.Insert(0, string.Join(", ", windows.Select(w => w.Name)));
+            }
+            var note = _switchNote;
+            _switchNote = null;
             RemoveFollowUps();
             var user = new ChatMessage { Role = "user", Text = question, Attached = context.Labels };
             _thread.Messages.Add(user);
@@ -534,6 +654,38 @@ namespace QuillSql.Vsix
             var started = DateTime.Now;
             var streamed = new StringBuilder();
             var shownLength = -1;
+
+            // The database tools the AI may use during this answer, each shown as a step.
+            var target = window?.Connection;
+            var windowName = window?.Name;
+            var steps = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
+            answerView.Children.Insert(1, steps);
+            var stepLabels = new List<string>();
+            McpSession tools = null;
+            // Always: the editor tools work even when the window cannot be queried.
+            {
+                var rows = new Dictionary<int, Action<string, bool>>();
+                tools = new McpSession { Windows = windows.Select(w => w.Frame).ToList(), AllowData = _allowData.IsChecked == true };
+                tools.Started = (id, name, args) => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    var named = args != null && args.TryGetValue("window", out var w) && w != null ? Convert.ToString(w, CultureInfo.InvariantCulture) : null;
+                    var on = named != null ? windows.FirstOrDefault(x => x.Caption.IndexOf(named, StringComparison.OrdinalIgnoreCase) >= 0)?.Name ?? named
+                        : name == "current_query" && windows.Count > 1 ? string.Join(", ", windows.Select(x => x.Name)) : windowName;
+                    var label = StepLabel(name, args) + (on != null && name != "open_query_windows" && name != "read_query_window" ? " · " + on : "");
+                    stepLabels.Add(label);
+                    stage = label + "...";
+                    rows[id] = AddStep(steps, label, args);
+                }));
+                tools.Finished = (id, text, failed) => Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    stage = Loc.T("Claude is thinking...");
+                    if (rows.TryGetValue(id, out var done))
+                    {
+                        done(text, failed);
+                    }
+                }));
+            }
+            var toolsToken = tools == null ? null : McpServer.Register(tools);
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
             timer.Tick += (s, e) =>
             {
@@ -563,18 +715,18 @@ namespace QuillSql.Vsix
                 try
                 {
                     sent = context.Build();
-                    var input = sent.Length == 0 ? question : question + "\n\n--- Context ---\n" + sent;
+                    var input = (note == null ? "" : note + "\n\n") + (sent.Length == 0 ? question : question + "\n\n--- Context ---\n" + sent);
                     stage = Loc.T("Claude is thinking...");
                     try
                     {
-                        answer = AiChat.Send(ref session, input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token);
+                        answer = AiChat.Send(ref session, input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token, toolsToken);
                     }
                     catch (InvalidOperationException) when (session != null && streamed.Length == 0 && !cancel.IsCancellationRequested)
                     {
                         // The session is gone (for example the CLI's history was cleared): start a new
                         // one with the conversation so far.
                         session = null;
-                        answer = AiChat.Send(ref session, Transcript(thread) + input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token);
+                        answer = AiChat.Send(ref session, Transcript(thread) + input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token, toolsToken);
                     }
                 }
                 catch (OperationCanceledException)
@@ -586,6 +738,7 @@ namespace QuillSql.Vsix
                     Log.Error("AI chat", ex);
                     error = ex.Message;
                 }
+                McpServer.Unregister(toolsToken);
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                 timer.Stop();
                 answerView.Children.Remove(progressRow);
@@ -598,7 +751,7 @@ namespace QuillSql.Vsix
                     var text = AiChat.WithoutNext(answer, out var next);
                     Render(document, text);
                     AddCopyAnswer(answerView, text);
-                    thread.Messages.Add(new ChatMessage { Role = "assistant", Text = answer });
+                    thread.Messages.Add(new ChatMessage { Role = "assistant", Text = answer, Steps = stepLabels });
                     if (_thread == thread)
                     {
                         AddFollowUps(next);
@@ -700,6 +853,165 @@ namespace QuillSql.Vsix
             row.Children.Add(chip);
         }
 
+        /// <summary>
+        /// The switch that lets the AI read rows with read-only queries. Off by default: without it
+        /// the AI sees structure, indexes, statistics and plans, but no data.
+        /// </summary>
+        private ToggleButton DataChip(Panel row)
+        {
+            var icon = Theme.Icon(DataGlyph, 10);
+            icon.Margin = new Thickness(0, 0, 5, 0);
+            var content = new StackPanel { Orientation = Orientation.Horizontal };
+            content.Children.Add(icon);
+            content.Children.Add(new TextBlock { Text = Loc.T("Let AI read data"), VerticalAlignment = VerticalAlignment.Center });
+            var chip = new ToggleButton
+            {
+                Content = content,
+                Template = ChipTemplate(),
+                Padding = new Thickness(8, 2, 9, 3),
+                Margin = new Thickness(10, 0, 6, 4),
+                Cursor = Cursors.Hand,
+                FocusVisualStyle = null,
+                IsChecked = AiAssistant.LoadSettings().AllowData,
+                ToolTip = Loc.T("On: when it needs to see rows, the AI may run read-only SELECTs (at most 200 rows, in a transaction that is rolled back). Off: it sees only structure, indexes, statistics and plans."),
+            };
+            ToolTipService.SetShowOnDisabled(chip, true);
+            void paint()
+            {
+                var on = chip.IsChecked == true;
+                chip.Background = on ? Theme.Frozen(Theme.Tint(Theme.Amber, 0x38)) : Brushes.Transparent;
+                chip.BorderBrush = on ? Theme.Frozen(Theme.Tint(Theme.Amber, 0xC0)) : Theme.Line;
+                chip.Opacity = chip.IsEnabled ? 1 : 0.45;
+            }
+            void save()
+            {
+                paint();
+                var settings = AiAssistant.LoadSettings();
+                settings.AllowData = chip.IsChecked == true;
+                settings.Save();
+            }
+            chip.Checked += (s, e) => save();
+            chip.Unchecked += (s, e) => save();
+            chip.IsEnabledChanged += (s, e) => paint();
+            paint();
+            row.Children.Add(chip);
+            return chip;
+        }
+
+        /// <summary>A short description of a database tool call, shown as a step of the answer.</summary>
+        private static string StepLabel(string name, IDictionary<string, object> arguments)
+        {
+            string arg(string key) => arguments != null && arguments.TryGetValue(key, out var v) && v != null ? Convert.ToString(v, CultureInfo.InvariantCulture) : "";
+            switch (name)
+            {
+                case "search_objects": return Loc.T("Searched objects: " + arg("pattern"));
+                case "find_columns": return Loc.T("Searched columns: " + arg("pattern"));
+                case "describe_object": return Loc.T("Read the structure of " + arg("name"));
+                case "get_definition": return Loc.T("Read the definition of " + arg("name"));
+                case "index_usage": return Loc.T("Read the index usage of " + arg("table"));
+                case "missing_indexes": return arg("table").Length > 0 ? Loc.T("Read the missing indexes of " + arg("table")) : Loc.T("Read the missing indexes");
+                case "statistics": return Loc.T("Read the statistics of " + arg("table"));
+                case "estimated_plan": return Loc.T("Compiled an estimated plan");
+                case "query_store_top": return Loc.T("Read Query Store");
+                case "current_activity": return Loc.T("Read the running queries");
+                case "server_info": return Loc.T("Read the server settings");
+                case "run_query": return Loc.T("Ran a read-only query");
+                case "current_query": return Loc.T("Read the query");
+                case "dependencies": return Loc.T("Read what uses " + arg("name"));
+                case "search_definitions": return Loc.T("Searched the code for " + arg("text"));
+                case "plan_cache_top": return Loc.T("Read the plan cache");
+                case "query_store_query": return Loc.T("Read the history of query " + arg("query_id"));
+                case "query_store_search": return Loc.T("Searched Query Store for " + arg("text"));
+                case "wait_stats": return Loc.T("Read the wait statistics");
+                case "measure_query": return Loc.T("Measured a query");
+                case "stats_histogram": return Loc.T("Read the histogram of " + arg("table") + "." + arg("statistic"));
+                case "largest_tables": return Loc.T("Read the largest tables");
+                case "index_fragmentation": return Loc.T("Read the fragmentation of " + arg("table"));
+                case "queries_using_index": return Loc.T("Found the queries using " + arg("index"));
+                case "query_store_regressed": return Loc.T("Looked for queries that got slower");
+                case "query_store_waits": return Loc.T("Read what queries waited on");
+                case "plan_warnings": return Loc.T("Checked plans for warnings");
+                case "parameter_sniffing": return Loc.T("Checked parameter sniffing");
+                case "procedure_stats": return Loc.T("Read procedure statistics");
+                case "memory_grants": return Loc.T("Read the memory grants");
+                case "resource_usage": return Loc.T("Read CPU, IO and memory use");
+                case "blocking_chains": return Loc.T("Read who blocks whom");
+                case "locks": return Loc.T("Read the locks");
+                case "open_transactions": return Loc.T("Read the open transactions");
+                case "deadlocks": return Loc.T("Read the recent deadlocks");
+                case "unused_indexes": return Loc.T("Looked for unused indexes");
+                case "duplicate_indexes": return Loc.T("Looked for duplicate indexes");
+                case "unindexed_foreign_keys": return Loc.T("Looked for foreign keys without an index");
+                case "heaps": return Loc.T("Looked for tables without a clustered index");
+                case "stale_statistics": return Loc.T("Looked for stale statistics");
+                case "index_operational_stats": return Loc.T("Read the index activity of " + arg("table"));
+                case "file_io_latency": return Loc.T("Read the file latency");
+                case "log_usage": return Loc.T("Read the log usage");
+                case "tempdb_usage": return Loc.T("Read the tempdb usage");
+                case "identity_usage": return Loc.T("Checked identity columns");
+                case "recent_changes": return Loc.T("Read the recent changes");
+                case "sessions_summary": return Loc.T("Read the connections");
+                case "column_profile": return Loc.T("Profiled " + arg("table") + "." + arg("column"));
+                case "open_query_windows": return Loc.T("Listed the open query windows");
+                case "read_query_window": return Loc.T("Read the query window " + arg("name"));
+                default: return name;
+            }
+        }
+
+        /// <summary>Adds a step; the returned action marks it done with its result (null for none).</summary>
+        private static Action<string, bool> AddStep(Panel steps, string label, IDictionary<string, object> arguments)
+        {
+            var icon = Theme.Icon(ToolGlyph, 11);
+            icon.Opacity = 0.75;
+            var text = new TextBlock { Text = label, Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+            var status = new TextBlock { Text = "...", Opacity = 0.6, FontSize = 11, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            var head = new StackPanel { Orientation = Orientation.Horizontal, Background = Brushes.Transparent, Opacity = 0.85 };
+            head.Children.Add(icon);
+            head.Children.Add(text);
+            head.Children.Add(status);
+            var details = new TextBox
+            {
+                IsReadOnly = true,
+                FontFamily = Theme.Mono,
+                FontSize = 11,
+                MaxHeight = 240,
+                Background = Theme.Faint,
+                BorderBrush = Theme.Line,
+                Padding = new Thickness(6, 4, 6, 4),
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Visibility = Visibility.Collapsed,
+                Margin = new Thickness(17, 3, 0, 4),
+            };
+            details.SetResourceReference(Control.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+            head.MouseLeftButtonUp += (s, e) =>
+            {
+                if (details.Text.Length > 0)
+                {
+                    details.Visibility = details.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+                }
+            };
+            var row = new StackPanel { Margin = new Thickness(0, 1, 0, 1) };
+            row.Children.Add(head);
+            row.Children.Add(details);
+            steps.Children.Add(row);
+            var started = DateTime.Now;
+            var input = arguments == null ? "" : string.Join("\n", arguments.Select(kv => kv.Key + ": " + kv.Value));
+            return (result, failed) =>
+            {
+                icon.Text = failed ? Theme.WarningGlyph : CheckGlyph;
+                icon.Foreground = Theme.Frozen(failed ? Theme.Amber : Theme.Green);
+                icon.Opacity = 1;
+                status.Text = result == null ? "" : failed ? Loc.T("failed") : (DateTime.Now - started).TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + " s";
+                if (result != null)
+                {
+                    details.Text = (input.Length > 0 ? input + "\n\n" : "") + result;
+                    head.Cursor = Cursors.Hand;
+                    head.ToolTip = Loc.T("Show what the AI read");
+                }
+            };
+        }
+
         private static ControlTemplate _chipTemplate;
 
         private static ControlTemplate ChipTemplate()
@@ -719,7 +1031,11 @@ namespace QuillSql.Vsix
             return _chipTemplate;
         }
 
-        /// <summary>Updates the connection line and which chips can be used, from the active query window.</summary>
+        /// <summary>
+        /// Updates the window the conversation is about, the hint when another tab is open, the
+        /// connection line and which chips can be used. Until the first question, the conversation
+        /// follows the open tab; after that it stays on its window until the user picks another.
+        /// </summary>
         private void Refresh()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -727,31 +1043,79 @@ namespace QuillSql.Vsix
             {
                 return;
             }
-            EditorContext editor = null;
-            ConnectionTarget connection = null;
+            QueryWindow active = null;
+            var windows = new List<QueryWindow>();
             try
             {
-                editor = EditorContext.Active();
-                connection = ConnectionResolver.TryGetActive();
+                active = QueryWindows.Active();
+                // A new conversation follows the open tab until the user picks windows or asks.
+                if (_thread == null && _busy == null && !_chosen && active != null && (_windows.Count != 1 || !ReferenceEquals(active.Frame, _windows[0])))
+                {
+                    _windows.Clear();
+                    _windowNames.Clear();
+                    _windows.Add(active.Frame);
+                    _windowNames.Add(active.Name);
+                }
+                windows = _windows.Select(QueryWindows.Refresh).ToList();
             }
             catch (Exception ex)
             {
-                Log.Error("reading the active query window", ex);
+                Log.Error("reading the query windows", ex);
             }
-            var canQuery = connection != null && connection.CanQuery;
-            _chips[ChatAttach.Query].IsEnabled = editor != null;
-            _chips[ChatAttach.Schema].IsEnabled = editor != null;
-            _chips[ChatAttach.EstimatedPlan].IsEnabled = editor != null && canQuery;
-            _chips[ChatAttach.ActualPlan].IsEnabled = editor != null && canQuery;
-            _chips[ChatAttach.QueryStore].IsEnabled = canQuery;
+            var window = windows.FirstOrDefault(w => w != null);
+            var connection = window?.Connection;
+            var canQuery = windows.Any(w => w?.Connection != null && w.Connection.CanQuery);
+            _chips[ChatAttach.Query].IsEnabled = window != null;
+            _chips[ChatAttach.Schema].IsEnabled = window != null;
+            _chips[ChatAttach.EstimatedPlan].IsEnabled = window != null && canQuery;
+            _chips[ChatAttach.ActualPlan].IsEnabled = window != null && canQuery;
+            _chips[ChatAttach.QueryStore].IsEnabled = connection != null && connection.CanQuery;
+            _allowData.IsEnabled = canQuery;
             if (_chips[ChatAttach.Query].Content is StackPanel content && content.Children[1] is TextBlock label)
             {
-                label.Text = Loc.T(editor != null && editor.HasSelection ? "Selection" : "Query");
+                label.Text = Loc.T(windows.Count == 1 && window != null && window.HasSelection ? "Selection" : "Query");
             }
 
-            _connection.Children.Clear();
+            // One chip per window: its color, tab name and connection, and × to remove it.
+            var signature = string.Join("|", windows.Select((w, i) => _windowNames[i] + "=" + (w == null ? "closed" : w.Connection?.Description))) + "#" + active?.Name + "#" + (_thread != null || _chosen);
+            if (signature == (string)_windowChips.Tag)
+            {
+                return;
+            }
+            _windowChips.Tag = signature;
+            _windowChips.Children.Clear();
+            for (var i = 0; i < _windowNames.Count; i++)
+            {
+                _windowChips.Children.Add(WindowChip(_windowNames[i], windows[i], i));
+            }
+            if (_windowNames.Count == 0)
+            {
+                _windowChips.Children.Add(new TextBlock { Text = Loc.T("No query window open"), Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 4, 8, 4) });
+            }
+            var add = Theme.FlatButton(Loc.T("Add tab"), AddGlyph);
+            add.Padding = new Thickness(7, 2, 8, 2);
+            add.Margin = new Thickness(0, 0, 6, 4);
+            add.Background = Brushes.Transparent;
+            add.ToolTip = Loc.T("Ask about several query windows at once, for example to compare two queries. Each keeps its own connection.");
+            add.Click += (s, e) => AddWindowMenu(add);
+            _windowChips.Children.Add(add);
+
+            // Another tab is open: offer to add it or to switch to it, never do it by itself.
+            _switchHint.Children.Clear();
+            if ((_thread != null || _chosen) && active != null && !_windows.Any(f => ReferenceEquals(f, active.Frame)))
+            {
+                _switchHint.Children.Add(new TextBlock { Text = Loc.T("You are in " + active.Name), Opacity = 0.6, FontSize = 11, VerticalAlignment = VerticalAlignment.Center });
+                var frame = active;
+                _switchHint.Children.Add(Link(Loc.T("Add it"), () => AddWindow(frame)));
+                _switchHint.Children.Add(Link(Loc.T("Ask only about it"), () => Replace(frame)));
+            }
+            if (_switchHint.Children.Count > 0)
+            {
+                _windowChips.Children.Add(_switchHint);
+            }
+
             var description = connection?.Description ?? _thread?.Connection;
-            var rule = description == null ? null : ConnectionColors.Find(description);
+            var rule = description == null ? null : ConnectionColors.Find(description);            _connection.Children.Clear();
             var dot = new Border { Width = 8, Height = 8, CornerRadius = new CornerRadius(4), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 1, 6, 0) };
             dot.Background = rule != null ? Theme.BrushFromText(rule.Color) : Theme.Strong;
             _connection.Children.Add(dot);
@@ -769,6 +1133,143 @@ namespace QuillSql.Vsix
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,
             });
+        }
+
+        private static TextBlock Link(string text, Action click)
+        {
+            var link = new TextBlock { Text = text, FontSize = 11, Margin = new Thickness(8, 0, 0, 0), Cursor = Cursors.Hand, TextDecorations = TextDecorations.Underline, VerticalAlignment = VerticalAlignment.Center };
+            link.MouseLeftButtonUp += (s, e) => click();
+            return link;
+        }
+
+        /// <summary>A window of the conversation: color dot, tab name, connection, and × when there are several.</summary>
+        private UIElement WindowChip(string name, QueryWindow window, int index)
+        {
+            var description = window?.Connection?.Description;
+            var rule = description == null ? null : ConnectionColors.Find(description);
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            row.Children.Add(new Border { Width = 8, Height = 8, CornerRadius = new CornerRadius(4), Margin = new Thickness(0, 1, 6, 0), VerticalAlignment = VerticalAlignment.Center, Background = rule != null ? Theme.BrushFromText(rule.Color) : Theme.Strong });
+            row.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+            var detail = new TextBlock
+            {
+                Text = "  " + (window == null ? Loc.T("(closed)") : description ?? Loc.T("not connected")),
+                Opacity = 0.7,
+                MaxWidth = 260,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            if (window == null)
+            {
+                detail.Foreground = Theme.Frozen(Theme.Amber);
+            }
+            row.Children.Add(detail);
+            if (_windowNames.Count > 1 || window == null)
+            {
+                var remove = new TextBlock { Text = "\uE711", FontFamily = Theme.Icons, FontSize = 9, Opacity = 0.6, Margin = new Thickness(8, 1, 0, 0), Cursor = Cursors.Hand, VerticalAlignment = VerticalAlignment.Center, ToolTip = Loc.T("Remove from this conversation") };
+                remove.MouseLeftButtonUp += (s, e) => RemoveWindow(index);
+                row.Children.Add(remove);
+            }
+            return new Border
+            {
+                Child = row,
+                BorderBrush = Theme.Line,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(11),
+                Padding = new Thickness(8, 2, 8, 3),
+                Margin = new Thickness(0, 0, 6, 4),
+                ToolTip = Loc.T("The query, plans and lookups come from this window and its connection."),
+            };
+        }
+
+        /// <summary>Lists the open query windows not yet in the conversation, to add one.</summary>
+        private void AddWindowMenu(UIElement anchor)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var menu = new ContextMenu { PlacementTarget = anchor, Placement = PlacementMode.Top };
+            var windows = QueryWindows.All().Where(w => !_windows.Any(f => ReferenceEquals(f, w.Frame))).ToList();
+            if (windows.Count == 0)
+            {
+                menu.Items.Add(new MenuItem { Header = Loc.T("Every open query window is already in this conversation."), IsEnabled = false });
+            }
+            foreach (var w in windows)
+            {
+                var description = w.Connection?.Description;
+                var rule = description == null ? null : ConnectionColors.Find(description);
+                var row = new StackPanel { Orientation = Orientation.Horizontal };
+                row.Children.Add(new Border { Width = 8, Height = 8, CornerRadius = new CornerRadius(4), Margin = new Thickness(0, 1, 8, 0), VerticalAlignment = VerticalAlignment.Center, Background = rule != null ? Theme.BrushFromText(rule.Color) : Theme.Strong });
+                var text = new StackPanel();
+                text.Children.Add(new TextBlock { Text = w.Name });
+                text.Children.Add(new TextBlock { Text = description ?? Loc.T("not connected"), Opacity = 0.65, FontSize = 11 });
+                row.Children.Add(text);
+                var item = new MenuItem { Header = row, Padding = new Thickness(4, 3, 4, 3) };
+                var window = w;
+                item.Click += (s, e) => AddWindow(window);
+                menu.Items.Add(item);
+            }
+            menu.IsOpen = true;
+        }
+
+        private void AddWindow(QueryWindow window)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (_windows.Any(f => ReferenceEquals(f, window.Frame)))
+            {
+                return;
+            }
+            _windows.Add(window.Frame);
+            _windowNames.Add(window.Name);
+            _chosen = true;
+            Changed("(The developer added query window " + window.Name + ", connected to " + (window.Connection?.Description ?? "nothing")
+                + ", to this conversation. Use current_query to read it, and pass window: \"" + window.Name + "\" to the database tools for it.)",
+                Loc.T("Added " + window.Name));
+        }
+
+        /// <summary>Makes the conversation about `window` only.</summary>
+        private void Replace(QueryWindow window)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            _windows.Clear();
+            _windowNames.Clear();
+            _windows.Add(window.Frame);
+            _windowNames.Add(window.Name);
+            _chosen = true;
+            Changed("(The developer switched this conversation to query window " + window.Name + ", connected to "
+                + (window.Connection?.Description ?? "nothing") + ". From now on current_query and the database tools use it.)",
+                Loc.T("Now asking about " + window.Name));
+        }
+
+        private void RemoveWindow(int index)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (index < 0 || index >= _windows.Count)
+            {
+                return;
+            }
+            var name = _windowNames[index];
+            _windows.RemoveAt(index);
+            _windowNames.RemoveAt(index);
+            _chosen = true;
+            Changed("(The developer removed query window " + name + " from this conversation.)", Loc.T("Removed " + name));
+        }
+
+        /// <summary>After the windows change: tell the AI with the next message, and show it in a started conversation.</summary>
+        private void Changed(string note, string notice)
+        {
+            if (_thread != null)
+            {
+                _switchNote = _switchNote == null ? note : _switchNote + "\n" + note;
+                _messages.Children.Add(Notice(notice));
+                ScrollToEnd();
+            }
+            _windowChips.Tag = null;
+            Refresh();
+        }
+        private static UIElement Notice(string text)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 2, 0, 12) };
+            row.Children.Add(Theme.Icon("\uE8AB", 11, Theme.Strong));
+            row.Children.Add(new TextBlock { Text = text, Opacity = 0.65, FontSize = 11, Margin = new Thickness(6, 0, 0, 0) });
+            return row;
         }
 
         // ---- Messages ----

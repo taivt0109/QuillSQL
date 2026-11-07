@@ -8,7 +8,7 @@ namespace QuillSql.Vsix
     {
         public static string ProcedureDefinition(ConnectionTarget target, string name)
         {
-            using (var connection = new SqlConnection(target.ConnectionString))
+            using (var connection = target.CreateConnection())
             using (var command = new SqlCommand("SELECT OBJECT_DEFINITION(OBJECT_ID(@name, N'P'));", connection) { CommandTimeout = 30 })
             {
                 command.Parameters.AddWithValue("@name", name);
@@ -39,7 +39,7 @@ WHERE d.referenced_id IS NULL
   AND NOT EXISTS (SELECT 1 FROM sys.objects AS t WHERE t.name = d.referenced_entity_name AND t.type = 'TT')
 ORDER BY 1, 2;";
             var rows = new List<string>();
-            using (var connection = new SqlConnection(target.ConnectionString))
+            using (var connection = target.CreateConnection())
             using (var command = new SqlCommand(query, connection) { CommandTimeout = 120 })
             {
                 connection.Open();
