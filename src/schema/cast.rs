@@ -104,6 +104,8 @@ pub fn classify(old: &DataType, new: &DataType) -> Cast {
         // Anything readable as text converts to text; text converts back when the values parse.
         (Exact(_) | Decimal | Money(_) | Approx(_) | Bit | Date | Time | DateTime(_) | Guid, Char) => Cast::Implicit,
         (Char, Exact(_) | Decimal | Money(_) | Approx(_) | Bit | Date | Time | DateTime(_) | Guid | Xml) => Cast::Implicit,
+        // Between the character types (varchar to nvarchar…) and between the binary ones.
+        (Char, Char) | (Binary, Binary) => Cast::Implicit,
         (Char | LegacyText, LegacyText) | (LegacyText, Char) => Cast::Implicit,
         (Binary, Char | Exact(_) | Decimal | Money(_) | Bit | Guid | Image | Xml) => Cast::Implicit,
         (Exact(_) | Decimal | Money(_) | Bit | Guid | Image, Binary) => Cast::Implicit,
@@ -183,6 +185,9 @@ mod tests {
         assert_eq!(classify(&len("varchar", 100), &len("varchar", 50)), Cast::Implicit);
         assert_eq!(classify(&t("int"), &t("bigint")), Cast::Implicit);
         assert_eq!(classify(&t("bigint"), &t("int")), Cast::Lossy);
+        assert_eq!(classify(&len("varchar", 20), &len("nvarchar", 30)), Cast::Implicit);
+        assert_eq!(classify(&len("nchar", 20), &len("varchar", 30)), Cast::Implicit);
+        assert_eq!(classify(&len("binary", 8), &len("varbinary", 30)), Cast::Implicit);
         assert_eq!(classify(&t("int"), &len("varchar", 10)), Cast::Implicit);
         assert_eq!(classify(&len("varchar", 10), &t("int")), Cast::Implicit);
         assert_eq!(classify(&t("datetime"), &t("int")), Cast::Explicit);
