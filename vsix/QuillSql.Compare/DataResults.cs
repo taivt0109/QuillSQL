@@ -378,7 +378,7 @@ namespace QuillSql.Compare
             _selectedText.Margin = new Thickness(6, 0, 0, 0);
         }
 
-        private void SetAll(bool on)
+        public void SetAll(bool on)
         {
             foreach (var t in _tables.Where(t => t.Comparable)) t.AllState = on;
             foreach (var r in _rows.Items.OfType<RowItem>()) r.Refresh();
@@ -487,8 +487,37 @@ namespace QuillSql.Compare
             menu.Items.Add(Ui.MenuItem("Exclude all different", () => set(Different, false)));
             menu.Items.Add(Ui.MenuItem("Include all in " + Plain(_targetName), () => set(OnlyInTarget, true)));
             menu.Items.Add(Ui.MenuItem("Exclude all in " + Plain(_targetName), () => set(OnlyInTarget, false)));
+            menu.Items.Add(new Separator());
+            menu.Items.Add(Ui.MenuItem("Show object deployment script…", async () => await TableScript(), Glyph.Code));
+            menu.Items.Add(Ui.MenuItem("Remap table or view…", () => { if (_tableGrid.SelectedItem is TableRow t) EditTable?.Invoke(SourceOf(t), "Table mapping"); }, Glyph.List));
+            menu.Items.Add(Ui.MenuItem("Set comparison key…", () => { if (_tableGrid.SelectedItem is TableRow t) EditTable?.Invoke(SourceOf(t), "Tables & views"); }, Glyph.Edit));
             Dialogs.RegisterMenu(menu);
             return menu;
+        }
+
+        /// <summary>Raised to edit one table in the project: (source table, tab of the project editor).</summary>
+        public event Action<string, string> EditTable;
+
+        private static string SourceOf(TableRow t)
+        {
+            var at = t.Name.IndexOf(" → ", StringComparison.Ordinal);
+            return at < 0 ? t.Name : t.Name.Substring(0, at);
+        }
+
+        /// <summary>The deployment script of the selected table's chosen rows on its own.</summary>
+        private async Task TableScript()
+        {
+            if (!(_tableGrid.SelectedItem is TableRow t) || !t.Comparable) return;
+            var all = Selections().OfType<JsonObject>().Where(x => x.Long("table") == t.Index).Cast<object>().ToList();
+            var script = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("data_script", new JsonObject
+            {
+                ["session"] = Session,
+                ["tables"] = new List<object> { t.Index },
+                ["kinds"] = new List<object> { false, true, true, true },
+                ["selections"] = all,
+                ["isolationLevel"] = CompareSettings.Load().IsolationLevel,
+            }));
+            if (script != null) Dialogs.ShowScript(_session.Host, "Deployment script for " + t.Name, script.Str("sql"), _session.LiveTarget());
         }
 
         // ---- Deployment selection for data_script ----
@@ -762,42 +791,28 @@ namespace QuillSql.Compare
             }
         }
 
-        /// <summary>The whole value of the selected cell, which the grid cuts at 256 characters.</summary>
+        /// <summary>
+        /// "Value details": the whole value of the selected cell's column on both sides (the grid
+        /// cuts values at 256 characters), as text line against line, as bytes, or as an image.
+        /// </summary>
         private async Task ShowValue()
         {
-            var cell = _rows.CurrentCell;
+            var cell = _rows.CurrentCell.Column == null && _rows.SelectedCells.Count > 0 ? _rows.SelectedCells[0] : _rows.CurrentCell;
             if (!(cell.Item is RowItem row) || cell.Column == null || !_columnOf.TryGetValue(cell.Column, out var at))
             {
                 Ui.Error(_session.Host.Owner, "Select a cell first.");
                 return;
             }
-            var value = await Ui.Try(_session.Host.Owner, async () => new JsonObject { ["v"] = await _session.Engine.Request("data_value", new JsonObject
+            async Task<JsonObject> side(string name) => await Ui.Try(_session.Host.Owner, async () => new JsonObject { ["v"] = await _session.Engine.Request("data_value", new JsonObject
             {
-                ["session"] = Session, ["table"] = _shownTable.Index, ["kind"] = row.Kind, ["row"] = row.Row, ["column"] = at.Column, ["side"] = at.Side == "target" ? "target" : "source",
+                ["session"] = Session, ["table"] = _shownTable.Index, ["kind"] = row.Kind, ["row"] = row.Row, ["column"] = at.Column, ["side"] = name,
             }) });
-            if (value == null) return;
-            var text = value.Str("v");
-            var column = at.Side == "target" && at.Column < _shownTable.TargetColumns.Count ? _shownTable.TargetColumns[at.Column] : _shownTable.Columns[at.Column];
-            var side = at.Side == "target" ? _targetName : at.Side == "source" ? _sourceName : "key";
-            var code = Ui.Code();
-            code.Text = text ?? "NULL";
-            code.TextWrapping = TextWrapping.Wrap;
-            var w = Ui.Dialog(_session.Host.Owner, "Value", null, 720, 480);
-            var heading = Ui.Title(_shownTable.Name + ".[" + column + "]", 16);
-            var lead = Ui.Text(side + (text == null ? "" : " · " + Ui.Plural(text.Length, "character", "characters")), brush: CompareTheme.Muted);
-            lead.Margin = new Thickness(0, 4, 0, 12);
-            var body = new DockPanel { Margin = new Thickness(24, 20, 24, 16) };
-            var top = Ui.Column(heading, lead);
-            DockPanel.SetDock(top, Dock.Top);
-            body.Children.Add(top);
-            body.Children.Add(Ui.Card(code, 0));
-            var copy = Ui.Button("Copy", () => Clipboard.SetText(text ?? ""), glyph: Glyph.Copy);
-            var close = Ui.Button("Close", () => w.Close(), primary: true);
-            close.IsCancel = true;
-            var buttons = Ui.Row(copy, close);
-            buttons.HorizontalAlignment = HorizontalAlignment.Right;
-            w.Content = Ui.WithFooter(body, buttons);
-            w.ShowDialog();
+            var one = row.HasSource ? await side("source") : new JsonObject();
+            if (one == null) return;
+            var two = row.HasTarget && row.Kind != Identical ? await side("target") : row.Kind == Identical ? one : new JsonObject();
+            if (two == null) return;
+            var column = _shownTable.Columns[at.Column];
+            ValueViewer.Show(_session.Host.Owner, _shownTable.Name + ".[" + column + "]", _sourceName, row.HasSource ? one.Str("v") : null, row.HasSource, _targetName, two.Str("v"), row.HasTarget || row.Kind == Identical);
         }
     }
 }

@@ -44,7 +44,7 @@ namespace QuillSql.Compare
             SetDock(footer, Dock.Bottom);
             Children.Add(footer);
 
-            var tabs = new TabControl { Style = CompareTheme.Style("Q.NavTabs"), Margin = new Thickness(4, 0, 0, 0) };
+            var tabs = _tabs = new TabControl { Style = CompareTheme.Style("Q.NavTabs"), Margin = new Thickness(4, 0, 0, 0) };
             tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Connect, "Data sources", 12), Content = DataSources() });
             if (_data)
             {
@@ -54,6 +54,31 @@ namespace QuillSql.Compare
             tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.People, "Owner mapping", 12), Content = OwnerMapping() });
             tabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Settings, "Options", 12), Content = Options() });
             Children.Add(tabs);
+        }
+
+        private readonly TabControl _tabs;
+        private DataGrid _dataGrid;
+        private CheckBox _includeNew;
+        private bool _tablesLoaded;
+
+        /// <summary>Shows a tab by its label: "Data sources", "Tables & views", "Table mapping", "Owner mapping", "Options".</summary>
+        public void ShowTab(string label)
+        {
+            foreach (TabItem tab in _tabs.Items)
+            {
+                if (tab.Header is StackPanel p && p.Children.OfType<TextBlock>().Any(t => t.Text == label)) _tabs.SelectedItem = tab;
+            }
+        }
+
+        /// <summary>Selects a table on Tables &amp; views (data), to set its key or filters.</summary>
+        public void ShowTable(string source)
+        {
+            ShowTab("Tables & views");
+            var row = _dataTables.FirstOrDefault(r => string.Equals(r.Source, source, StringComparison.OrdinalIgnoreCase));
+            if (row == null && !string.IsNullOrEmpty(source)) _dataTables.Add(row = new DataTableRow { Source = source, Target = source });
+            if (row == null || _dataGrid == null) return;
+            _dataGrid.SelectedItem = row;
+            _dataGrid.ScrollIntoView(row);
         }
 
         /// <summary>A section page: a title, a line of help, then the content.</summary>
@@ -321,7 +346,7 @@ namespace QuillSql.Compare
         {
             _dataStatus = Ui.Text("Load the tables to choose which are compared, their keys and filters.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
             _dataStatus.Margin = new Thickness(0, 0, 0, 10);
-            var grid = new DataGrid
+            var grid = _dataGrid = new DataGrid
             {
                 ItemsSource = _dataTables,
                 AutoGenerateColumns = false,
@@ -367,9 +392,14 @@ namespace QuillSql.Compare
                 grid.Items.Refresh();
             }, minWidth: 90, glyph: Glyph.Edit);
             map.ToolTip = "Pair the selected table's columns with differently named target columns";
+            _includeNew = Ui.Check("Include new tables and views", _project.Bool("includeNewTables") || !_project.ContainsKey("includeNewTables"));
+            _includeNew.ToolTip = "Tables added to the databases later are compared too. Clear it to compare only the tables ticked now.";
             var content = new DockPanel();
             DockPanel.SetDock(_dataStatus, Dock.Top);
+            DockPanel.SetDock(_includeNew, Dock.Bottom);
+            _includeNew.Margin = new Thickness(0, 10, 0, 0);
             content.Children.Add(_dataStatus);
+            content.Children.Add(_includeNew);
             content.Children.Add(grid);
             var panel = Page("Tables & views", "Choose the tables to compare, the key that pairs their rows, and filters. Type another target table to compare a table with a differently named one.", content, Ui.Row(load, map, all, none));
             // Rows the project already describes are shown before the tables are loaded.
@@ -421,7 +451,9 @@ namespace QuillSql.Compare
             {
                 var source = t.Str("source");
                 previous.TryGetValue(source, out var old);
-                var deselected = _project.List("deselected").OfType<JsonObject>().Any(d => "[" + d.Str("schema") + "].[" + d.Str("name") + "]" == source);
+                bool named(string key) => _project.List(key).OfType<JsonObject>().Any(d => "[" + d.Str("schema") + "].[" + d.Str("name") + "]" == source);
+                // With new tables left out, a table the project does not name is not compared.
+                var deselected = _project.ContainsKey("includeNewTables") && !_project.Bool("includeNewTables") ? !named("selected") : named("deselected");
                 var row = new DataTableRow
                 {
                     Source = source,
@@ -441,6 +473,7 @@ namespace QuillSql.Compare
                 row.KeyChoices.AddRange(t.Strings("keyCandidates"));
                 _dataTables.Add(row);
             }
+            _tablesLoaded = true;
             var only1 = result.Strings("onlyIn1");
             var only2 = result.Strings("onlyIn2");
             _dataStatus.Text = Ui.Plural(_dataTables.Count, "table pair", "table pairs")
@@ -482,6 +515,7 @@ namespace QuillSql.Compare
                     box.Checked += (s, e) => OptionChanged(defs, d, true);
                     box.Unchecked += (s, e) => OptionChanged(defs, d, false);
                     box.MouseEnter += (s, e) => _optionHelp.Text = d.Str("label") + "\n\n" + Help(d);
+                    box.GotKeyboardFocus += (s, e) => _optionHelp.Text = d.Str("label") + "\n\n" + Help(d);
                     _optionBoxes[name] = box;
                     list.Children.Add(box);
                 }
@@ -531,6 +565,7 @@ namespace QuillSql.Compare
 
         private static string Help(JsonObject d)
         {
+            if (!string.IsNullOrEmpty(d.Str("description"))) return d.Str("description");
             switch (d.Str("kind"))
             {
                 case "Deploy": return "Changes the deployment script only.";
@@ -620,12 +655,13 @@ namespace QuillSql.Compare
         }
 
         /// <summary>Writes every tab back into the project.</summary>
-        public void Collect()
+        /// <param name="persist">Also remember passwords and servers (false for the unsaved-changes check).</param>
+        public void Collect(bool persist = true)
         {
-            _source?.Save();
-            _target?.Save();
+            _source?.Save(persist);
+            _target?.Save(persist);
             var defs = _session.OptionDefinitions.List(_data ? "data" : "schema").OfType<JsonObject>().ToList();
-            if (_optionBoxes.Count > 0) _project["options"] = Selected(defs);
+            if (_optionBoxes.Count > 0) _project["options"] = Selected(defs).Cast<object>().ToList();
 
             var schemaMappings = _project.Obj("schemaMappings") ?? new JsonObject();
             schemaMappings["schemas"] = _ownerMappings.Where(m => !string.IsNullOrWhiteSpace(m.Source))
@@ -678,6 +714,22 @@ namespace QuillSql.Compare
                 dm["schemas"] = schemaMappings["schemas"];
                 _project["dataMappings"] = dm;
                 _project["deselected"] = deselected;
+                // "Include new tables" off: the tables ticked now are the only ones compared.
+                if (_includeNew != null && _includeNew.IsChecked != true && !_tablesLoaded && _project.ContainsKey("selected"))
+                {
+                    // The tables were not loaded: the list stays as the project had it.
+                    _project["includeNewTables"] = false;
+                }
+                else if (_includeNew != null && _includeNew.IsChecked != true)
+                {
+                    _project["includeNewTables"] = false;
+                    _project["selected"] = _dataTables.Where(r => r.Include).Select(r => { var n = ParseName(r.Source); return (object)new JsonObject { ["type"] = "Table", ["schema"] = n.Str("schema"), ["name"] = n.Str("name") }; }).ToList();
+                }
+                else
+                {
+                    _project.Remove("includeNewTables");
+                    _project.Remove("selected");
+                }
             }
         }
     }
@@ -687,8 +739,25 @@ namespace QuillSql.Compare
     {
         private readonly CompareSession _session;
         private readonly string _key;
-        private ComboBox _type, _server, _auth, _database;
-        private TextBox _user, _snapshot, _folder, _revision;
+        private ComboBox _type, _server, _auth, _database, _snapshot, _folder, _sqlVersion, _collation;
+        private TextBox _user, _revision, _tenant;
+        private StackPanel _tenantField, _folderDefaults;
+        /// <summary>The Authentication box's choices and their engine values.</summary>
+        private static readonly (string Label, string Value)[] Authentications =
+        {
+            ("Windows authentication", "windows"),
+            ("SQL Server authentication", "sql"),
+            ("Microsoft Entra integrated", "entraIntegrated"),
+            ("Microsoft Entra password", "entraPassword"),
+            ("Microsoft Entra with MFA", "entraInteractive"),
+            ("Microsoft Entra (access token)", "entra"),
+        };
+        /// <summary>SQL Server versions a scripts folder without database information can be read as.</summary>
+        private static readonly (string Label, string Value)[] SqlVersions =
+        {
+            ("SQL Server 2008", "10"), ("SQL Server 2012", "11"), ("SQL Server 2014", "12"), ("SQL Server 2016", "13"),
+            ("SQL Server 2017", "14"), ("SQL Server 2019", "15"), ("SQL Server 2022", "16"), ("SQL Server 2025", "17"),
+        };
         private PasswordBox _password;
         private CheckBox _remember, _encrypt, _trust;
         private StackPanel _live, _file, _scripts, _revisionField;
@@ -725,9 +794,11 @@ namespace QuillSql.Compare
 
             _server = new ComboBox { IsEditable = true };
             ServerDiscovery.Attach(_server);
-            _auth = new ComboBox { ItemsSource = new[] { "Windows authentication", "SQL Server authentication", "Microsoft Entra (access token)" } };
-            _auth.SelectionChanged += (s, e) => { var sql = _auth.SelectedIndex == 1; _user.IsEnabled = sql; _password.IsEnabled = sql; _remember.IsEnabled = sql; };
+            _auth = new ComboBox { ItemsSource = Authentications.Select(a => a.Label).ToList() };
+            _auth.SelectionChanged += (s, e) => ShowAuthentication();
             _user = new TextBox();
+            _tenant = new TextBox { ToolTip = "The Microsoft Entra tenant: its id or domain. Empty: the domain of the user name, else any work or school account" };
+            _tenantField = Ui.Form(Ui.Field("Tenant (optional)", _tenant));
             _password = new PasswordBox();
             _remember = Ui.Check("Remember credentials (Windows Credential Manager)", false);
             _encrypt = Ui.Check("Encrypt", true);
@@ -749,13 +820,15 @@ namespace QuillSql.Compare
                 Ui.Field("User name", _user),
                 Ui.Field("Password", _password),
                 Ui.Field(null, _remember),
+                Ui.Field(null, _tenantField),
                 Ui.Field(null, Ui.Row(_encrypt, _trust)),
                 Ui.Field("Database", dbRow),
                 Ui.Field(null, Ui.Row(test, create))), _status);
-            _snapshot = new TextBox();
+            var settings = CompareSettings.Load();
+            _snapshot = new ComboBox { IsEditable = true, ItemsSource = settings.RecentSnapshots.ToList(), ToolTip = "Recently used snapshots are in the list" };
             var browse = Ui.Button("Browse…", glyph: Glyph.Open, click: () =>
             {
-                var d = new OpenFileDialog { Filter = "QuillSQL snapshots (*.json)|*.json|All files|*.*" };
+                var d = new OpenFileDialog { Filter = "Snapshots (*.snp, *.json)|*.snp;*.json|All files|*.*" };
                 if (Dialogs.Show(d, null) == true) _snapshot.Text = d.FileName;
             });
             var fileRow = new DockPanel();
@@ -766,7 +839,7 @@ namespace QuillSql.Compare
             _empty = Ui.Text("An empty database: every object of the source is created. The changes can only be scripted, and the script can then run on a new database.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
             Children.Add(_live);
             // A scripts folder in SQL Compare's layout, or a revision of it in git, Mercurial or Subversion.
-            _folder = new TextBox();
+            _folder = new ComboBox { IsEditable = true, ItemsSource = settings.RecentFolders.ToList(), ToolTip = "Recently used scripts folders are in the list" };
             var browseFolder = Ui.Button("Browse…", glyph: Glyph.Folder, click: () =>
             {
                 var f = Dialogs.PickFolder(_session.Host.Owner, _folder.Text, "Open scripts folder");
@@ -779,8 +852,18 @@ namespace QuillSql.Compare
             _revision = Ui.SearchBox("HEAD", 0);
             _revision.Width = double.NaN;
             _revision.ToolTip = "A source control revision of the folder: HEAD, a commit, a tag or a revision number";
-            _revisionField = Ui.Form(Ui.Field("Revision", _revision));
-            _scripts = Ui.Column(Ui.Form(Ui.Field("Scripts folder (in a git, Mercurial or Subversion working copy for source control)", folderRow)), _revisionField,
+            var choose = Ui.Button("Choose…", async () => await ChooseRevision(), minWidth: 80);
+            choose.ToolTip = "Pick a revision from the folder's history";
+            var revisionRow = new DockPanel();
+            DockPanel.SetDock(choose, Dock.Right);
+            revisionRow.Children.Add(choose);
+            revisionRow.Children.Add(_revision);
+            _revisionField = Ui.Form(Ui.Field("Revision", revisionRow));
+            // Used when the folder has no database information (RedGateDatabaseInfo.xml).
+            _sqlVersion = new ComboBox { ItemsSource = SqlVersions.Select(v => v.Label).ToList(), SelectedIndex = 6 };
+            _collation = new ComboBox { IsEditable = true, Text = "Latin1_General_CI_AS", ItemsSource = new[] { "Latin1_General_CI_AS", "SQL_Latin1_General_CP1_CI_AS", "Latin1_General_CS_AS", "Latin1_General_BIN2", "Latin1_General_100_CI_AS_SC_UTF8" } };
+            _folderDefaults = Ui.Form(Ui.Field("SQL Server version (when the folder has no database information)", _sqlVersion), Ui.Field("Default collation", _collation));
+            _scripts = Ui.Column(Ui.Form(Ui.Field("Scripts folder (in a git, Mercurial or Subversion working copy for source control)", folderRow)), _revisionField, _folderDefaults,
                 Ui.Text("Deploying to a scripts folder rewrites the files of the objects deployed; a revision can only be compared or scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
             Children.Add(_file);
             Children.Add(_empty);
@@ -804,6 +887,7 @@ namespace QuillSql.Compare
             var scripts = _type.SelectedIndex == 4 || control;
             var backup = _type.SelectedIndex == 3;
             _revisionField.Visibility = control ? Visibility.Visible : Visibility.Collapsed;
+            _folderDefaults.Visibility = scripts && !control ? Visibility.Visible : Visibility.Collapsed;
             if (control && _revision.Text.Trim().Length == 0) _revision.Text = "HEAD";
             _live.Visibility = snapshot || empty || scripts || backup ? Visibility.Collapsed : Visibility.Visible;
             _backup.Visibility = backup ? Visibility.Visible : Visibility.Collapsed;
@@ -817,9 +901,13 @@ namespace QuillSql.Compare
             Side = side;
             _type.SelectedIndex = side.Str("type") == "snapshot" ? 1 : side.Str("type") == "empty" ? 2 : side.Str("type") == "scripts" ? (string.IsNullOrEmpty(side.Str("revision")) ? 4 : 5) : side.Str("type") == "backup" ? 3 : 0;
             _server.Text = side.Str("server") ?? "";
-            var auth = side.Str("authentication");
-            _auth.SelectedIndex = auth == "sql" ? 1 : auth == "entra" ? 2 : 0;
+            var auth = side.Str("authentication") ?? "windows";
+            _auth.SelectedIndex = Math.Max(0, Array.FindIndex(Authentications, a => string.Equals(a.Value, auth, StringComparison.OrdinalIgnoreCase)));
             _user.Text = side.Str("user") ?? "";
+            _tenant.Text = side.Str("tenant") ?? "";
+            var version = Array.FindIndex(SqlVersions, v => v.Value == side.Str("sqlVersion"));
+            _sqlVersion.SelectedIndex = version >= 0 ? version : 6;
+            _collation.Text = string.IsNullOrEmpty(side.Str("defaultCollation")) ? "Latin1_General_CI_AS" : side.Str("defaultCollation");
             _remember.IsChecked = side.Bool("rememberPassword");
             _password.Password = password ?? (side.Bool("rememberPassword") ? Credentials.Read(side.Str("server"), side.Str("user")) ?? "" : "");
             _encrypt.IsChecked = !side.ContainsKey("encrypt") || side.Bool("encrypt");
@@ -833,12 +921,39 @@ namespace QuillSql.Compare
             ShowType();
         }
 
-        public void Save()
+        /// <summary>Which sign-in fields apply: user name for SQL, Entra password and MFA (a login hint), password for SQL and Entra password.</summary>
+        private void ShowAuthentication()
+        {
+            var auth = Authentications[Math.Max(0, _auth.SelectedIndex)].Value;
+            _user.IsEnabled = auth == "sql" || auth == "entraPassword" || auth == "entraInteractive";
+            _password.IsEnabled = _remember.IsEnabled = auth == "sql" || auth == "entraPassword";
+            _tenantField.Visibility = auth.StartsWith("entra", StringComparison.Ordinal) && auth != "entra" ? Visibility.Visible : Visibility.Collapsed;
+            _user.ToolTip = auth == "entraInteractive" ? "Optional: the account to sign in with (user@domain)" : auth == "entraPassword" ? "The Microsoft Entra user name (user@domain)" : null;
+        }
+
+        private string Authentication => Authentications[Math.Max(0, _auth.SelectedIndex)].Value;
+
+        private bool UsesPassword => Authentication == "sql" || Authentication == "entraPassword";
+
+        /// <param name="persist">Also remember the password and the server, as when the user leaves the editor.</param>
+        public void Save(bool persist = true)
         {
             Side["type"] = _type.SelectedIndex == 1 ? "snapshot" : _type.SelectedIndex == 2 ? "empty" : _type.SelectedIndex == 3 ? "backup" : _type.SelectedIndex >= 4 ? "scripts" : "database";
             Side["server"] = _server.Text.Trim();
-            Side["authentication"] = _auth.SelectedIndex == 1 ? "sql" : _auth.SelectedIndex == 2 ? "entra" : "windows";
+            Side["authentication"] = Authentication;
             Side["user"] = _user.Text.Trim();
+            if (_tenant.Text.Trim().Length > 0 && Authentication.StartsWith("entra", StringComparison.Ordinal)) Side["tenant"] = _tenant.Text.Trim();
+            else Side.Remove("tenant");
+            if (_type.SelectedIndex == 4)
+            {
+                Side["sqlVersion"] = SqlVersions[Math.Max(0, _sqlVersion.SelectedIndex)].Value;
+                Side["defaultCollation"] = _collation.Text.Trim();
+            }
+            else
+            {
+                Side.Remove("sqlVersion");
+                Side.Remove("defaultCollation");
+            }
             Side["rememberPassword"] = _remember.IsChecked == true;
             Side["encrypt"] = _encrypt.IsChecked == true;
             Side["trustServerCertificate"] = _trust.IsChecked == true;
@@ -850,7 +965,11 @@ namespace QuillSql.Compare
             else Side.Remove("revision");
             _session.Project[_key] = Side;
             _session.Passwords[_key] = _type.SelectedIndex == 3 ? _backup.Passwords : _password.Password;
-            if (_auth.SelectedIndex == 1 && _remember.IsChecked == true && _password.Password.Length > 0)
+            if (!persist) return;
+            var settings = CompareSettings.Load();
+            if (_type.SelectedIndex >= 4) settings.AddRecent(settings.RecentFolders, Side.Str("path"));
+            if (_type.SelectedIndex == 1) settings.AddRecent(settings.RecentSnapshots, Side.Str("path"));
+            if (UsesPassword && _remember.IsChecked == true && _password.Password.Length > 0)
             {
                 try
                 {
@@ -893,21 +1012,74 @@ namespace QuillSql.Compare
         private async System.Threading.Tasks.Task Test()
         {
             _status.Text = "Connecting…";
-            var result = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("test_connection", new JsonObject { ["source"] = WithPassword() }));
-            _status.Text = result == null ? "" : "Connected: SQL Server " + result.Str("version") + ", database " + result.Str("database") + ".";
+            try
+            {
+                var result = await _session.Engine.RequestObject("test_connection", new JsonObject { ["source"] = WithPassword() });
+                _status.Text = "Connected: SQL Server " + result.Str("version") + ", database " + result.Str("database") + ".";
+            }
+            catch (Exception ex) when (ex is EngineException || ex is System.IO.IOException || ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
+            {
+                // The failure shows here, with its full text a click away.
+                _status.Inlines.Clear();
+                _status.Inlines.Add(new System.Windows.Documents.Run("Could not connect to " + Side.Str("server") + ". ") { Foreground = CompareTheme.High });
+                var details = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run("Show details…"));
+                var text = ex.Message;
+                details.Click += (s, e) => ShowDetails(text);
+                _status.Inlines.Add(details);
+            }
+        }
+
+        /// <summary>The whole error of a failed connection, to read and copy.</summary>
+        private void ShowDetails(string text)
+        {
+            var w = Ui.Dialog(_session.Host.Owner, "Connection error", null, 640, 360);
+            var code = Ui.Code();
+            code.Text = text;
+            code.TextWrapping = TextWrapping.Wrap;
+            var heading = Ui.Title("Could not connect to " + Side.Str("server"), 16);
+            heading.Margin = new Thickness(0, 0, 0, 10);
+            var body = new DockPanel { Margin = new Thickness(24, 20, 24, 16) };
+            DockPanel.SetDock(heading, Dock.Top);
+            body.Children.Add(heading);
+            body.Children.Add(Ui.Card(code, 0));
+            var copy = Ui.Button("Copy", () => Clipboard.SetText(text), glyph: Glyph.Copy);
+            var close = Ui.Button("Close", () => w.Close(), primary: true);
+            close.IsCancel = true;
+            var buttons = Ui.Row(copy, close);
+            buttons.HorizontalAlignment = HorizontalAlignment.Right;
+            w.Content = Ui.WithFooter(body, buttons);
+            w.ShowDialog();
         }
 
         private async System.Threading.Tasks.Task CreateDatabase()
         {
-            var name = Ui.Prompt(_session.Host.Owner, "New database", "Name of the new, empty database on " + Side.Str("server"), _database.Text);
-            if (string.IsNullOrWhiteSpace(name)) return;
-            var sql = "CREATE DATABASE [" + name.Replace("]", "]]") + "]";
+            _status.Text = "Reading the server's collations…";
+            var server = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("collations", new JsonObject { ["source"] = WithPassword("master") }));
+            _status.Text = "";
+            if (server == null) return;
+            var sql = Dialogs.NewDatabase(_session.Host.Owner, Side.Str("server"), _database.Text, server, out var name);
+            if (sql == null) return;
             var result = await Ui.Try(_session.Host.Owner, () => _session.Engine.Request("execute", new JsonObject { ["source"] = WithPassword("master"), ["sql"] = sql }));
             if (result != null)
             {
                 _database.Text = name;
                 _status.Text = "Created database " + name + ".";
             }
+        }
+
+        /// <summary>Lists the folder's revisions in source control and puts the chosen one in the Revision box.</summary>
+        private async System.Threading.Tasks.Task ChooseRevision()
+        {
+            var folder = _folder.Text.Trim();
+            if (folder.Length == 0)
+            {
+                Ui.Error(_session.Host.Owner, "Choose the scripts folder first.");
+                return;
+            }
+            var list = await Ui.Try(_session.Host.Owner, async () => await _session.Engine.Request("revisions", new JsonObject { ["path"] = folder }) as List<object>);
+            if (list == null) return;
+            var chosen = Dialogs.ChooseRevision(_session.Host.Owner, folder, list.OfType<JsonObject>().ToList());
+            if (chosen != null) _revision.Text = chosen;
         }
     }
 }

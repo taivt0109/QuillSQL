@@ -177,6 +177,15 @@ namespace QuillSql.Vsix
             }
         }
 
+        /// <summary>Puts the script into the active query window (one just opened); false when there is none.</summary>
+        public static bool InsertInActive(string script)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!(Dte?.ActiveDocument?.Object("TextDocument") is TextDocument document)) return false;
+            document.StartPoint.CreateEditPoint().Insert(script);
+            return true;
+        }
+
         /// <summary>A small modal prompt; returns null when cancelled.</summary>
         public static string Prompt(string title, string label, string initial)
         {
