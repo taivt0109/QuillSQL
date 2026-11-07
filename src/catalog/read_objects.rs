@@ -154,6 +154,7 @@ impl Reader {
                 remote_schema: text(&r, 9),
                 remote_object: text(&r, 10),
                 distribution,
+                ..Default::default()
             });
         }
         Ok(())
@@ -878,6 +879,7 @@ impl Reader {
                     schema_bound: flag(&r, 3),
                     not_for_replication: flag(&r, 4),
                     predicates: Vec::new(),
+                    ..Default::default()
                 });
             }
             let (Some(definition), Some(table)) = (text(&r, 6), text(&r, 8)) else { continue };

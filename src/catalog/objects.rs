@@ -419,6 +419,9 @@ pub struct SecurityPredicate {
 pub struct SecurityPolicy {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub enabled: bool,
     pub schema_bound: bool,
     #[serde(skip_serializing_if = "is_false")]
@@ -480,6 +483,9 @@ pub struct ExternalFileFormat {
 pub struct ExternalTable {
     pub schema: String,
     pub name: String,
+    /// Explicit owner set with ALTER AUTHORIZATION; `None` = owned by the schema's owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub columns: Vec<Column>,
     pub data_source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
