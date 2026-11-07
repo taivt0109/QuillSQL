@@ -149,3 +149,9 @@ scenario = "data-binary-key"
 oracle = "diffset"
 finding = "new"
 reason = "Redgate fails to pair the equal key 0xFF (deletes and re-inserts it), so its counts differ; quill pairs it"
+
+[[known]]
+scenario = "sources-followup-backup"
+oracle = "warnings"
+finding = "sources-followup"
+reason = "SQL Compare gives no 'created without an associated login' warning for the users Owner1 and Reader (altered: an extended property, a role membership) when database 1 is a backup, though it does for the same users from a live database, snapshot or scripts folder; quill warns the same way for every source"

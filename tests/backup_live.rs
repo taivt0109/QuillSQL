@@ -14,6 +14,11 @@ use quillsql::db::{self, Auth, ConnectionSpec};
 use quillsql::schema::{self, Mappings, Options};
 use quillsql::sources::backup;
 
+mod common {
+    pub mod followup;
+}
+use common::followup;
+
 struct Server {
     host: String,
     auth: Auth,
@@ -321,6 +326,25 @@ CREATE SYMMETRIC KEY QuillSym WITH ALGORITHM = AES_256 ENCRYPTION BY CERTIFICATE
     let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![f.clone()] };
     let files = server.backup(&db, &[&f], "INIT, FORMAT");
     assert_identical(&server, &db, &files, None);
+}
+
+/// Owners, table options, typed extended properties, trigger settings, type bindings and
+/// permissions, history tables, principal properties, public/guest grants and fixed-role members
+/// read from a backup as from the database.
+#[test]
+fn backups_carry_the_followup_fields() {
+    let Some(server) = server("followup") else { return };
+    let db = name("Followup");
+    server.create(&db, followup::FOLLOWUP);
+    let f = format!("{db}.bak");
+    let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![f.clone()] };
+    let files = server.backup(&db, &[&f], "INIT, FORMAT");
+    assert_identical(&server, &db, &files, None);
+    let from_backup = backup::open(&files, &[], None).unwrap().read_database().unwrap();
+    let from_live = catalog::read_database(&server.spec(&db)).unwrap();
+    let c = schema::compare(&from_live, &from_backup, &Options::default_set(), &Mappings::default());
+    assert!(c.differences.iter().all(|d| d.kind == schema::DiffKind::Equal), "the other way");
+    followup::assert_same_features(&from_backup, &from_live, "backup");
 }
 
 /// A TDE-encrypted database is listed as encrypted and refused, as SQL Compare does. Creates a

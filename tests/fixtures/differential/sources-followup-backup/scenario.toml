@@ -1,0 +1,4 @@
+kind = "schema"
+about = "Owners, table options, typed and principal extended properties, trigger settings, type bindings and grants, public/guest grants and a fixed-role member; database 1 is a backup"
+finding = "sources-followup"
+source = "backup"

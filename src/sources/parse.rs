@@ -91,7 +91,12 @@ struct Pending {
     settings: ModuleSettings,
     /// The whole batch is a module (CREATE VIEW / PROCEDURE / FUNCTION / TRIGGER).
     module: bool,
+    /// Variables the batch declared and set before the statement: (name, type, value).
+    vars: Vec<Var>,
 }
+
+/// `DECLARE @xp int` / `SELECT @xp=5`: lower-case name, lower-case type, value as text.
+type Var = (String, String, String);
 
 /// Collects files, then [`Reader::finish`] builds the database.
 pub struct Reader {
@@ -119,6 +124,7 @@ impl Reader {
         self.files.push(path.to_path_buf());
         let mut settings = ModuleSettings { ansi_nulls: self.defaults.ansi_nulls, quoted_identifier: self.defaults.quoted_identifier };
         for (batch, first_line) in batches(text) {
+            let mut vars: Vec<Var> = Vec::new();
             let cur = Cur::new(&batch);
             if cur.t.is_empty() {
                 continue;
@@ -134,6 +140,7 @@ impl Reader {
                     sql: module_text(&batch),
                     settings: settings.clone(),
                     module: true,
+                    vars: Vec::new(),
                 });
                 continue;
             }
@@ -145,12 +152,19 @@ impl Reader {
                     apply_set(&cur, a, b, &mut settings);
                     continue;
                 }
+                if first == "DECLARE"
+                    && let Some(v) = declared(&cur, a, b)
+                {
+                    vars.retain(|x| x.0 != v.0);
+                    vars.push(v);
+                    continue;
+                }
                 if first == "IF" {
                     self.messages.push(Message { file: path.into(), line, column: cur.t[a].col, kind: MessageKind::IfTakenAsTrue, detail: sql.clone() });
                     if let Some(body) = if_body(&cur, a, b) {
                         let sql = cur.text(body, b).to_string();
                         let phase = phase_of(&Cur::new(&sql));
-                        self.pending.push(Pending { phase, file, line: first_line + cur.t[body].line - 1, sql, settings: settings.clone(), module: false });
+                        self.pending.push(Pending { phase, file, line: first_line + cur.t[body].line - 1, sql, settings: settings.clone(), module: false, vars: vars.clone() });
                     }
                     continue;
                 }
@@ -161,7 +175,7 @@ impl Reader {
                     }
                     continue;
                 }
-                self.pending.push(Pending { phase, file, line, sql, settings: settings.clone(), module: false });
+                self.pending.push(Pending { phase, file, line, sql, settings: settings.clone(), module: false, vars: vars.clone() });
             }
         }
     }
@@ -178,12 +192,14 @@ impl Reader {
             origins: Origins::new(),
             file: PathBuf::new(),
             counter: 0,
+            vars: Vec::new(),
         };
         b.db.schemas.push(Schema { name: "dbo".into(), owner: "dbo".into() });
         let mut pending = std::mem::take(&mut self.pending);
         pending.sort_by_key(|p| p.phase);
         for p in pending {
             b.file = self.files[p.file].clone();
+            b.vars = p.vars;
             let result = if p.module { b.module(&p.sql, &p.settings) } else { b.statement(&p.sql) };
             if let Err(e) = result {
                 let (line, column) = (p.line + e.line.saturating_sub(1), e.column);
@@ -550,6 +566,47 @@ fn unquote(t: &Tk) -> String {
     }
 }
 
+/// `DECLARE @xp varbinary (2)` followed by `SELECT @xp=0x0a0b` (or `SET`), as SQL Compare
+/// writes a typed extended property value. Binary values are kept as upper-case hex.
+fn declared(c: &Cur, a: usize, b: usize) -> Option<Var> {
+    let mut s = c.sub(a, b + 1);
+    s.expect("DECLARE").ok()?;
+    let var = s.peek().filter(|t| t.text.starts_with('@'))?.text.to_ascii_lowercase();
+    s.i += 1;
+    s.eat("AS");
+    let ty = s.ident().ok()?.to_ascii_lowercase();
+    if s.is_punct("(") {
+        s.group().ok()?;
+    }
+    if !s.eat("SELECT") && !s.eat("SET") {
+        return None;
+    }
+    if !s.peek().is_some_and(|t| t.text.eq_ignore_ascii_case(&var)) {
+        return None;
+    }
+    s.i += 1;
+    s.expect_punct("=").ok()?;
+    let t = s.peek()?;
+    let value = if t.kind == Tok::Str && s.i + 1 == s.t.len() { string_value(&t.text) } else { s.text(s.i, s.t.len() - 1).to_string() };
+    let value = match value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        Some(hex) if ty.ends_with("binary") => format!("0x{}", hex.to_ascii_uppercase()),
+        _ => value,
+    };
+    Some((var, ty, value))
+}
+
+/// The sql_variant base type SQL Server gives a literal: `N'…'` nvarchar, `'…'` varchar, an
+/// integer int, `0x…` varbinary.
+fn literal_type(t: &Tk) -> Option<String> {
+    if t.kind == Tok::Str {
+        return Some(if t.text.starts_with(['N', 'n']) { "nvarchar" } else { "varchar" }.into());
+    }
+    if t.text.len() > 2 && t.text.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("0x")) {
+        return Some("varbinary".into());
+    }
+    t.text.parse::<i32>().is_ok().then(|| "int".into())
+}
+
 /// `N'it''s'` → `it's`.
 fn string_value(s: &str) -> String {
     let s = s.strip_prefix(['N', 'n']).unwrap_or(s);
@@ -715,6 +772,8 @@ struct Builder {
     file: PathBuf,
     /// For generated constraint names.
     counter: u32,
+    /// The variables of the statement's batch.
+    vars: Vec<Var>,
 }
 
 /// Which object a statement was about, for where its sub-objects go.
@@ -902,7 +961,8 @@ impl Builder {
         c.fail(MessageKind::IgnoredStatement)
     }
 
-    /// `ALTER AUTHORIZATION ON SCHEMA::s TO owner`.
+    /// `ALTER AUTHORIZATION ON SCHEMA::s TO owner`, on a role, a type or a schema object
+    /// (`TO SCHEMA OWNER` gives the object back to its schema's owner).
     fn alter_authorization(&mut self, c: &mut Cur) -> R<()> {
         c.i = 2;
         c.expect("ON")?;
@@ -916,6 +976,9 @@ impl Builder {
         };
         let parts = c.multipart()?;
         c.expect("TO")?;
+        if c.eat_seq(&["SCHEMA", "OWNER"]) {
+            return self.object_owner(c, &class, &parts, None);
+        }
         let owner = c.ident()?;
         match class.as_str() {
             "SCHEMA" => {
@@ -928,7 +991,41 @@ impl Builder {
                     p.owner = Some(owner);
                 }
             }
-            _ => {}
+            _ => return self.object_owner(c, &class, &parts, Some(owner)),
+        }
+        Ok(())
+    }
+
+    /// The explicit owner of a schema object or type.
+    fn object_owner(&mut self, c: &Cur, class: &str, parts: &[String], owner: Option<String>) -> R<()> {
+        let (schema, name) = match parts {
+            [.., s, n] => (s.clone(), n.clone()),
+            [n] => (self.schema_default(), n.clone()),
+            [] => return c.syntax(),
+        };
+        let is = |s: &str, n: &str| s.eq_ignore_ascii_case(&schema) && n.eq_ignore_ascii_case(&name);
+        let db = &mut self.db;
+        let slot = match class {
+            "OBJECT" => db
+                .tables
+                .iter_mut()
+                .find(|x| is(&x.schema, &x.name))
+                .map(|x| &mut x.owner)
+                .or_else(|| db.views.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner))
+                .or_else(|| db.routines.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner))
+                .or_else(|| db.sequences.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner))
+                .or_else(|| db.synonyms.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner))
+                .or_else(|| db.security_policies.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner))
+                .or_else(|| db.external_tables.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner))
+                .or_else(|| db.queues.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner)),
+            "TYPE" => db.types.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner),
+            "XML SCHEMA COLLECTION" => db.xml_schema_collections.iter_mut().find(|x| is(&x.schema, &x.name)).map(|x| &mut x.owner),
+            // Other securables name their owner in their own CREATE statement.
+            _ => return Ok(()),
+        };
+        // An object the model does not keep (a default, a rule…) has no owner to set.
+        if let Some(o) = slot {
+            *o = owner;
         }
         Ok(())
     }
@@ -1278,9 +1375,6 @@ impl Builder {
             return c.fail(MessageKind::IgnoredStatement);
         }
         let mut t = Table { schema: name.schema.clone(), name: name.name.clone(), lock_escalation: "TABLE".into(), ..Default::default() };
-        if c.eat_seq(&["AS", "FILETABLE"]) {
-            return c.fail(MessageKind::IgnoredStatement);
-        }
         let mut constraints = Vec::new();
         let mut period: Option<(String, String)> = None;
         if c.is_punct("(") {
@@ -1314,8 +1408,12 @@ impl Builder {
         let mut versioning: Option<Temporal> = None;
         loop {
             if c.eat("AS") {
-                let g = c.ident()?.to_ascii_uppercase();
-                t.graph = Some(g);
+                if c.eat("FILETABLE") {
+                    t.file_table = Some(FileTable::default());
+                } else {
+                    let g = c.ident()?.to_ascii_uppercase();
+                    t.graph = Some(g);
+                }
             } else if c.eat("ON") {
                 t.storage.data_space = Some(c.ident()?);
                 if c.is_punct("(") {
@@ -1342,6 +1440,15 @@ impl Builder {
                     } else if s.eat("DURABILITY") {
                         s.expect_punct("=")?;
                         t.durability = Some(s.ident()?.to_ascii_uppercase());
+                    } else if let Some(ft) = t.file_table.as_mut().filter(|_| s.at("FILETABLE_DIRECTORY") || s.at("FILETABLE_COLLATE_FILENAME") || s.at("FILETABLE_PRIMARY_KEY_CONSTRAINT_NAME")) {
+                        let option = s.ident()?.to_ascii_uppercase();
+                        s.expect_punct("=")?;
+                        let value = s.ident_or_string()?;
+                        match option.as_str() {
+                            "FILETABLE_DIRECTORY" => ft.directory = value,
+                            "FILETABLE_COLLATE_FILENAME" => ft.filename_collation = value,
+                            _ => ft.primary_key = Some(value),
+                        }
                     } else if s.eat("SYSTEM_VERSIONING") {
                         s.expect_punct("=")?;
                         if s.on_off()? {
@@ -1530,6 +1637,9 @@ impl Builder {
             if s.eat("LOCK_ESCALATION") {
                 s.expect_punct("=")?;
                 self.db.tables[ti].lock_escalation = s.ident()?.to_ascii_uppercase();
+            } else if s.eat("REMOTE_DATA_ARCHIVE") {
+                s.expect_punct("=")?;
+                self.db.tables[ti].remote_data_archive = s.on_off()?;
             } else if s.eat("SYSTEM_VERSIONING") {
                 s.expect_punct("=")?;
                 if s.on_off()? {
@@ -2118,7 +2228,7 @@ impl Builder {
                     return Ok(());
                 }
                 let on = c.object(&self.schema_default())?;
-                let mut tr = Trigger { name: name.name.clone(), ..Default::default() };
+                let mut tr = Trigger { name: name.name.clone(), settings: settings.clone(), ..Default::default() };
                 if c.eat("WITH") {
                     while !c.done() && !c.at("FOR") && !c.at("AFTER") && !c.at("INSTEAD") {
                         if c.eat("ENCRYPTION") {
@@ -2256,7 +2366,9 @@ impl Builder {
         let with_grant = c.eat_seq(&["WITH", "GRANT", "OPTION"]);
         // CONNECT comes with CREATE USER: a plain GRANT or a REVOKE only says whether the user
         // still has it.
-        if p.class == "DATABASE" && perms.iter().any(|x| x == "CONNECT") && (verb == "REVOKE" || (verb == "GRANT" && !with_grant)) {
+        // guest has no CREATE USER: its CONNECT is a permission.
+        let guest = grantees.iter().all(|g| g.eq_ignore_ascii_case("guest"));
+        if p.class == "DATABASE" && !guest && perms.iter().any(|x| x == "CONNECT") && (verb == "REVOKE" || (verb == "GRANT" && !with_grant)) {
             for g in &grantees {
                 if let Some(u) = self.db.principals.iter_mut().find(|u| u.name.eq_ignore_ascii_case(g) && !u.is_role()) {
                     u.no_connect = verb == "REVOKE";
@@ -2307,6 +2419,8 @@ impl Builder {
         let proc = c.multipart()?.pop().unwrap_or_default().to_ascii_lowercase();
         let mut positional: Vec<Option<String>> = Vec::new();
         let mut named: HashMap<String, Option<String>> = HashMap::new();
+        // The sql_variant type each argument has: from its literal or its variable.
+        let mut types: HashMap<String, String> = HashMap::new();
         let end = c.t.len();
         for (x, y) in c.split_commas(c.i, end) {
             let mut s = c.sub(x, y);
@@ -2315,13 +2429,24 @@ impl Builder {
                 key = Some(s.t[0].text.to_ascii_lowercase());
                 s.i = 2;
             }
-            let value = if s.at("NULL") {
+            let var = s.peek().filter(|t| t.text.starts_with('@') && s.i + 1 == s.t.len()).and_then(|t| self.vars.iter().find(|v| t.text.eq_ignore_ascii_case(&v.0)));
+            let slot = key.clone().unwrap_or_else(|| positional.len().to_string());
+            let value = if let Some((_, ty, v)) = var {
+                types.insert(slot, ty.clone());
+                Some(v.clone())
+            } else if s.at("NULL") {
                 None
             } else if s.peek().is_some_and(|t| t.kind == Tok::Str) {
+                if let Some(ty) = literal_type(&s.t[s.i]) {
+                    types.insert(slot, ty);
+                }
                 Some(string_value(&s.t[s.i].text))
             } else if s.done() {
                 None
             } else {
+                if let Some(ty) = s.peek().filter(|_| s.i + 1 == s.t.len()).and_then(literal_type) {
+                    types.insert(slot, ty);
+                }
                 Some(s.text(s.i, s.t.len() - 1).to_string())
             };
             match key {
@@ -2341,11 +2466,16 @@ impl Builder {
             "sp_addextendedproperty" => {
                 let Some(pname) = arg("@name", 0) else { return c.syntax() };
                 let value = arg("@value", 1);
+                let value_type = if named.contains_key("@value") { types.get("@value") } else { types.get("1") }.cloned().filter(|_| value.is_some());
+                let value = match (value, value_type.as_deref()) {
+                    (Some(v), Some(t)) if t.ends_with("binary") => Some(v.get(..2).map_or(v.clone(), |p| format!("{p}{}", v[2..].to_ascii_uppercase()))),
+                    (v, _) => v,
+                };
                 let lv = |i: usize, t: &str, n: &str| (arg(t, 2 + i * 2).map(|s| s.to_ascii_uppercase()), arg(n, 3 + i * 2));
                 let (t0, n0) = lv(0, "@level0type", "@level0name");
                 let (t1, n1) = lv(1, "@level1type", "@level1name");
                 let (t2, n2) = lv(2, "@level2type", "@level2name");
-                let mut p = ExtendedProperty { name: pname, value, ..Default::default() };
+                let mut p = ExtendedProperty { name: pname, value, value_type, ..Default::default() };
                 match (t0.as_deref(), t1) {
                     (None, _) => p.class = "DATABASE".into(),
                     (Some("SCHEMA"), None) => {
@@ -2362,7 +2492,8 @@ impl Builder {
                         }
                     }
                     // Database-wide objects: assemblies, Service Broker objects, DDL triggers…
-                    (Some(t0), None) if t0 != "USER" && t0 != "FILEGROUP" && t0 != "PLAN GUIDE" => {
+                    // Users and roles are level 0 USER.
+                    (Some(t0), None) if t0 != "FILEGROUP" && t0 != "PLAN GUIDE" => {
                         p.class = t0.to_string();
                         p.object = n0;
                     }
@@ -2415,7 +2546,23 @@ impl Builder {
                 };
                 let what = Cur::new(&what).object(&self.schema_default()).map(|n| n.quoted()).unwrap_or(what);
                 let parts = Cur::new(&target).multipart().unwrap_or_default();
-                // Bindings to alias types are not modelled.
+                // An alias type ([schema].[type] or [type]); else [schema].[table].[column].
+                let ty = match parts.as_slice() {
+                    [schema, name] => Some((schema.clone(), name.clone())),
+                    [name] => Some((self.schema_default(), name.clone())),
+                    _ => None,
+                };
+                if let Some((schema, name)) = ty {
+                    let Some(t) = self.db.types.iter_mut().find(|t| t.schema.eq_ignore_ascii_case(&schema) && t.name.eq_ignore_ascii_case(&name)) else {
+                        return c.fail(MessageKind::ReferenceNotFound);
+                    };
+                    if rule {
+                        t.bound_rule = Some(what);
+                    } else {
+                        t.bound_default = Some(what);
+                    }
+                    return Ok(());
+                }
                 let [.., schema, table, column] = parts.as_slice() else { return c.fail(MessageKind::IgnoredStatement) };
                 let Some(t) = self.table_index(&ObjectName::new(schema, table)) else { return c.fail(MessageKind::ReferenceNotFound) };
                 let Some(col) = self.db.tables[t].columns.iter_mut().find(|x| x.name.eq_ignore_ascii_case(column)) else {
@@ -2426,6 +2573,18 @@ impl Builder {
                 } else {
                     col.bound_default = Some(what);
                 }
+                Ok(())
+            }
+            "sp_tableoption" => {
+                let (Some(table), Some(option), Some(value)) = (arg("@tablenamepattern", 0), arg("@optionname", 1), arg("@optionvalue", 2)) else {
+                    return c.syntax();
+                };
+                if !option.eq_ignore_ascii_case("large value types out of row") {
+                    return c.fail(MessageKind::IgnoredStatement);
+                }
+                let Ok(name) = Cur::new(&table).object(&self.schema_default()) else { return c.syntax() };
+                let Some(t) = self.table_index(&name) else { return c.fail(MessageKind::ReferenceNotFound) };
+                self.db.tables[t].large_value_types_out_of_row = matches!(value.to_ascii_lowercase().as_str(), "1" | "on" | "true");
                 Ok(())
             }
             "sp_addtype" => c.fail(MessageKind::IgnoredStatement),

@@ -637,7 +637,7 @@ impl Cur<'_> {
         let v = self.f32()?;
         self.i32()?;
         let mut p = SecurityPolicy { schema: self.s()?, name: self.s()?, ..Default::default() };
-        self.str()?;
+        p.owner = self.str()?.filter(|o| !o.is_empty());
         p.enabled = self.bool()?;
         p.schema_bound = if v >= 23.0 { self.bool()? } else { true };
         p.not_for_replication = self.bool()?;
@@ -712,7 +712,7 @@ impl Cur<'_> {
         t.remote_object = nonempty(self.str()?);
         let distribution = if self.u8()? != 0 { Some(self.i32()?) } else { None };
         let sharding = self.str()?;
-        self.str()?;
+        t.owner = nonempty(self.str()?);
         self.ss()?;
         let perms = self.perms()?;
         self.eprops()?;
