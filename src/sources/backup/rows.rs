@@ -82,6 +82,7 @@ fn read_page(cat: &Catalog, p: &[u8], compressed: bool, picked: &[(Option<&Col>,
                     None => Value::Null,
                 },
                 Field::Bytes(b) if is_lob(c) => lob(cat, c, b.to_vec(), *want)?,
+                Field::Complex(b) if text_pointer(c) => lob(cat, c, b.to_vec(), *want)?,
                 Field::Complex(b) if is_lob(c) || c.xtype == xtype::CLR || c.xtype == xtype::XML => lob(cat, c, large_value(cat.store, b, false)?, *want)?,
                 Field::Bytes(b) => values::decode(cat.store, c, b, false, cat.collation)?,
                 Field::Complex(b) => values::decode(cat.store, c, b, true, cat.collation)?,
@@ -91,6 +92,11 @@ fn read_page(cat: &Catalog, p: &[u8], compressed: bool, picked: &[(Option<&Col>,
         out.push(row);
     }
     Ok(())
+}
+
+/// text, ntext and image keep a text pointer in the row.
+fn text_pointer(c: &Col) -> bool {
+    matches!(c.xtype, xtype::TEXT | xtype::NTEXT | xtype::IMAGE)
 }
 
 fn is_lob(c: &Col) -> bool {
@@ -136,6 +142,7 @@ fn compressed_value(cat: &Catalog, c: &Col, f: CdField, want: Want) -> Result<Va
     let b = match f {
         CdField::Null => return Ok(Value::Null),
         CdField::True => return Ok(Value::Bool(true)),
+        CdField::Complex(p) if text_pointer(c) => return lob(cat, c, p, want),
         CdField::Complex(p) => {
             let bytes = large_value(cat.store, &p, false)?;
             return if is_lob(c) || c.xtype == CLR || c.xtype == XML { lob(cat, c, bytes, want) } else { values::decode(cat.store, c, &bytes, false, cat.collation) };

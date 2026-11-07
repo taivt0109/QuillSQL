@@ -813,6 +813,25 @@ impl Builder<'_> {
         for o in trs {
             let definition = self.definition(o.id as i64, None).filter(|_| !o.flag(st::ENCRYPTED));
             if o.parent == 0 {
+                let mut events: Vec<String> = self
+                    .values
+                    .get(&(vc::TRIGGER_EVENT, o.id as i64))
+                    .into_iter()
+                    .flatten()
+                    .filter(|r| r.int("valnum") != 100)
+                    .filter_map(|r| super::events::name(r.int("subobjid")).map(str::to_string))
+                    .collect();
+                events.sort();
+                self.db.ddl_triggers.push(DdlTrigger {
+                    name: o.name.clone(),
+                    encrypted: definition.is_none(),
+                    definition: definition.unwrap_or_default(),
+                    disabled: o.flag(st::TRIGGER_DISABLED),
+                    settings: ModuleSettings { ansi_nulls: o.flag(st::ANSI_NULLS), quoted_identifier: o.flag(st::QUOTED_IDENTIFIER) },
+                    clr_method: None,
+                    execute_as: self.execute_as(o.id),
+                    events,
+                });
                 continue;
             }
             let (events, order) = self.trigger_events(o.id);

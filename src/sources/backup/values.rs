@@ -85,11 +85,11 @@ fn money(b: &[u8]) -> i64 {
 pub fn decode(store: &PageStore, c: &Col, b: &[u8], complex: bool, db_collation: u32) -> Result<Value, String> {
     use xtype::*;
     let owned;
-    let b = if complex {
-        owned = large_value(store, b, false)?;
-        &owned[..]
-    } else if matches!(c.xtype, TEXT | NTEXT | IMAGE) {
+    let b = if matches!(c.xtype, TEXT | NTEXT | IMAGE) {
         owned = large_value(store, b, true)?;
+        &owned[..]
+    } else if complex {
+        owned = large_value(store, b, false)?;
         &owned[..]
     } else {
         b
