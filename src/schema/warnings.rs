@@ -638,3 +638,11 @@ pub mod stretch {
         )
     }
 }
+
+pub fn temporal_primary_key(t: &str) -> Warning {
+    w(
+        Severity::Medium,
+        t,
+        format!("The table {t} is a temporal table on which the primary key has changed.\r\nWe therefore need to rebuild this to prevent script ordering errors relating to the primary key."),
+    )
+}

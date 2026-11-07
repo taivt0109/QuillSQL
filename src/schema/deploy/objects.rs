@@ -253,7 +253,7 @@ impl<'a> Planner<'a> {
                 if sc.computed.is_some() {
                     let def = ddl::column_definition_with(sc, true, &self.r, t.memory_optimized);
                     let add = self.ex.columns(dep, &[&sc.name], Check::Create, &format!("ALTER TABLE {table} ADD {def}"));
-                    self.step(Phase::CreateDefaults, format!("Altering {dep}"), vec![add]);
+                    self.step(Phase::BindColumns, format!("Altering {dep}"), vec![add]);
                 }
             }
         }
@@ -1117,6 +1117,9 @@ impl<'a> Planner<'a> {
                     {
                         after.push(format!("ALTER TABLE {name} ALTER COLUMN {} {} HIDDEN", quote(&c.name), if c.hidden { "ADD" } else { "DROP" }));
                     }
+                }
+                if pk_dropped {
+                    self.warn(warn::temporal_primary_key(&name.to_string()));
                 }
                 if history_moved || pk_dropped {
                     self.versioning_off(t);
