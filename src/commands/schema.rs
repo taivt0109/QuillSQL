@@ -44,7 +44,7 @@ const ACTIONS: [Switch; 12] = [
         aliases: &["dco"],
         takes_value: true,
         repeatable: true,
-        help: "Options for deploying static data (accepted; static data is not supported yet)",
+        help: "Options for deploying static data (with /include:StaticData)",
     },
     Switch {
         name: "include",
@@ -199,6 +199,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     check_rule_types(args)?;
     let project = common::project_of(args, crate::project::ProjectKind::Schema)?;
     let source1 = common::source(args, 1)?.ok_or_else(|| ArgError::new(exit::USAGE, "The /database1 switch requires a database name."))?;
+    let static_data = args.all("include").iter().chain(project.iter().flat_map(|p| p.include.iter())).any(|i| i.eq_ignore_ascii_case("staticdata"));
+    if static_data && !matches!(source1, Source::Scripts { .. }) && args.get("makescripts").is_none() && args.get("makesnapshot").is_none() {
+        return Err(ArgError::new(exit::USAGE, "Static data can only be used when a scripts folder or source-controlled database is set as database 1."));
+    }
     let options = resolve_options(args, project.as_ref());
     options.validate().map_err(|e| ArgError::new(exit::INVALID_VALUE, e))?;
 
@@ -278,7 +282,8 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             d.selected = false;
         }
     }
-    let identical = !comparison.differences.iter().any(|d| d.selected && d.kind != DiffKind::Equal);
+    let statics = if static_data { static_data_of(args, &source1, &side2, &db2)? } else { None };
+    let identical = !comparison.differences.iter().any(|d| d.selected && d.kind != DiffKind::Equal) && statics.as_ref().is_none_or(|s| s.identical());
 
     if let Some(path) = args.get("report") {
         write_report(args, path, &comparison, &db1, &db2, &source1, &side2, &options, include_identical)?;
@@ -298,7 +303,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             .filter(|d| if d.kind == DiffKind::Equal { include_identical && selection.includes(d) && passes(d) } else { d.selected })
             .collect();
         let (id1, id2) = (identifier(&source1, &db1), side_identifier(&side2, &db2));
-        print_summary(&listed, &id1, &id2);
+        print_summary(&listed, &id1, &id2, statics.as_ref());
         if console::is_verbose() {
             print_details(&listed, &id1, &id2, &db1, &db2);
         }
@@ -326,6 +331,11 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let mut script = None;
     if args.has("scriptfile") || (args.has("synchronize") && live_target.is_some()) {
         let mut s = build_script(args, &comparison, &db1, &db2, &options, &mappings, &source1, &side2)?;
+        if let Some(data) = &statics {
+            let isolation = args.get("transactionIsolationLevel").unwrap_or("SERIALIZABLE");
+            let (from, to) = (describe(Some(&source1), &db1), describe(side2_source(&side2), &db2));
+            s = crate::data::staticdata::merge(s, |own| data.script(&db2, &from, &to, isolation, own)).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
+        }
         if let Some(f) = &folder1 {
             sources::add_pre_post(&mut s, f, &options)?;
         }
@@ -359,6 +369,36 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         console::verbose(&format!("Deployed {} to {} ({ran} batches).", db1.name, target.describe()));
     }
     Ok(exit::SUCCESS)
+}
+
+fn side2_source(side: &Side) -> Option<&Source> {
+    match side {
+        Side::Source(s) => Some(s),
+        Side::Empty => None,
+    }
+}
+
+/// `/include:StaticData`: the data of database 1's tables that have a data script, compared
+/// with database 2 (a live database or a scripts folder), with `/datacompareoptions`.
+fn static_data_of(args: &Args, source1: &Source, side2: &Side, db2: &Database) -> Result<Option<crate::data::staticdata::StaticData>, ArgError> {
+    use crate::data::staticdata::{self, Target};
+    let Source::Scripts { path, revision } = source1 else { return Ok(None) };
+    let failed = |e: String| ArgError::new(exit::EXECUTION_FAILED, e);
+    let folder = crate::sources::datafolder::read(path, revision.as_deref()).map_err(failed)?;
+    let resolved = crate::data::DataOptions::resolve(args.get("datacompareoptions"), staticdata::default_options(), false);
+    for w in &resolved.warnings {
+        console::warn(w);
+    }
+    let target_folder;
+    let target = match side2 {
+        Side::Source(Source::Live(spec)) => Target::Live(spec),
+        Side::Source(Source::Scripts { path, revision }) => {
+            target_folder = crate::sources::datafolder::read(path, revision.as_deref()).map_err(failed)?;
+            Target::Folder(&target_folder)
+        }
+        _ => return Ok(None),
+    };
+    staticdata::compare(&folder, target, db2, &resolved.options).map(Some).map_err(failed)
 }
 
 /// `server.database`, as SQL Compare names a data source in its output.
@@ -399,8 +439,14 @@ fn left_truncate(s: &str, prefix: usize, max: usize) -> String {
 }
 
 /// One summary row (two lines when the database 2 name does not fit).
+#[cfg(test)]
 fn summary_row(d: &Difference, name_width: usize) -> String {
-    const TYPE_WIDTH: usize = 24;
+    summary_row_in(d, name_width, 24, 0)
+}
+
+/// `summary_row` in columns of `type_width`, with `records` blank characters before the status
+/// (the layout with static data).
+fn summary_row_in(d: &Difference, name_width: usize, type_width: usize, records: usize) -> String {
     let name = full_name(&d.name);
     let mut mapped = String::new();
     if let (Some(t), DiffKind::Different | DiffKind::Equal) = (&d.target_name, d.kind) {
@@ -415,7 +461,7 @@ fn summary_row(d: &Difference, name_width: usize) -> String {
         }
     }
     let (text, extra) = if name.chars().count() + mapped.chars().count() > name_width - 1 {
-        (name, format!("\n{}{}", " ".repeat(TYPE_WIDTH), force_length(&mapped, name_width)))
+        (name, format!("\n{}{}", " ".repeat(type_width), force_length(&mapped, name_width)))
     } else {
         (format!("{name}{mapped}"), String::new())
     };
@@ -428,22 +474,28 @@ fn summary_row(d: &Difference, name_width: usize) -> String {
         DiffKind::OnlyIn2 => "    <<  ",
     };
     let extra = if mapped.is_empty() { String::new() } else { extra };
-    format!("{}{text}{status}{extra}", force_length(report::type_name(d.object_type), TYPE_WIDTH))
+    format!("{}{text}{}{status}{extra}", force_length(report::type_name(d.object_type), type_width), " ".repeat(records))
 }
 
-fn print_summary(listed: &[&Difference], id1: &str, id2: &str) {
+fn print_summary(listed: &[&Difference], id1: &str, id2: &str, data: Option<&crate::data::staticdata::StaticData>) {
     let w = console::width();
-    let name_width = w - 24 - 4 - 4 - 1;
+    // With static data the type column narrows to 16 and a Records column of 8 comes in.
+    let (type_width, records) = if data.is_some() { (16, 8) } else { (24, 0) };
+    let name_width = w - type_width - records - 4 - 4 - 1;
     console::log("");
     console::log("Summary Information");
     console::log(&"=".repeat(w - 1));
     console::log(&format!("DB1 = {id1}"));
     console::log(&format!("DB2 = {id2}"));
     console::log("");
-    console::log(&format!("{:<24}{:<name_width$}{:<4}{:<4}", "Object type", "Name", "DB1", "DB2"));
+    let records_head = if data.is_some() { format!("{:<8}", "Records") } else { String::new() };
+    console::log(&format!("{:<type_width$}{:<name_width$}{records_head}{:<4}{:<4}", "Object type", "Name", "DB1", "DB2"));
     console::log(&"-".repeat(w - 1));
     for d in listed {
-        console::log(&summary_row(d, name_width));
+        console::log(&summary_row_in(d, name_width, type_width, records));
+    }
+    for row in data.map(|s| s.summary_rows(name_width)).unwrap_or_default() {
+        console::log(&row);
     }
     console::log(&"-".repeat(w - 1));
     console::log("Please note: Only included differences are displayed above and only included differences are deployed");

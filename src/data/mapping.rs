@@ -32,6 +32,14 @@ pub struct TablePair {
     /// Columns left out of the comparison and other mapping warnings.
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// Why the pair is left out of the comparison altogether (a user mapping that no longer
+    /// applies, or something the data sources cannot compare), as SQL Data Compare words it.
+    #[serde(default)]
+    pub excluded: Option<String>,
+    /// MissingFrom2AsInclude: the table is only in database 1 and is paired with itself; database
+    /// 2 has no rows for it.
+    #[serde(default)]
+    pub target_missing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +81,9 @@ pub struct ColumnPair {
     /// Graph pseudo-column kind: `$node_id`, `$edge_id`, `$from_id` or `$to_id`.
     #[serde(default)]
     pub graph: Option<String>,
+    /// The database 1 column has a data mask.
+    #[serde(default)]
+    pub masked: bool,
 }
 
 impl ColumnPair {
@@ -125,6 +136,21 @@ pub fn normalize(s: &str, o: &DataOptions) -> String {
         out = out.to_lowercase();
     }
     out
+}
+
+/// Whether a user mapping's object name means this object: ignoring case unless object
+/// definitions are case-sensitive.
+pub fn same_object(a: &ObjectName, b: &ObjectName, o: &DataOptions) -> bool {
+    if o.has(DataOpt::CaseSensitiveObjectDefinition) {
+        a == b
+    } else {
+        a.schema.to_lowercase() == b.schema.to_lowercase() && a.name.to_lowercase() == b.name.to_lowercase()
+    }
+}
+
+/// The user mapping of a database 1 object.
+pub fn override_of<'a>(user: &'a DataMappings, source: &ObjectName, o: &DataOptions) -> Option<&'a TableOverride> {
+    user.tables.iter().find(|t| same_object(&t.source, source, o))
 }
 
 fn is_case_insensitive(collation: Option<&str>) -> bool {
@@ -409,12 +435,13 @@ pub fn map_tables(db1: &Database, db2: &Database, o: &DataOptions, user: &DataMa
         let want = t.target.as_ref().unwrap();
         // An empty target leaves the table unmapped.
         if want.name.is_empty() {
-            if let Some(i) = left.iter().position(|x| x.name == t.source) {
+            if let Some(i) = left.iter().position(|x| same_object(&x.name, &t.source, o)) {
                 matched.retain(|&(x, _)| x != i);
             }
             continue;
         }
-        let (Some(i), Some(j)) = (left.iter().position(|x| x.name == t.source), right.iter().position(|x| x.name == *want)) else { continue };
+        // A mapping whose tables are gone leaves the pairing by name in place.
+        let (Some(i), Some(j)) = (left.iter().position(|x| same_object(&x.name, &t.source, o)), right.iter().position(|x| same_object(&x.name, want, o))) else { continue };
         matched.retain(|&(x, y)| x != i && y != j);
         matched.push((i, j));
     }
@@ -423,18 +450,74 @@ pub fn map_tables(db1: &Database, db2: &Database, o: &DataOptions, user: &DataMa
     let mut pairs = Vec::new();
     for &(i, j) in &matched {
         let (l, r) = (&left[i], &right[j]);
-        let over = user.tables.iter().find(|t| t.source == l.name);
+        let over = override_of(user, &l.name, o);
         if over.is_some_and(|t| t.excluded) {
             continue;
         }
         pairs.push(pair(l, r, o, over));
     }
     let only1 = (0..left.len())
-        .filter(|i| !matched.iter().any(|m| m.0 == *i) && !user.tables.iter().any(|t| t.source == left[*i].name && t.excluded))
+        .filter(|i| !matched.iter().any(|m| m.0 == *i) && !override_of(user, &left[*i].name, o).is_some_and(|t| t.excluded))
         .map(|i| left[i].name.clone())
         .collect();
     let only2 = (0..right.len()).filter(|j| !matched.iter().any(|m| m.1 == *j)).map(|j| right[j].name.clone()).collect();
     (pairs, only1, only2)
+}
+
+/// The user mappings that name a table or pair that does not exist, in SQL Data Compare's words
+/// (the comparison goes on without them).
+pub fn user_mapping_warnings(db1: &Database, db2: &Database, o: &DataOptions, user: &DataMappings) -> Vec<String> {
+    let (left, right) = (objects(db1, o), objects(db2, o));
+    let (pairs, _, _) = map_tables(db1, db2, o, user);
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |s: &str| {
+        if !out.iter().any(|x| x == s) {
+            out.push(s.to_string());
+        }
+    };
+    let has_schema = |v: &[Obj], s: &str| v.iter().any(|x| x.name.schema.eq_ignore_ascii_case(s));
+    for (a, b) in &user.schemas {
+        if !has_schema(&left, a) || !has_schema(&right, b) {
+            add("Unable to map owners. Owners do not exist.");
+        }
+    }
+    for t in &user.tables {
+        let source = left.iter().any(|x| same_object(&x.name, &t.source, o));
+        if let Some(w) = &t.target {
+            if w.name.is_empty() {
+                if !source {
+                    add("Unable to unmap tables. The tables don't exist or have not been mapped.");
+                }
+            } else if !source || !right.iter().any(|x| same_object(&x.name, w, o)) {
+                add("Unable to map tables. The tables don't exist or have not been unmapped.");
+            }
+        }
+        // The settings of a table that is not paired cannot apply.
+        if (t.excluded && source) || pairs.iter().any(|p| same_object(&p.source, &t.source, o)) {
+            continue;
+        }
+        if t.excluded {
+            add("Unable to deselect comparison of table mapping. Table mapping does not exist.");
+        }
+        if t.where1.as_deref().is_some_and(|w| !w.trim().is_empty()) {
+            add("Unable to set left where clause for comparison of table mapping. Table mapping does not exist.");
+        }
+        if t.where2.as_deref().is_some_and(|w| !w.trim().is_empty()) {
+            add("Unable to set right where clause for comparison of table mapping. Table mapping does not exist.");
+        }
+        match t.key.first() {
+            Some(k) if k.starts_with("index:") => add("Unable to use index for table mapping. Table mapping does not exist."),
+            Some(_) => add("Unable to use column for custom comparison of table mapping. Table mapping does not exist."),
+            None => {}
+        }
+        if !t.excluded_columns.is_empty() {
+            add("Unable to deselect column of table mapping. Table mapping does not exist.");
+        }
+        if !t.columns.is_empty() {
+            add("Unable to map columns of table mapping. Table mapping does not exist.");
+        }
+    }
+    out
 }
 
 /// Pairs equal keys 1:1; a key that occurs twice on either side pairs nothing.
@@ -482,9 +565,11 @@ fn pair(l: &Obj, r: &Obj, o: &DataOptions, over: Option<&TableOverride>) -> Tabl
     for (a, b) in pair_names(&ln, &rn, |s| s.to_string()) {
         links.push((a, b));
     }
+    let mut excluded = None;
     for (a, b) in user_cols {
         let (Some(i), Some(j)) = (left_cols.iter().position(|c| c.name.eq_ignore_ascii_case(a)), right_cols.iter().position(|c| c.name.eq_ignore_ascii_case(b)))
         else {
+            excluded.get_or_insert_with(|| "Unable to map columns of table mapping. Columns do not exist.".to_string());
             continue;
         };
         links.retain(|&(x, y)| x != i && y != j);
@@ -529,6 +614,7 @@ fn pair(l: &Obj, r: &Obj, o: &DataOptions, over: Option<&TableOverride>) -> Tabl
             target_collation: b.collation.clone(),
             source_identity: a.identity.is_some(),
             graph: graph_kind(&b.name).map(str::to_string),
+            masked: a.masking_function.is_some(),
         });
     }
     for (i, a) in left_cols.iter().enumerate() {
@@ -554,6 +640,8 @@ fn pair(l: &Obj, r: &Obj, o: &DataOptions, over: Option<&TableOverride>) -> Tabl
         problem: None,
         is_view: l.view,
         notes,
+        excluded,
+        target_missing: false,
     };
     let index_of = |name: &str, p: &TablePair| p.columns.iter().position(|c| c.source.eq_ignore_ascii_case(name));
     let paired = index_pairs(l, r, &p);
@@ -562,13 +650,19 @@ fn pair(l: &Obj, r: &Obj, o: &DataOptions, over: Option<&TableOverride>) -> Tabl
         if let Some(name) = custom[0].strip_prefix("index:") {
             match paired.iter().find(|(a, _)| a.name.eq_ignore_ascii_case(name)) {
                 Some((a, b)) => use_index(&mut p, a, b),
-                None => p.problem = Some(format!("the index {name} is not on the same columns in both databases")),
+                None => {
+                    p.problem = Some(format!("the index {name} is not on the same columns in both databases"));
+                    p.excluded.get_or_insert_with(|| "Unable to use index for table mapping. Index mapping does not exist.".to_string());
+                }
             }
         } else {
             p.key = custom.iter().filter_map(|k| index_of(k, &p)).collect();
             p.key_name = Some("custom".into());
             if p.key.len() != custom.len() {
                 p.problem = Some("a custom key column is not compared in both databases".into());
+                if custom.iter().any(|k| !c1.iter().any(|c| c.name.eq_ignore_ascii_case(k))) {
+                    p.excluded.get_or_insert_with(|| "Unable to use column for custom comparison of table mapping. Column does not exist.".to_string());
+                }
             }
         }
     } else {
@@ -771,6 +865,39 @@ mod tests {
         assert_eq!(pairs[0].target, ObjectName::new("dbo", "Orders"));
         assert_eq!(pairs[0].columns.iter().map(|c| (c.source.as_str(), c.target.as_str())).collect::<Vec<_>>(), [("Id", "Id"), ("Amount", "Total")]);
         assert!(pairs[0].notes.is_empty(), "{:?}", pairs[0].notes);
+    }
+
+    #[test]
+    fn user_mapping_warnings_and_exclusions() {
+        let db = Database { tables: vec![table("Orders", vec![col("Id", "int"), col("Amount", "money")], &["Id"])], ..Default::default() };
+        let o = DataOptions::default_set();
+        let over = |name: &str| TableOverride { source: ObjectName::new("dbo", name), ..Default::default() };
+        // Names match ignoring case; a mapping to a table that is gone leaves the name pairing.
+        let user = DataMappings {
+            tables: vec![TableOverride { where1: Some("Id > 1".into()), target: Some(ObjectName::new("dbo", "Gone")), ..over("ORDERS") }],
+            ..Default::default()
+        };
+        let (pairs, _, _) = map_tables(&db, &db, &o, &user);
+        assert_eq!(pairs[0].where1.as_deref(), Some("Id > 1"));
+        assert_eq!(pairs[0].target, ObjectName::new("dbo", "Orders"));
+        assert_eq!(user_mapping_warnings(&db, &db, &o, &user), ["Unable to map tables. The tables don't exist or have not been unmapped."]);
+        let cs = o.clone().with(DataOpt::CaseSensitiveObjectDefinition);
+        assert!(map_tables(&db, &db, &cs, &user).0[0].where1.is_none(), "case-sensitive names must match exactly");
+        // Settings of a table that does not exist.
+        let user = DataMappings { tables: vec![TableOverride { where2: Some("x = 1".into()), key: vec!["index:IX".into()], ..over("Nope") }], ..Default::default() };
+        assert_eq!(
+            user_mapping_warnings(&db, &db, &o, &user),
+            ["Unable to set right where clause for comparison of table mapping. Table mapping does not exist.", "Unable to use index for table mapping. Table mapping does not exist."]
+        );
+        // Mappings that cannot apply exclude the pair.
+        let user = DataMappings { tables: vec![TableOverride { columns: vec![("Amount".into(), "Total".into())], ..over("Orders") }], ..Default::default() };
+        assert_eq!(map_tables(&db, &db, &o, &user).0[0].excluded.as_deref(), Some("Unable to map columns of table mapping. Columns do not exist."));
+        let user = DataMappings { tables: vec![TableOverride { key: vec!["index:IX_None".into()], ..over("Orders") }], ..Default::default() };
+        assert_eq!(map_tables(&db, &db, &o, &user).0[0].excluded.as_deref(), Some("Unable to use index for table mapping. Index mapping does not exist."));
+        let user = DataMappings { tables: vec![TableOverride { key: vec!["Nope".into()], ..over("Orders") }], ..Default::default() };
+        assert_eq!(map_tables(&db, &db, &o, &user).0[0].excluded.as_deref(), Some("Unable to use column for custom comparison of table mapping. Column does not exist."));
+        let user = DataMappings { tables: vec![TableOverride { excluded_columns: vec!["Nope".into()], ..over("Orders") }], ..Default::default() };
+        assert!(map_tables(&db, &db, &o, &user).0[0].excluded.is_none(), "a missing deselected column is ignored");
     }
 
     #[test]

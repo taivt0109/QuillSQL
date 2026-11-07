@@ -710,12 +710,18 @@ fn to_value(lit: &Lit, t: &DataType) -> Option<Value> {
 }
 
 impl DataFolder {
-    /// Deploys data to the folder: applies the selected kinds of rows of `result` (database 1
-    /// is the source, this folder database 2) and writes the changed tables' data scripts.
-    pub fn write_back(&mut self, result: &crate::data::compare::DataComparison, kinds: [bool; 4]) -> Result<Vec<PathBuf>, String> {
+    /// Deploys data to the folder: applies the selected rows of `result` (database 1 is the
+    /// source, this folder database 2) and writes the changed tables' data scripts. `select`
+    /// says whether a row (its kind and position within the kind) of a pair is deployed; rows
+    /// left out keep their old values.
+    pub fn write_back(&mut self, result: &crate::data::compare::DataComparison, select: &dyn Fn(&crate::data::mapping::TablePair, RowKind, u64) -> bool) -> Result<Vec<PathBuf>, String> {
         let mut written = Vec::new();
         for t in result.tables.iter().filter(|t| t.error.is_none() && !t.identical()) {
             let pair = &t.pair;
+            let chosen = |kind: RowKind| (0..t.offsets[kind as usize].len() as u64).any(|i| select(pair, kind, i));
+            if ![RowKind::Different, RowKind::OnlyIn1, RowKind::OnlyIn2].into_iter().any(chosen) {
+                continue;
+            }
             let Some(table) = self.folder.database.tables.iter().find(|x| x.schema.eq_ignore_ascii_case(&pair.target.schema) && x.name.eq_ignore_ascii_case(&pair.target.name)).cloned() else {
                 continue;
             };
@@ -726,12 +732,12 @@ impl DataFolder {
             let row_key = |row: &[Value]| -> Vec<Value> { pair.key.iter().map(|&k| index[k].map(|i| row[i].clone()).unwrap_or(Value::Null)).collect() };
             let same_key = |a: &[Value], b: &[Value]| a.iter().zip(b).all(|(x, y)| crate::data::value::cmp_key(x, y).is_eq());
             for kind in [RowKind::Different, RowKind::OnlyIn1, RowKind::OnlyIn2] {
-                if !kinds[kind as usize] {
-                    continue;
-                }
                 let offsets = &t.offsets[kind as usize];
                 let rows = store::read_page(&t.path, offsets, 0, offsets.len()).map_err(|e| e.to_string())?;
-                for r in rows {
+                for (i, r) in rows.into_iter().enumerate() {
+                    if !select(pair, kind, i as u64) {
+                        continue;
+                    }
                     match kind {
                         RowKind::Different => {
                             let k = key_of(&r.target);
