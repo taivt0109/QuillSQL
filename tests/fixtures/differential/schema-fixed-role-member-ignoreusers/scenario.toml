@@ -2,4 +2,3 @@ kind = "schema"
 about = "As schema-fixed-role-member with /options:Default,IgnoreUsersPermissionsAndRoleMemberships: the membership is ignored, the user only in db1 is not"
 finding = "schema-model M2"
 args = ['/options:Default,IgnoreUsersPermissionsAndRoleMemberships']
-oracles = ["diffset", "names", "exit"]
