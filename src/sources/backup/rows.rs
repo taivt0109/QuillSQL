@@ -80,10 +80,22 @@ pub fn read(cat: &Catalog, object: i32, columns: &[(String, Want)]) -> Result<Ve
         }
         graph.push(g);
     }
-    let mut all: Vec<(String, Want)> = columns.iter().zip(&graph).filter(|(_, g)| g.is_none()).map(|(c, _)| c.clone()).collect();
+    // A column set is the XML of the row's sparse columns that are not NULL.
+    let pars = cat.colpars.get(&object).cloned().unwrap_or_default();
+    let column_set: Vec<bool> = columns.iter().map(|(n, _)| pars.iter().any(|p| &p.str("name") == n && p.int("status") & 0x2000000 != 0)).collect();
+    let mut sparse: Vec<(String, u8, u8)> = pars.iter().filter(|p| p.int("status") & 0x1000000 != 0).map(|p| (p.str("name"), p.int("xtype") as u8, p.int("scale") as u8)).collect();
+    if column_set.iter().any(|c| *c) {
+        sparse.sort_by_key(|(n, _, _)| pars.iter().find(|p| &p.str("name") == n).map_or(0, |p| p.int("colid")));
+        for (n, _, _) in &sparse {
+            if !wanted.iter().any(|(x, _)| x == n) && !columns.iter().any(|(x, _)| x == n) {
+                wanted.push((n.clone(), Want::Value));
+            }
+        }
+    }
+    let mut all: Vec<(String, Want)> = columns.iter().zip(&graph).zip(&column_set).filter(|((_, g), set)| g.is_none() && !**set).map(|((c, _), _)| c.clone()).collect();
     all.extend(wanted);
     let stored = read_stored(cat, object, &all)?;
-    if graph.iter().all(Option::is_none) {
+    if graph.iter().all(Option::is_none) && !column_set.iter().any(|c| *c) {
         return Ok(stored);
     }
     let at = |name: &str| all.iter().position(|(n, _)| n == name);
@@ -91,8 +103,12 @@ pub fn read(cat: &Catalog, object: i32, columns: &[(String, Want)]) -> Result<Ve
         .into_iter()
         .map(|row| {
             let mut out = Vec::with_capacity(columns.len());
-            for ((n, _), g) in columns.iter().zip(&graph) {
+            for (((n, _), g), set) in columns.iter().zip(&graph).zip(&column_set) {
                 let v = match g {
+                    None if *set => {
+                        let xml: String = sparse.iter().filter_map(|(c, x, scale)| sparse_xml(c, &row[at(c).unwrap()], *x, *scale)).collect();
+                        if xml.is_empty() { Value::Null } else { Value::Str(xml) }
+                    }
                     None => row[at(n).unwrap()].clone(),
                     Some(g) => {
                         let object = match &g.object {
@@ -116,6 +132,37 @@ pub fn read(cat: &Catalog, object: i32, columns: &[(String, Want)]) -> Result<Ve
             out
         })
         .collect())
+}
+
+/// One sparse column in its column set's XML (NULL columns are left out).
+fn sparse_xml(name: &str, v: &Value, x: u8, scale: u8) -> Option<String> {
+    let text = match v {
+        Value::Null => return None,
+        Value::Str(s) => s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"),
+        Value::Bool(b) => (*b as u8).to_string(),
+        Value::Bytes(b) => base64(b),
+        Value::DateTime(_) | Value::Date(_) | Value::Time(_) | Value::DateTimeOffset(..) => {
+            let t = super::text::odbc(v, x, scale);
+            match v {
+                Value::DateTimeOffset(..) => t.replacen(' ', "T", 1).replace(' ', ""),
+                _ => t.replacen(' ', "T", 1),
+            }
+        }
+        other => other.display(),
+    };
+    Some(format!("<{name}>{text}</{name}>"))
+}
+
+fn base64(b: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 /// object id → (schema, name).
