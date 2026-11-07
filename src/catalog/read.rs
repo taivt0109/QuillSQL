@@ -169,7 +169,8 @@ impl Reader {
                     CAST(SERVERPROPERTY('EngineEdition') AS int),
                     DB_NAME(),
                     CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS nvarchar(128)),
-                    (SELECT CAST(compatibility_level AS int) FROM sys.databases WHERE database_id = DB_ID())",
+                    (SELECT CAST(compatibility_level AS int) FROM sys.databases WHERE database_id = DB_ID()),
+                    (SELECT SUSER_SNAME(owner_sid) FROM sys.databases WHERE database_id = DB_ID())",
         )
         .await?;
         let row = rows.first().ok_or("the server returned no version information")?;
@@ -182,6 +183,7 @@ impl Reader {
         self.db.name = s(row, 3);
         self.db.collation = s(row, 4);
         self.db.compatibility_level = i(row, 5) as u32;
+        self.db.owner = text(row, 6);
         Ok(())
     }
 

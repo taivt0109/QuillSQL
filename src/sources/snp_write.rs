@@ -1326,7 +1326,7 @@ impl<'a> W<'a> {
         let cs = self.cs;
         self.coll_head(cs, users.len() + 2);
         // dbo and guest, then the database's own users.
-        self.user(&Principal { name: "dbo".into(), default_schema: Some("dbo".into()), ..Default::default() }, 1, true);
+        self.user(&Principal { name: "dbo".into(), login: db.owner.clone(), default_schema: Some("dbo".into()), ..Default::default() }, 1, true);
         self.user(&Principal { name: "guest".into(), default_schema: Some("guest".into()), ..Default::default() }, 1, false);
         for p in users {
             let user_type = match p.kind.as_str() {
