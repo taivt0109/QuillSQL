@@ -205,7 +205,8 @@ fn storage_clause(st: &Storage, r: &Render) -> String {
     }
 }
 
-fn compression_option(st: &Storage, r: &Render) -> Option<String> {
+/// `DATA_COMPRESSION = â€¦`, per partition group on a partitioned object unless filegroups are ignored.
+pub fn compression_option(st: &Storage, r: &Render) -> Option<String> {
     if r.has(Opt::IgnoreDataCompression) {
         return None;
     }
