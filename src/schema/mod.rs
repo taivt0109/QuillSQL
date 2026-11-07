@@ -2,6 +2,7 @@
 
 pub mod backup;
 pub mod cast;
+pub mod clr;
 pub mod compare;
 mod compare_objects;
 pub mod ddl;

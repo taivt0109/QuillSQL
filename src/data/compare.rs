@@ -80,27 +80,39 @@ impl Server {
     }
 }
 
+/// One table's rows held in memory (a scripts folder's data scripts): values by column, as a
+/// live read would return them.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryTable {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+/// Tables in memory, by name.
+pub type Memory = std::collections::HashMap<ObjectName, MemoryTable>;
+
 /// Where one side's rows come from.
 #[derive(Clone, Copy)]
-pub enum Side<'a> {
+pub enum RowSource<'a> {
     Live(&'a ConnectionSpec),
+    Memory(&'a Memory),
     /// A backup set, read without a server.
     Backup(&'a crate::sources::backup::Backup),
 }
 
-impl<'a> Side<'a> {
+impl<'a> RowSource<'a> {
     /// The backup when there is one, else the live database.
-    pub fn of(backup: &'a Option<crate::sources::backup::Backup>, spec: &'a ConnectionSpec) -> Side<'a> {
+    pub fn of(backup: &'a Option<crate::sources::backup::Backup>, spec: &'a ConnectionSpec) -> RowSource<'a> {
         match backup {
-            Some(b) => Side::Backup(b),
-            None => Side::Live(spec),
+            Some(b) => RowSource::Backup(b),
+            None => RowSource::Live(spec),
         }
     }
 
     fn live(self) -> Option<&'a ConnectionSpec> {
         match self {
-            Side::Live(spec) => Some(spec),
-            Side::Backup(_) => None,
+            RowSource::Live(s) => Some(s),
+            RowSource::Memory(_) | RowSource::Backup(_) => None,
         }
     }
 }
@@ -118,14 +130,14 @@ pub fn compare(
     parallel: usize,
     progress: impl Fn(&TablePair, &TableResult),
 ) -> Result<DataComparison, String> {
-    compare_sides(Side::Live(spec1), Side::Live(spec2), db1, db2, opts, user, include, parallel, progress)
+    compare_sources(RowSource::Live(spec1), RowSource::Live(spec2), db1, db2, opts, user, include, parallel, progress)
 }
 
-/// [`compare`] with either side a live database or a backup.
+/// `compare` with either side's rows from a live database or from memory.
 #[allow(clippy::too_many_arguments)]
-pub fn compare_sides(
-    side1: Side,
-    side2: Side,
+pub fn compare_sources(
+    side1: RowSource,
+    side2: RowSource,
     db1: &Database,
     db2: &Database,
     opts: &DataOptions,
@@ -151,7 +163,9 @@ pub fn compare_sides(
         }
         done.sort_by(|a, b| a.pair.source.cmp(&b.pair.source));
         let mut triggers = Vec::new();
-        if let (true, Some(spec2)) = (opts.has(DataOpt::DisableDdlTriggers), side2.live()) {
+        if opts.has(DataOpt::DisableDdlTriggers)
+            && let Some(spec2) = side2.live()
+        {
             let mut c = db::connect_async(spec2).await?;
             let rows = db::query(&mut c, "SELECT name FROM sys.triggers WHERE parent_class = 0 AND is_disabled = 0 AND is_ms_shipped = 0 ORDER BY name").await?;
             triggers = rows.iter().filter_map(|r| r.get::<&str, _>(0).map(str::to_string)).collect();
@@ -161,7 +175,7 @@ pub fn compare_sides(
     Ok(DataComparison { session, tables, only_in_1, only_in_2, ddl_triggers })
 }
 
-async fn compare_table(side1: Side<'_>, side2: Side<'_>, pair: TablePair, opts: &DataOptions, server: Server, path: PathBuf) -> TableResult {
+async fn compare_table(side1: RowSource<'_>, side2: RowSource<'_>, pair: TablePair, opts: &DataOptions, server: Server, path: PathBuf) -> TableResult {
     let mut result = TableResult {
         pair,
         counts: [0; 4],
@@ -180,7 +194,10 @@ async fn compare_table(side1: Side<'_>, side2: Side<'_>, pair: TablePair, opts: 
     if let Err(e) = run(side1, side2, opts, server, &mut result).await {
         result.error = Some(e);
     }
-    if let (true, Some(spec1), Some(spec2)) = (opts.has(DataOpt::ReseedIdentity) && result.pair.columns.iter().any(|c| c.identity && c.source_identity), side1.live(), side2.live()) {
+    if opts.has(DataOpt::ReseedIdentity)
+        && result.pair.columns.iter().any(|c| c.identity && c.source_identity)
+        && let (Some(spec1), Some(spec2)) = (side1.live(), side2.live())
+    {
         let (a, b) = tokio::join!(ident_current(spec1, &result.pair.source), ident_current(spec2, &result.pair.target));
         result.identity_current = (a, b);
     }
@@ -435,37 +452,7 @@ fn size(v: &Value) -> usize {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn produce(
-    from: Side<'_>,
-    pair: &TablePair,
-    side: u8,
-    opts: &DataOptions,
-    server: Server,
-    sql: String,
-    keys: usize,
-    shapes: Vec<Shape>,
-    tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>,
-) {
-    let spec = match from {
-        Side::Live(spec) => spec,
-        Side::Backup(backup) => {
-            // The rows are read and put in key order up front, then sent like a server's.
-            match super::backup_rows::sorted(backup, pair, side, opts, server, keys) {
-                Ok(rows) => {
-                    for chunk in rows.chunks(CHUNK) {
-                        if tx.send(Ok(chunk.to_vec())).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                }
-            }
-            return;
-        }
-    };
+async fn produce(spec: &ConnectionSpec, sql: String, keys: usize, shapes: Vec<Shape>, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
     let run = async {
         let mut conn = db::connect_async(spec).await?;
         db::execute(&mut conn, "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED").await?;
@@ -492,6 +479,96 @@ async fn produce(
     if let Err(e) = run.await {
         let _ = tx.send(Err(e)).await;
     }
+}
+
+/// Sends a side's rows from a backup, read and put in key order up front.
+async fn produce_backup(backup: &crate::sources::backup::Backup, pair: &TablePair, side: u8, opts: &DataOptions, server: Server, keys: usize, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
+    match super::backup_rows::sorted(backup, pair, side, opts, server, keys) {
+        Ok(rows) => {
+            for chunk in rows.chunks(CHUNK) {
+                if tx.send(Ok(chunk.to_vec())).await.is_err() {
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+        }
+    }
+}
+
+/// Sends a side's rows from memory in the order and form the live SELECT would give: key
+/// expressions first (strings trimmed, folded and compared by code point), then the values.
+async fn produce_memory(memory: &Memory, pair: &TablePair, side: u8, opts: &DataOptions, server: Server, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
+    let rows = memory_rows(memory, pair, side, opts, server);
+    match rows {
+        Ok(rows) => {
+            for chunk in rows.chunks(CHUNK) {
+                if tx.send(Ok(chunk.to_vec())).await.is_err() {
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+        }
+    }
+}
+
+fn memory_rows(memory: &Memory, pair: &TablePair, side: u8, opts: &DataOptions, server: Server) -> Result<Vec<Vec<Value>>, String> {
+    let table = if side == 1 { &pair.source } else { &pair.target };
+    let t = memory
+        .iter()
+        .find(|(n, _)| n.schema.eq_ignore_ascii_case(&table.schema) && n.name.eq_ignore_ascii_case(&table.name))
+        .map(|(_, t)| t)
+        .cloned()
+        .unwrap_or_default();
+    let name = |i: usize| if side == 1 { &pair.columns[i].source } else { &pair.columns[i].target };
+    let ty = |i: usize| if side == 1 { &pair.columns[i].source_type } else { &pair.columns[i].target_type };
+    let other = |i: usize| if side == 1 { &pair.columns[i].target_type } else { &pair.columns[i].source_type };
+    let index: Vec<Option<usize>> = (0..pair.columns.len()).map(|i| t.columns.iter().position(|c| c.eq_ignore_ascii_case(name(i)))).collect();
+    let mut out: Vec<Vec<Value>> = Vec::with_capacity(t.rows.len());
+    for row in &t.rows {
+        let value = |i: usize| index[i].and_then(|k| row.get(k).cloned()).unwrap_or(Value::Null);
+        let mut v: Vec<Value> = pair.key.iter().map(|&k| memory_key(value(k), ty(k), other(k), key_fold(&pair.columns[k], opts), server)).collect();
+        v.extend((0..pair.columns.len()).map(value));
+        out.push(v);
+    }
+    let keys = pair.key.len();
+    out.sort_by(|a, b| cmp_keys(a, b, keys));
+    Ok(out)
+}
+
+/// A key value as `sort_expr` makes the server return it.
+fn memory_key(v: Value, this: &DataType, other: &DataType, fold: Fold, server: Server) -> Value {
+    let (f1, f2) = (family(this), family(other));
+    let text = f1 == "string" || (f2 == "string" && matches!(f1, "int" | "guid"));
+    if text {
+        let s = match &v {
+            Value::Null => return Value::Null,
+            Value::Str(s) => s.clone(),
+            Value::Int(n) => n.to_string(),
+            Value::Guid(_) => v.display().to_uppercase(),
+            other => other.display(),
+        };
+        let mut s = s.trim_end_matches(' ').to_string();
+        if fold.case {
+            s = s.to_uppercase();
+        }
+        let (from, to) = Fold { case: false, ..fold }.table();
+        if server.translate && !from.is_empty() {
+            let map: std::collections::HashMap<char, char> = from.chars().zip(to.chars()).collect();
+            s = s.chars().map(|c| *map.get(&c).unwrap_or(&c)).collect();
+        }
+        return Value::Str(s);
+    }
+    if f1 == "date" && f2 == "date" && this.name != other.name {
+        return match v {
+            Value::Date(d) => Value::DateTime(d as i128 * 86_400_000_000_000),
+            other => other,
+        };
+    }
+    v
 }
 
 /// Pulls rows one at a time from a producer.
@@ -532,12 +609,16 @@ fn equality(c: &ColumnPair, opts: &DataOptions) -> Equality {
     }
 }
 
-async fn run(side1: Side<'_>, side2: Side<'_>, opts: &DataOptions, server: Server, result: &mut TableResult) -> Result<(), String> {
+async fn run(side1: RowSource<'_>, side2: RowSource<'_>, opts: &DataOptions, server: Server, result: &mut TableResult) -> Result<(), String> {
     let pair = &result.pair;
     let keys = pair.key.len();
     let width = pair.columns.len();
     // The checksum shortcut (live databases only, never with identical rows shown).
-    if let (true, Some(spec1), Some(spec2)) = (opts.has(DataOpt::UseChecksumComparison) && !opts.has(DataOpt::IncludeIdenticalRecords) && pair.where1 == pair.where2, side1.live(), side2.live()) {
+    if opts.has(DataOpt::UseChecksumComparison)
+        && !opts.has(DataOpt::IncludeIdenticalRecords)
+        && pair.where1 == pair.where2
+        && let (Some(spec1), Some(spec2)) = (side1.live(), side2.live())
+    {
         let (a, b) = tokio::join!(checksum(spec1, &pair.source), checksum(spec2, &pair.target));
         if let (Some(a), Some(b)) = (a, b)
             && a == b
@@ -551,8 +632,20 @@ async fn run(side1: Side<'_>, side2: Side<'_>, opts: &DataOptions, server: Serve
     let (tx2, rx2) = mpsc::channel(4);
     let (sql1, shapes1) = select_sql(pair, 1, opts, server);
     let (sql2, shapes2) = select_sql(pair, 2, opts, server);
-    let p1 = produce(side1, pair, 1, opts, server, sql1, keys, shapes1, tx1);
-    let p2 = produce(side2, pair, 2, opts, server, sql2, keys, shapes2, tx2);
+    let p1 = async {
+        match side1 {
+            RowSource::Live(spec) => produce(spec, sql1, keys, shapes1, tx1).await,
+            RowSource::Memory(m) => produce_memory(m, pair, 1, opts, server, tx1).await,
+            RowSource::Backup(b) => produce_backup(b, pair, 1, opts, server, keys, tx1).await,
+        }
+    };
+    let p2 = async {
+        match side2 {
+            RowSource::Live(spec) => produce(spec, sql2, keys, shapes2, tx2).await,
+            RowSource::Memory(m) => produce_memory(m, pair, 2, opts, server, tx2).await,
+            RowSource::Backup(b) => produce_backup(b, pair, 2, opts, server, keys, tx2).await,
+        }
+    };
     let mut writer = TableWriter::create(&result.path, opts.has(DataOpt::CompressTemporaryFiles)).map_err(|e| e.to_string())?;
     let store_identical = opts.has(DataOpt::IncludeIdenticalRecords);
     let eq: Vec<Equality> = pair.columns.iter().map(|c| equality(c, opts)).collect();

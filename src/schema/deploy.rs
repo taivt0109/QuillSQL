@@ -23,6 +23,7 @@ use crate::catalog::*;
 use crate::db::{literal, quote};
 
 mod objects;
+mod unbind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Severity {
@@ -105,6 +106,8 @@ enum Phase {
     /// Views, functions, procedures, tables, Service Broker objects and security policies,
     /// dependants first.
     DropObjects,
+    /// The first rebuild of tables that use a re-created CLR type or partition scheme.
+    UnbindRebuild,
     DropSequences,
     /// Rules, then defaults (CREATE RULE / CREATE DEFAULT objects).
     DropBindables,
@@ -194,7 +197,9 @@ pub fn generate(
     settings: &ScriptSettings,
 ) -> Result<DeploymentScript, String> {
     opts.validate()?;
+    let prepared = unbind::prepare(comparison, source, target, opts);
     let mut p = Planner::new(comparison, source, target, opts, mappings, settings);
+    p.prepared = &prepared;
     p.plan();
     Ok(p.emit())
 }
@@ -246,6 +251,7 @@ struct Planner<'a> {
     table_filegroups: BTreeSet<String>,
     object_filegroups: BTreeSet<String>,
     objects: objects::State,
+    prepared: &'a unbind::Prepared,
 }
 
 impl<'a> Planner<'a> {
@@ -299,6 +305,7 @@ impl<'a> Planner<'a> {
             table_filegroups: BTreeSet::new(),
             object_filegroups: BTreeSet::new(),
             objects: objects::State::default(),
+            prepared: &unbind::NOTHING,
         }
     }
 
@@ -373,6 +380,7 @@ impl<'a> Planner<'a> {
     fn plan(&mut self) {
         let selected = self.selected();
         self.ddl_triggers();
+        self.unbind_by_rebuild();
         for d in &selected {
             match d.object_type {
                 ObjectType::Table => self.table(d),
@@ -823,6 +831,7 @@ impl<'a> Planner<'a> {
         match (s, t) {
             (Some(s), None) => self.create_table(s),
             (None, Some(t)) => self.drop_table(t),
+            (Some(s), Some(_)) if let Some(copy) = self.unbound_copy(&tn) => self.rebuild_from_copy(s, copy),
             (Some(s), Some(t)) => self.alter_table(s, t),
             _ => {}
         }
@@ -2088,20 +2097,6 @@ impl<'a> Planner<'a> {
         for d in selected {
             let class = match d.object_type {
                 ObjectType::Role | ObjectType::User => continue,
-                t if !matches!(
-                    t,
-                    ObjectType::Table
-                        | ObjectType::View
-                        | ObjectType::Function
-                        | ObjectType::StoredProcedure
-                        | ObjectType::Sequence
-                        | ObjectType::Synonym
-                        | ObjectType::UserDefinedType
-                        | ObjectType::Schema
-                ) =>
-                {
-                    continue
-                }
                 ObjectType::Table => "TABLE",
                 ObjectType::View => "VIEW",
                 ObjectType::Function => "FUNCTION",
@@ -2110,9 +2105,13 @@ impl<'a> Planner<'a> {
                 ObjectType::Synonym => "SYNONYM",
                 ObjectType::UserDefinedType => "TYPE",
                 ObjectType::Schema => "SCHEMA",
-                _ => continue,
+                t => match objects::xprop_class(t) {
+                    Some(class) => class,
+                    None => continue,
+                },
             };
             let tn = self.target_name(d);
+            let scoped = d.object_type.schema_scoped();
             let of = |db: &'a Database, n: &ObjectName| -> Vec<&'a ExtendedProperty> {
                 db.extended_properties
                     .iter()
@@ -2120,6 +2119,8 @@ impl<'a> Planner<'a> {
                         p.class == class
                             && if class == "SCHEMA" {
                                 p.schema.as_deref() == Some(n.name.as_str())
+                            } else if !scoped {
+                                p.schema.is_none() && p.object.as_deref() == Some(n.name.as_str())
                             } else {
                                 p.schema.as_deref() == Some(n.schema.as_str()) && p.object.as_deref() == Some(n.name.as_str())
                             }
@@ -2128,7 +2129,11 @@ impl<'a> Planner<'a> {
             };
             let src_props = if d.kind == DiffKind::OnlyIn2 { Vec::new() } else { of(self.src, &d.name) };
             // A rebuilt or re-created object lost its properties with it.
-            let gone = d.kind == DiffKind::OnlyIn2 || self.recreate.contains(&d.name) || self.dropped.contains(&tn);
+            let gone = d.kind == DiffKind::OnlyIn2
+                || self.recreate.contains(&d.name)
+                || self.recreate.contains(&d.key())
+                || self.dropped.contains(&tn)
+                || self.dropped.contains(&d.target_key());
             let tgt_props = if d.kind == DiffKind::OnlyIn1 || gone { Vec::new() } else { of(self.tgt, &tn) };
             let levels = |p: &ExtendedProperty| ddl::xprop_levels(p, |s| s.to_string());
             for sp in &src_props {
@@ -2231,6 +2236,9 @@ impl<'a> Planner<'a> {
                 self.group(Phase::RoleMembers, format!("Altering members of role {r}"), vec![sql]);
             }
             self.database_permissions(&s.name, &[]);
+            if s.no_connect && !s.is_role() && !self.opts.has(Opt::IgnorePermissions) {
+                self.step(Phase::Permissions, "", vec![format!("REVOKE CONNECT FROM {q}")]);
+            }
         } else if let Some(t) = t
             && s.is_none()
         {
@@ -2288,6 +2296,10 @@ impl<'a> Planner<'a> {
             }
             let existing: Vec<Permission> = self.tgt.permissions.iter().filter(|p| p.class == "DATABASE" && self.same(&p.grantee, &t.name)).cloned().collect();
             self.database_permissions(&s.name, &existing);
+            if !s.is_role() && s.no_connect != t.no_connect && !self.opts.has(Opt::IgnorePermissions) {
+                let sql = if s.no_connect { format!("REVOKE CONNECT FROM {q}") } else { format!("GRANT CONNECT TO {q}") };
+                self.step(Phase::Permissions, "", vec![sql]);
+            }
         }
     }
 

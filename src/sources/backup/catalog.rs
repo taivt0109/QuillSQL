@@ -1396,6 +1396,7 @@ impl Builder<'_> {
                 member_of: Vec::new(),
                 certificate: if ty == "C" { by_sid(&certs) } else { None },
                 asymmetric_key: if ty == "K" { by_sid(&asym) } else { None },
+                no_connect: false,
             });
         }
         let mut members: Vec<(String, String)> = self
@@ -1416,6 +1417,10 @@ impl Builder<'_> {
 
     fn permissions(&mut self) {
         let mut rows = self.cat.system("sysprivs");
+        let connected: Vec<String> = rows.iter().filter(|r| r.int("class") == 0 && r.str("type").trim() == "CO").filter_map(|r| self.principal(r.int("grantee"))).collect();
+        for p in self.db.principals.iter_mut().filter(|p| !p.is_role()) {
+            p.no_connect = !connected.iter().any(|c| c == &p.name);
+        }
         let grantee_name = |b: &Builder, r: &SysRow| b.principal(r.int("grantee")).unwrap_or_default();
         rows.sort_by_key(|r| (r.int("class"), r.int("id"), self.key(&grantee_name(self, r)), permission_name(r.str("type").trim()), r.int("subid")));
         for r in rows {
@@ -1433,7 +1438,8 @@ impl Builder<'_> {
                 continue;
             }
             let code = r.str("type").trim().to_string();
-            if class == 0 && code == "CO" {
+            // CONNECT comes with CREATE USER: only its absence, a DENY or WITH GRANT OPTION shows.
+            if class == 0 && code == "CO" && state == "G" {
                 continue;
             }
             let mut p = Permission {

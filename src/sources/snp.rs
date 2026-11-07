@@ -27,6 +27,8 @@ const FIXED_ROLES: [&str; 10] = [
     "db_denydatareader",
     "db_denydatawriter",
 ];
+pub(crate) mod objects;
+
 const BUILT_IN_USERS: [&str; 4] = ["dbo", "guest", "sys", "INFORMATION_SCHEMA"];
 /// Grantees whose permissions the live reader leaves out.
 const SYSTEM_GRANTEES: [&str; 3] = ["dbo", "sys", "INFORMATION_SCHEMA"];
@@ -75,9 +77,10 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     c.str()?; // migrations folder
 
     s.tables = c.member(Cur::table_item)?;
+    s.tables.append(&mut c.histories);
     s.functions = c.member(Cur::function)?;
-    c.member(|c| c.default_or_rule(false))?;
-    c.member(|c| c.default_or_rule(true))?;
+    s.more.defaults = c.member(|c| c.bindable(false))?;
+    s.more.rules = c.member(|c| c.bindable(true))?;
     s.users = c.member(Cur::user)?;
     s.roles = c.member(Cur::role)?;
     s.types = c.member(Cur::user_type)?;
@@ -91,50 +94,52 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     }
     c.bool()?; // full-text enabled
     c.bool()?; // remote data archive enabled
-    c.member(Cur::fulltext_catalog)?;
+    s.more.fulltext_catalogs = c.member(Cur::fulltext_catalog_full)?;
     s.case_sensitive = c.bool()?;
     if !c.null_member() {
         (s.texts, s.encrypted) = c.blob_store()?;
     }
-    for _ in 0..2 {
-        // Assembly binaries and XML schema collection contents.
-        if !c.null_member() {
-            c.blob_store()?;
-        }
+    // Assembly binaries and XML schema collection contents.
+    if !c.null_member() {
+        s.more.assembly_blobs = c.blob_store()?.0;
     }
-    c.member(Cur::assembly)?;
+    if !c.null_member() {
+        s.more.xml_blobs = c.blob_store()?.0;
+    }
+    s.more.assemblies = c.member(Cur::assembly_full)?;
     if !c.null_member() {
         c.dependencies()?;
     }
     s.synonyms = c.member(Cur::synonym)?;
-    c.member(Cur::xml_schema_collection)?;
-    c.member(Cur::message_type)?;
-    c.member(Cur::contract)?;
-    c.member(Cur::queue)?;
-    c.member(Cur::service)?;
-    c.member(Cur::route)?;
-    c.member(Cur::event_notification)?;
-    c.member(Cur::partition_function)?;
-    c.member(Cur::partition_scheme)?;
+    s.more.xml_collections = c.member(Cur::xml_collection_full)?;
+    s.more.message_types = c.member(Cur::message_type_full)?.into_iter().flatten().collect();
+    s.more.contracts = c.member(Cur::contract_full)?.into_iter().flatten().collect();
+    s.more.queues = c.member(Cur::queue_full)?.into_iter().flatten().collect();
+    s.more.services = c.member(Cur::service_full)?.into_iter().flatten().collect();
+    s.more.routes = c.member(Cur::route_full)?.into_iter().flatten().collect();
+    s.more.event_notifications = c.member(Cur::event_notification_full)?;
+    s.more.partition_functions = c.member(Cur::partition_function_full)?;
+    s.more.partition_schemes = c.member(Cur::partition_scheme_full)?;
     s.schemas = c.member(Cur::schema)?;
     c.member(Cur::trigger)?; // database-level list; DML triggers live in their table or view
-    c.member(Cur::ddl_trigger)?;
-    c.member(Cur::service_binding)?;
-    c.member(Cur::certificate)?;
-    c.member(Cur::symmetric_key)?;
-    c.member(Cur::asymmetric_key)?;
-    c.member(Cur::fulltext_stoplist)?;
+    s.more.ddl_triggers = c.member(Cur::ddl_trigger_full)?;
+    s.more.bindings = c.member(Cur::service_binding_full)?;
+    s.more.certificates = c.member(Cur::certificate_full)?;
+    s.more.symmetric_keys = c.member(Cur::symmetric_key_full)?.into_iter().flatten().collect();
+    s.more.asymmetric_keys = c.member(Cur::asymmetric_key_full)?;
+    s.more.stoplists = c.member(Cur::stoplist_full)?;
     s.sequences = c.member(Cur::sequence)?;
-    c.member(Cur::search_property_list)?;
-    c.member(Cur::security_policy)?;
-    c.coll(Cur::external_file_format)?;
-    c.coll(Cur::external_data_source)?;
-    c.coll(Cur::external_table)?;
-    c.coll(Cur::str)?; // database-scoped credentials
+    s.more.property_lists = c.member(Cur::property_list_full)?;
+    s.more.policies = c.member(Cur::security_policy_full)?;
+    s.more.file_formats = c.coll(Cur::file_format_full)?;
+    s.more.data_sources = c.coll(Cur::data_source_full)?;
+    s.more.external_tables = c.coll(Cur::external_table_full)?;
+    s.more.credentials = c.coll(Cur::s)?;
     if c.p != bytes.len() {
         return Err(format!("unexpected data at offset {} after the last snapshot member", c.p));
     }
     s.props = std::mem::take(&mut c.props);
+    s.type_perms = std::mem::take(&mut c.type_perms);
     Ok(s.build())
 }
 
@@ -162,6 +167,8 @@ struct Snap {
     /// Comments blob store: module and default text by id.
     texts: HashMap<u64, Vec<u8>>,
     encrypted: HashSet<u64>,
+    more: objects::More,
+    type_perms: Vec<(String, String, Vec<RawPerm>)>,
 }
 
 struct RawPerm {
@@ -169,8 +176,10 @@ struct RawPerm {
     statement: i32,
     action: String,
     grantee: String,
-    /// Column-level, or an old enum action: not modelled.
+    /// An old enum action: not modelled.
     skip: bool,
+    /// Column-level permissions: the columns.
+    columns: Vec<String>,
 }
 
 struct RawProp {
@@ -200,6 +209,9 @@ struct RawField {
     masking: String,
     generated: u8,
     hidden: bool,
+    bound_default: Option<String>,
+    bound_rule: Option<String>,
+    sensitivity: Option<Sensitivity>,
 }
 
 #[derive(Default)]
@@ -227,6 +239,8 @@ struct RawTable {
     retention: Option<String>,
     is_node: bool,
     is_edge: bool,
+    statistics: Vec<Statistic>,
+    edge_constraints: Vec<EdgeConstraint>,
 }
 
 struct RawTrigger {
@@ -252,6 +266,8 @@ struct RawUser {
     login: Option<String>,
     user_type: i32,
     default_schema: Option<String>,
+    certificate: Option<String>,
+    asymmetric_key: Option<String>,
     db_perms: Vec<(String, u8)>,
 }
 
@@ -278,11 +294,17 @@ struct Cur<'a> {
     depth: u32,
     /// Every extended property met so far; they are attached by their level names, not their owner.
     props: Vec<RawProp>,
+    /// Statistics met while reading a table's indexes.
+    stats: Vec<Statistic>,
+    /// Permissions on user-defined types: (schema, name, perms).
+    type_perms: Vec<(String, String, Vec<RawPerm>)>,
+    /// History tables, which are written inside their system-versioned table.
+    histories: Vec<RawTable>,
 }
 
 impl<'a> Cur<'a> {
     fn new(b: &'a [u8]) -> Self {
-        Cur { b, p: 0, depth: 0, props: Vec::new() }
+        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new(), type_perms: Vec::new(), histories: Vec::new() }
     }
 
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
@@ -471,11 +493,8 @@ impl<'a> Cur<'a> {
             let action = if v < 12.48 { c.i32()?.to_string() } else { c.s()? };
             let grantee = c.s()?;
             c.bool()?;
-            let columns = c.bool()?;
-            if columns {
-                c.strs()?;
-            }
-            Ok(RawPerm { statement, action, grantee, skip: columns || v < 12.48 })
+            let columns = if c.bool()? { c.strs()? } else { Vec::new() };
+            Ok(RawPerm { statement, action, grantee, skip: v < 12.48, columns })
         })
     }
 
@@ -662,7 +681,7 @@ impl Cur<'_> {
         if v >= 6.0 {
             flags = self.i16()?;
         }
-        self.str()?; // bound default
+        f.bound_default = self.str()?.filter(|x| !x.is_empty());
         f.default_name = self.s()?;
         if v >= 4.0 {
             self.i32()?;
@@ -675,7 +694,7 @@ impl Cur<'_> {
             flags |= 0x20;
         }
         f.collation = self.s()?;
-        self.str()?; // bound rule
+        f.bound_rule = self.str()?.filter(|x| !x.is_empty());
         f.type_name = self.s()?;
         f.default_text = self.s()?;
         if v < 6.0 {
@@ -717,8 +736,15 @@ impl Cur<'_> {
         }
         if v >= 13.44 {
             let sv = self.f32()?;
-            for _ in 0..4 {
-                self.str()?;
+            let parts: Vec<Option<String>> = (0..4).map(|_| self.str().map(|s| s.filter(|x| !x.is_empty()))).collect::<R<_>>()?;
+            if parts.iter().any(Option::is_some) {
+                f.sensitivity = Some(Sensitivity {
+                    label: parts[0].clone(),
+                    label_id: parts[1].clone(),
+                    information_type: parts[2].clone(),
+                    information_type_id: parts[3].clone(),
+                    rank: None,
+                });
             }
             if sv >= 13.46 {
                 self.sss(5)?;
@@ -811,7 +837,9 @@ impl Cur<'_> {
             }
             1 => {
                 self.f32()?;
-                self.str()?;
+                let filter = self.str()?.filter(|f| !f.is_empty());
+                let columns = cols.into_iter().map(|(_, (name, _, _))| name).collect();
+                self.stats.push(Statistic { name: ix.name, columns, filter, no_recompute: ix.no_recompute, incremental: ix.incremental });
                 return Ok(None);
             }
             2 => {
@@ -1051,7 +1079,10 @@ impl Cur<'_> {
         self.eprops()?;
         self.i32()?;
         t.perms = self.perms()?;
+        let stats_from = self.stats.len();
         t.indexes = self.coll(Cur::index)?.into_iter().flatten().collect();
+        t.statistics = self.stats.split_off(stats_from);
+        t.statistics.sort_by(|a, b| a.name.cmp(&b.name));
         t.foreign_keys = self.coll(Cur::foreign_key)?;
         t.checks = self.coll(Cur::check_constraint)?;
         t.triggers = self.coll(Cur::trigger)?;
@@ -1143,13 +1174,15 @@ impl Cur<'_> {
             self.ss()?;
         }
         if v >= 13.18 && self.bool()? {
-            self.table()?;
+            let history = self.table()?;
+            self.histories.push(history);
         }
         if v >= 13.62 {
             self.bool()?;
         }
         if v >= 13.7 {
-            self.coll(Cur::edge_constraint)?;
+            t.edge_constraints = self.coll(Cur::edge_constraint)?;
+            t.edge_constraints.sort_by(|a, b| a.name.cmp(&b.name));
         }
         if v >= 21.0 {
             self.ss_list()?;
@@ -1157,19 +1190,20 @@ impl Cur<'_> {
         Ok(t)
     }
 
-    fn edge_constraint(&mut self) -> R<()> {
+    fn edge_constraint(&mut self) -> R<EdgeConstraint> {
         self.f32()?;
-        self.str()?;
-        self.bool()?;
+        let mut e = EdgeConstraint { name: self.s()?, disabled: self.bool()?, ..Default::default() };
         self.i32()?;
-        self.bool()?;
+        e.not_trusted = self.bool()?;
         let n = self.count()?;
         for _ in 0..n {
-            self.str()?;
-            self.str()?;
+            let from = self.s()?;
+            let to = self.s()?;
+            e.connections.push((two_part(&from).unwrap_or_default(), two_part(&to).unwrap_or_default()));
         }
-        self.bool()?;
-        self.sss(2)
+        e.system_named = self.bool()?;
+        self.sss(2)?;
+        Ok(e)
     }
 
     fn table_item(&mut self) -> R<RawTable> {
@@ -1197,43 +1231,6 @@ impl Cur<'_> {
 // ------------------------------------------------------------------------------- programmability
 
 impl Cur<'_> {
-    fn param(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.i32()?;
-        self.str()?;
-        if v >= 4.0 {
-            for _ in 0..3 {
-                self.i32()?;
-            }
-            self.str()?;
-            if v >= 6.0 {
-                self.str()?;
-            }
-            self.bool()?;
-            self.str()?;
-            self.bool()?;
-            self.bool()?;
-            if v < 13.7912 {
-                self.str()?;
-            }
-            self.str()?;
-        }
-        if v >= 13.63 {
-            self.str()?;
-        }
-        Ok(())
-    }
-
-    /// Parameters, then one (id, name) pair per parameter.
-    fn params(&mut self) -> R<()> {
-        let n = self.coll(Cur::param)?.len();
-        for _ in 0..n {
-            self.i32()?;
-            self.str()?;
-        }
-        Ok(())
-    }
-
     fn function(&mut self) -> R<RawModule> {
         let v = self.f32()?;
         let mut r = Routine { name: self.s()?, schema: self.s()?, ..Default::default() };
@@ -1258,20 +1255,27 @@ impl Cur<'_> {
             for b in &mut binding {
                 *b = self.s()?;
             }
+            let mut result = Vec::new();
             if self.i32()? > 0 {
-                self.coll(Cur::field)?;
+                result = self.coll(Cur::field)?;
             }
             clr = self.bool()?;
-            self.params()?;
-            if self.bool()? {
-                self.param()?;
+            let params = self.params_full()?;
+            let returns = if self.bool()? { Some(self.param_full()?.0.data_type) } else { None };
+            if clr || function_type == 4 {
+                r.parameters = params.into_iter().map(|p| p.0).collect();
+                r.returns = returns;
+                r.result_columns = result.iter().enumerate().map(|(i, f)| column(f, i + 1)).collect();
+                for c in &mut r.result_columns {
+                    c.nullable = true;
+                }
             }
         }
         if v >= 4.1 {
             self.bool()?;
         }
         if v >= 4.2 {
-            self.bool()?;
+            r.null_on_null_input = self.bool()? && (clr || function_type == 4);
         }
         if v >= 7.0 {
             self.str()?;
@@ -1299,7 +1303,7 @@ impl Cur<'_> {
             (false, _) => RoutineKind::ScalarFunction,
         };
         if clr || function_type == 4 {
-            r.clr_method = Some(binding.iter().map(|b| quote(b)).collect::<Vec<_>>().join("."));
+            r.clr_method = Some(binding.iter().filter(|b| !b.is_empty()).map(|b| objects::bracket(b)).collect::<Vec<_>>().join("."));
         } else {
             r.settings = settings;
         }
@@ -1337,7 +1341,10 @@ impl Cur<'_> {
                 clr = self.bool()?;
                 r.encrypted = self.bool()?;
             }
-            self.params()?;
+            let params = self.params_full()?;
+            if clr {
+                r.parameters = params.into_iter().map(|p| p.0).collect();
+            }
         }
         if (5.3..6.2).contains(&v) {
             self.bool()?;
@@ -1360,7 +1367,7 @@ impl Cur<'_> {
         }
         if clr {
             r.kind = RoutineKind::ClrProcedure;
-            r.clr_method = Some(binding.iter().map(|b| quote(b)).collect::<Vec<_>>().join("."));
+            r.clr_method = Some(binding.iter().filter(|b| !b.is_empty()).map(|b| objects::bracket(b)).collect::<Vec<_>>().join("."));
         } else {
             r.settings = settings;
         }
@@ -1374,7 +1381,10 @@ impl Cur<'_> {
         self.eprops()?;
         self.i32()?;
         let perms = self.perms()?;
+        let stats_from = self.stats.len();
         view.indexes = self.coll(Cur::index)?.into_iter().flatten().collect();
+        view.statistics = self.stats.split_off(stats_from);
+        view.statistics.sort_by(|a, b| a.name.cmp(&b.name));
         let triggers = self.coll(Cur::trigger)?;
         self.bool()?;
         // Output columns carry names only (no types), so they are left out.
@@ -1414,21 +1424,6 @@ impl Cur<'_> {
         Ok(RawView { view, text_id, perms, triggers })
     }
 
-    fn default_or_rule(&mut self, rule: bool) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        if (!rule && v > 1.0) || (rule && v >= 7.0) {
-            self.i32()?;
-        }
-        self.str()?;
-        self.eprops()?;
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(())
-    }
-
     fn user_type(&mut self) -> R<UserType> {
         let v = self.f32()?;
         let mut ty = UserType { name: self.s()?, schema: self.s()?, ..Default::default() };
@@ -1465,11 +1460,12 @@ impl Cur<'_> {
                 }
                 -2 => {
                     ty.kind = UserTypeKind::Clr;
-                    ty.clr_class = Some(format!("{assembly}.{class}"));
+                    ty.clr_class = Some(format!("{}.{}", objects::bracket(&assembly), objects::bracket(&class)));
                 }
                 _ => {}
             }
-            self.perms()?;
+            let perms = self.perms()?;
+            self.type_perms.push((ty.schema.clone(), ty.name.clone(), perms));
         }
         if ty.kind == UserTypeKind::Alias {
             ty.base_type = Some(system_type(&base, length, precision, scale));
@@ -1548,11 +1544,11 @@ impl Cur<'_> {
 impl Cur<'_> {
     fn user(&mut self) -> R<RawUser> {
         let v = self.f32()?;
-        let mut u = RawUser { name: self.s()?, login: self.str()?, user_type: 1, default_schema: None, db_perms: Vec::new() };
+        let mut u = RawUser { name: self.s()?, login: self.str()?, user_type: 1, default_schema: None, certificate: None, asymmetric_key: None, db_perms: Vec::new() };
         if v >= 4.0 {
             u.user_type = self.i32()?;
-            self.str()?;
-            self.str()?;
+            u.certificate = self.str()?.filter(|c| !c.is_empty());
+            u.asymmetric_key = self.str()?.filter(|k| !k.is_empty());
             u.default_schema = self.str()?;
         } else {
             self.bool()?;
@@ -1607,73 +1603,6 @@ impl Cur<'_> {
         Ok(RawSchema { name, owner, system_object, perms })
     }
 
-    fn certificate(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.str()?;
-        self.str()?;
-        self.i64()?;
-        self.i64()?;
-        self.str()?;
-        let n = self.count()?;
-        self.take(n)?;
-        self.perms()?;
-        self.two_ss(v)
-    }
-
-    fn symmetric_key(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.take(8 + 8 + 16)?;
-        self.i32()?;
-        self.i32()?;
-        self.perms()?;
-        self.two_ss(v)
-    }
-
-    fn asymmetric_key(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        let n = self.count()?;
-        self.take(n)?;
-        for _ in 0..3 {
-            self.i32()?;
-        }
-        self.perms()?;
-        self.two_ss(v)
-    }
-
-    fn security_policy(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.i32()?;
-        for _ in 0..3 {
-            self.str()?;
-        }
-        self.bool()?;
-        if v >= 23.0 {
-            self.bool()?;
-        }
-        self.bool()?;
-        let n = self.count()?;
-        for _ in 0..n {
-            for _ in 0..3 {
-                self.str()?;
-            }
-            if v >= 11.36 {
-                self.i32()?;
-                self.i32()?;
-            }
-        }
-        self.eprops()?;
-        self.perms()?;
-        self.two_ss(v)
-    }
-
     /// The trailing pair of script sources most objects have from version 11.45.
     fn two_ss(&mut self, v: f32) -> R<()> {
         if v >= 11.45 { self.sss(2) } else { Ok(()) }
@@ -1683,28 +1612,6 @@ impl Cur<'_> {
 // ------------------------------------------------------------------------------- skipped members
 
 impl Cur<'_> {
-    fn fulltext_catalog(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.bool()?;
-        if v >= 4.0 {
-            self.str()?;
-            if v <= 14.0 {
-                self.str()?;
-            }
-            self.bool()?;
-            if v <= 14.0 {
-                self.str()?;
-            }
-            self.bool()?;
-        }
-        self.strs()?;
-        if v >= 4.0 {
-            self.perms()?;
-        }
-        self.two_ss(v)
-    }
-
     /// Records written with a leading 0xFF and a version; legacy ones have neither.
     fn versioned_record(&mut self) -> R<bool> {
         if self.b.get(self.p) == Some(&0xFF) {
@@ -1716,375 +1623,6 @@ impl Cur<'_> {
         }
     }
 
-    fn assembly(&mut self) -> R<()> {
-        let versioned = self.versioned_record()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.eprops()?;
-        self.take(16)?;
-        self.str()?;
-        self.bool()?;
-        let n = self.count()?;
-        for _ in 0..n {
-            let file_versioned = self.versioned_record()?;
-            self.str()?;
-            self.u64()?;
-            self.i32()?;
-            if file_versioned {
-                self.ss()?;
-            }
-        }
-        self.i32()?;
-        self.perms()?;
-        if versioned {
-            self.sss(3)?;
-        }
-        Ok(())
-    }
-
-    fn xml_schema_collection(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.eprops()?;
-        self.perms()?;
-        if v <= 13.65 {
-            let n = self.count()?;
-            for _ in 0..n {
-                self.str()?;
-                self.str()?;
-            }
-            for _ in 0..3 {
-                self.strs()?;
-            }
-        }
-        if v >= 7.0 {
-            self.str()?;
-        }
-        self.two_ss(v)
-    }
-
-    fn message_type(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.i32()?;
-        self.str()?;
-        self.eprops()?;
-        self.perms()?;
-        let n = self.count_or_none()?;
-        for _ in 0..n {
-            self.str()?;
-        }
-        self.two_ss(v)
-    }
-
-    fn contract(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.eprops()?;
-        self.bool()?;
-        self.bool()?;
-        self.coll(|c| {
-            c.str()?;
-            c.bool()?;
-            c.bool()
-        })?;
-        self.perms()?;
-        let n = self.count_or_none()?;
-        for _ in 0..n {
-            self.str()?;
-        }
-        self.two_ss(v)
-    }
-
-    fn event_notification(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
-        self.coll(Cur::i32)?;
-        self.eprops()?;
-        if v < 7.0 {
-            self.perms()?;
-        }
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(())
-    }
-
-    fn queue(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        self.i16()?;
-        self.str()?;
-        if v >= 7.2 {
-            self.execute_as()?;
-        } else {
-            self.str()?;
-            self.bool()?;
-        }
-        for _ in 0..4 {
-            self.bool()?;
-        }
-        self.str()?;
-        self.eprops()?;
-        self.coll(Cur::event_notification)?;
-        self.strs()?;
-        if v >= 7.0 {
-            self.str()?;
-        }
-        if v >= 7.1 {
-            self.perms()?;
-        }
-        if v >= 11.2 {
-            self.bool()?;
-        }
-        self.two_ss(v)
-    }
-
-    fn service(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        self.str()?;
-        self.coll(Cur::contract)?;
-        self.eprops()?;
-        self.perms()?;
-        if v >= 4.1 {
-            self.coll(Cur::event_notification)?;
-        }
-        self.two_ss(v)
-    }
-
-    fn route(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        for _ in 0..4 {
-            self.str()?;
-        }
-        self.i64()?;
-        self.bool()?;
-        self.eprops()?;
-        self.perms()?;
-        self.two_ss(v)
-    }
-
-    fn partition_function(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.bool()?;
-        self.params()?;
-        self.eprops()?;
-        if v < 7.0 {
-            self.perms()?;
-        }
-        if v < 13.78 {
-            self.strs()?;
-        }
-        let n = self.count()?;
-        for _ in 0..n {
-            let is_null = v >= 11.0 && self.bool()?;
-            if !is_null {
-                self.str()?;
-            }
-        }
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(())
-    }
-
-    fn partition_scheme(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.str()?;
-        self.eprops()?;
-        if v < 7.0 {
-            self.perms()?;
-        }
-        self.f32()?;
-        let n = self.count()?;
-        for _ in 0..n {
-            self.f32()?;
-            self.str()?;
-        }
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(())
-    }
-
-    fn ddl_trigger(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        for _ in 0..5 {
-            self.bool()?;
-        }
-        self.i32()?;
-        if v >= 7.0 {
-            self.coll(Cur::i32)?;
-        } else {
-            let n = self.count_or_none()?;
-            for _ in 0..n {
-                self.str()?;
-            }
-        }
-        for _ in 0..3 {
-            self.str()?;
-        }
-        if v >= 7.1 {
-            self.execute_as()?;
-        } else {
-            self.str()?;
-        }
-        self.eprops()?;
-        self.bool()?;
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(())
-    }
-
-    fn service_binding(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
-        self.eprops()?;
-        self.perms()?;
-        self.two_ss(v)
-    }
-
-    fn stopwords(&mut self) -> R<()> {
-        let n = self.count()?;
-        for _ in 0..n {
-            self.i32()?;
-            self.strs()?;
-        }
-        Ok(())
-    }
-
-    fn fulltext_stoplist(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
-        self.f32()?;
-        let from_system = self.bool()?;
-        self.stopwords()?;
-        if from_system {
-            self.stopwords()?;
-        }
-        self.two_ss(v)
-    }
-
-    fn search_property_list(&mut self) -> R<()> {
-        self.perms()?;
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        let n = self.count()?;
-        for _ in 0..n {
-            self.f32()?;
-            self.str()?;
-            self.str()?;
-            self.i32()?;
-            self.str()?;
-            self.i32()?;
-        }
-        self.i32()?; // a count with no items
-        self.two_ss(v)
-    }
-
-    fn external_file_format(&mut self) -> R<()> {
-        self.i32()?;
-        for _ in 0..6 {
-            self.str()?;
-        }
-        self.bool()?;
-        for _ in 0..4 {
-            self.str()?;
-        }
-        if self.u8()? != 0 {
-            self.i32()?;
-        }
-        self.ss()
-    }
-
-    fn external_data_source(&mut self) -> R<()> {
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        for _ in 0..5 {
-            self.str()?;
-        }
-        self.bool()?;
-        self.ss()
-    }
-
-    fn external_table(&mut self) -> R<()> {
-        self.i32()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
-        self.coll(Cur::field)?;
-        for _ in 0..3 {
-            self.str()?;
-        }
-        self.i32()?;
-        if self.u8()? != 0 {
-            self.f64()?;
-        }
-        if self.u8()? != 0 {
-            self.i32()?;
-        }
-        self.str()?;
-        self.str()?;
-        if self.u8()? != 0 {
-            self.i32()?;
-        }
-        self.str()?;
-        self.str()?;
-        self.ss()?;
-        self.perms()?;
-        self.eprops()
-    }
 }
 
 // ------------------------------------------------------------------------------- model
@@ -2119,17 +1657,13 @@ impl Snap {
         let mut permissions = Vec::new();
         let mut object_perms = |schema: &str, name: &str, perms: &[RawPerm]| {
             for p in perms {
-                if let Some(mut p) = permission(p) {
-                    p.class = "OBJECT".into();
-                    p.schema = Some(schema.into());
-                    p.object = Some(name.into());
-                    permissions.push(p);
-                }
+                permissions.extend(objects::grants(p, "OBJECT", Some(schema), name));
             }
         };
 
         for t in std::mem::take(&mut self.tables) {
             object_perms(&t.schema, &t.name, &t.perms);
+            let (statistics, edge_constraints) = (t.statistics, t.edge_constraints);
             let triggers = t.triggers.into_iter().map(|tr| self.trigger(tr)).collect();
             let columns: Vec<Column> = t.columns.iter().enumerate().map(|(i, f)| column(f, i + 1)).collect();
             let mut table = Table {
@@ -2161,8 +1695,13 @@ impl Snap {
                     0 => None,
                     n => Some(ChangeTracking { track_columns_updated: n == 2 }),
                 },
+                statistics,
+                edge_constraints,
                 ..Default::default()
             };
+            if table.graph.is_some() {
+                crate::catalog::read::graph_indexes(&mut table);
+            }
             table.storage = Storage {
                 data_space: if t.partition_column.is_some() { t.partition_scheme.as_deref().map(unquote).or(t.filegroup) } else { t.filegroup },
                 partition_column: t.partition_column,
@@ -2222,6 +1761,13 @@ impl Snap {
             db.synonyms.push(syn);
         }
         db.types = std::mem::take(&mut self.types);
+        for (schema, name, perms) in std::mem::take(&mut self.type_perms) {
+            for p in &perms {
+                permissions.extend(objects::grants(p, "TYPE", Some(&schema), &name));
+            }
+        }
+        let more = std::mem::take(&mut self.more);
+        more.build(&mut db, &mut permissions, &|id| (self.text(id), self.is_encrypted(id)));
         for ty in &mut db.types {
             ty.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             ty.check_constraints.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2265,6 +1811,9 @@ impl Snap {
     fn principals(&self, db: &mut Database, permissions: &mut Vec<Permission>) {
         let named = |list: &[&str], name: &str| list.iter().any(|x| x.eq_ignore_ascii_case(name));
         for u in &self.users {
+            if u.name.eq_ignore_ascii_case("dbo") {
+                db.owner = u.login.clone().filter(|l| !l.is_empty());
+            }
             if named(&BUILT_IN_USERS, &u.name) || named(&FIXED_ROLES, &u.name) {
                 continue;
             }
@@ -2280,6 +1829,9 @@ impl Snap {
                 kind: kind.into(),
                 login: u.login.clone().filter(|l| !l.is_empty()),
                 default_schema: u.default_schema.clone().filter(|s| !s.is_empty()),
+                certificate: u.certificate.clone(),
+                asymmetric_key: u.asymmetric_key.clone(),
+                no_connect: !u.db_perms.iter().any(|(a, _)| a.eq_ignore_ascii_case("CONNECT")),
                 ..Default::default()
             });
         }
@@ -2287,10 +1839,13 @@ impl Snap {
             if named(&FIXED_ROLES, &r.name) || named(&BUILT_IN_USERS, &r.name) {
                 continue;
             }
+            // An application role keeps its default schema where a role has its owner.
+            let owner = r.owner.clone().filter(|o| !o.is_empty());
             db.principals.push(Principal {
                 name: r.name.clone(),
                 kind: if r.app_role { "APPLICATION_ROLE" } else { "DATABASE_ROLE" }.into(),
-                owner: r.owner.clone().filter(|o| !o.is_empty()),
+                owner: if r.app_role { None } else { owner.clone() },
+                default_schema: if r.app_role { owner } else { None },
                 ..Default::default()
             });
         }
@@ -2310,9 +1865,9 @@ impl Snap {
                 continue;
             }
             for (action, statement) in perms {
-                // CONNECT comes with CREATE USER.
+                // CONNECT comes with CREATE USER: only DENY and WITH GRANT OPTION are kept.
                 let Some(state) = state(i32::from(*statement)) else { continue };
-                if action.eq_ignore_ascii_case("CONNECT") {
+                if action.eq_ignore_ascii_case("CONNECT") && state == "GRANT" {
                     continue;
                 }
                 permissions.push(Permission {
@@ -2429,11 +1984,15 @@ fn extended_properties(props: &[RawProp]) -> Vec<ExtendedProperty> {
                 p.class = "SCHEMA".into();
                 p.schema = raw.names[0].clone();
             }
+            // Database-wide objects are named at level 0.
+            (Some(level0 @ ("ASSEMBLY" | "MESSAGE TYPE" | "CONTRACT" | "SERVICE" | "REMOTE SERVICE BINDING" | "ROUTE" | "PARTITION FUNCTION" | "PARTITION SCHEME" | "TRIGGER")), None) => {
+                p.class = level0.into();
+                p.object = raw.names[0].clone();
+            }
             (Some("SCHEMA"), Some(level1)) => {
                 p.class = match level1 {
-                    "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "SYNONYM" | "TYPE" => level1,
+                    "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "SYNONYM" | "TYPE" | "DEFAULT" | "RULE" | "QUEUE" | "XML SCHEMA COLLECTION" => level1,
                     "AGGREGATE" => "FUNCTION",
-                    "DEFAULT" | "RULE" => "OBJECT",
                     _ => continue,
                 }
                 .into();
@@ -2511,9 +2070,9 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         },
         hidden: f.hidden,
         masking_function: (!f.masking.is_empty()).then(|| f.masking.clone()),
-        bound_default: None,
-        bound_rule: None,
-        sensitivity: None,
+        bound_default: f.bound_default.as_deref().map(requote),
+        bound_rule: f.bound_rule.as_deref().map(requote),
+        sensitivity: f.sensitivity.clone(),
     }
 }
 
@@ -2657,7 +2216,7 @@ fn decimal(b: [u8; 16]) -> String {
 }
 
 /// .NET `Guid.ToByteArray` order, as SQL Server prints it.
-fn guid(b: [u8; 16]) -> String {
+pub(crate) fn guid(b: [u8; 16]) -> String {
     let d1 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     let d2 = u16::from_le_bytes([b[4], b[5]]);
     let d3 = u16::from_le_bytes([b[6], b[7]]);
@@ -2778,7 +2337,8 @@ mod tests {
         let perms = c.perms().unwrap();
         assert_eq!(perms.len(), 2);
         assert_eq!(permission(&perms[0]).unwrap().grant_sql(), "DENY DELETE TO [Reporting]");
-        assert!(permission(&perms[1]).is_none(), "column permissions are not modelled");
+        assert_eq!(perms[1].columns, vec!["Name"]);
+        assert_eq!(objects::grants(&perms[1], "OBJECT", Some("dbo"), "T")[0].column.as_deref(), Some("Name"));
         c.ss().unwrap();
         c.ss().unwrap();
         assert_eq!(c.p, bytes.len());

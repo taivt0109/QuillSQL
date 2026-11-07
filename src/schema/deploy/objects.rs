@@ -26,6 +26,26 @@ pub(super) struct State {
     pub(super) inline_key: HashSet<ObjectName>,
 }
 
+/// The class of an object's extended properties (sp_addextendedproperty's level 0 or 1 type).
+pub(super) fn xprop_class(t: ObjectType) -> Option<&'static str> {
+    Some(match t {
+        ObjectType::Assembly => "ASSEMBLY",
+        ObjectType::XmlSchemaCollection => "XML SCHEMA COLLECTION",
+        ObjectType::Default => "DEFAULT",
+        ObjectType::Rule => "RULE",
+        ObjectType::DdlTrigger => "TRIGGER",
+        ObjectType::PartitionFunction => "PARTITION FUNCTION",
+        ObjectType::PartitionScheme => "PARTITION SCHEME",
+        ObjectType::MessageType => "MESSAGE TYPE",
+        ObjectType::Contract => "CONTRACT",
+        ObjectType::Queue => "QUEUE",
+        ObjectType::Service => "SERVICE",
+        ObjectType::Route => "ROUTE",
+        ObjectType::ServiceBinding => "REMOTE SERVICE BINDING",
+        _ => return None,
+    })
+}
+
 /// The class keyword in GRANT … ON <class>:: for database-wide securables.
 pub(super) fn securable_class(t: ObjectType) -> Option<&'static str> {
     Some(match t {
@@ -112,6 +132,21 @@ impl<'a> Planner<'a> {
 
     /// Work that needs every difference planned first.
     pub(super) fn finish_objects(&mut self) {
+        // Assemblies re-created because one they reference is.
+        let (src, tgt) = (self.src, self.tgt);
+        for name in self.prepared.rebuilt_assemblies.iter() {
+            if self.cmp.differences.iter().any(|d| d.object_type == ObjectType::Assembly && d.selected && d.kind != DiffKind::Equal && self.same(&d.name.name, name)) {
+                continue;
+            }
+            if let Some(t) = named(&tgt.assemblies, name, |a| &a.name) {
+                self.drop_assembly(t, &ObjectName::new(KEY_ASSEMBLY, name));
+                if let Some(s) = named(&src.assemblies, name, |a| &a.name) {
+                    self.create_assembly(s);
+                }
+            }
+        }
+        self.recreate_clr_types();
+        self.rebind_by_rebuild();
         // Service Broker objects that use something re-created come back too.
         let pending: Vec<ObjectName> = self.objects.rebuild.iter().filter(|k| !self.objects.done.contains(*k)).cloned().collect();
         for key in pending {
@@ -171,12 +206,12 @@ impl<'a> Planner<'a> {
         let s = named(&src.assemblies, &d.name.name, |a| &a.name);
         let t = named(&tgt.assemblies, &self.target_name(d).name, |a| &a.name);
         let key = d.key();
-        let identity = |a: &Assembly| a.clr_name.split(',').filter(|p| !p.trim().to_ascii_lowercase().starts_with("version=")).map(|p| p.trim().to_ascii_lowercase()).collect::<Vec<_>>();
         match (s, t) {
             (Some(s), None) => self.create_assembly(s),
             (None, Some(t)) => self.drop_assembly(t, &key),
             (Some(s), Some(t)) => {
-                let rebuild = self.opts.has(Opt::UseClrUdtToStringForClrMigration) || identity(s) != identity(t) || s.files.is_empty() || t.files.is_empty();
+                // The same public surface is altered in place; anything else is re-created.
+                let rebuild = self.prepared.rebuilt_assemblies.contains(&t.name) || super::unbind::assembly_rebuilt(s, t, self.opts);
                 if rebuild {
                     self.drop_assembly(t, &key);
                     self.create_assembly(s);
@@ -194,7 +229,7 @@ impl<'a> Planner<'a> {
         }
     }
 
-    fn create_assembly(&mut self, s: &Assembly) {
+    pub(super) fn create_assembly(&mut self, s: &Assembly) {
         self.objects.assemblies.push(s.name.clone());
         self.recreate.insert(ObjectName::new("", &s.name));
         let mut statements = ddl_objects::create_assembly(s);
@@ -220,12 +255,15 @@ impl<'a> Planner<'a> {
         100 - depth.min(99)
     }
 
-    fn drop_assembly(&mut self, t: &Assembly, key: &ObjectName) {
+    pub(super) fn drop_assembly(&mut self, t: &Assembly, key: &ObjectName) {
         // CLR modules, triggers and types built on it go first and come back from the source.
         self.disturbed.insert(key.clone());
         let tgt = self.tgt;
         for ty in tgt.types.iter().filter(|ty| ty.clr_class.as_deref().is_some_and(|c| c.starts_with(&format!("{}.", quote(&t.name))))) {
-            let users = tgt.tables.iter().any(|tab| tab.columns.iter().any(|c| c.data_type.schema.as_deref() == Some(&ty.schema) && c.data_type.name == ty.name));
+            // Tables that can't go through the two-step rebuild (temporal, memory-optimized).
+            let users = tgt.tables.iter().any(|tab| {
+                tab.columns.iter().any(|c| c.data_type.schema.as_deref() == Some(&ty.schema) && c.data_type.name == ty.name) && self.unbound_copy(&tab.object_name()).is_none()
+            });
             if users {
                 self.warn(owarn::clr_type_unbind(&ObjectName::new(&ty.schema, &ty.name).to_string()));
             }
@@ -253,6 +291,8 @@ impl<'a> Planner<'a> {
             if s.is_some() {
                 self.unbind_xml_columns(t);
             }
+            // Modules with parameters of the collection go first and come back.
+            self.disturbed.insert(tn.clone());
             // Message types that validate against it are dropped first and come back.
             let collection = tn.quoted();
             for m in tgt.message_types.iter().filter(|m| m.xml_collection.as_deref().is_some_and(|x| x.eq_ignore_ascii_case(&collection))) {
@@ -330,6 +370,7 @@ impl<'a> Planner<'a> {
             self.ranked_step(Phase::DropBindables, usize::from(!rule), format!("Dropping {plural}"), vec![sql], true);
         }
         if let Some(s) = s {
+            self.recreate.insert(d.name.clone());
             let sql = self.ex.object(&d.name, code, Check::Create, &ddl_objects::create_bindable(s));
             self.push(Step { rank: usize::from(rule), group: true, settings: Some(ModuleSettings::default()), ..Step::new(Phase::CreateBindables, format!("Creating {plural}"), vec![sql]) });
         }
@@ -360,6 +401,9 @@ impl<'a> Planner<'a> {
                     self.group(Phase::DropDdlTriggers, "Dropping DDL triggers", vec![sql]);
                 }
                 let create = t.is_none() || rebuild;
+                if create {
+                    self.recreate.insert(ObjectName::new("", &s.name));
+                }
                 let mut statements = vec![if create {
                     self.ex.ddl_trigger(&s.name, Check::Create, &ddl_objects::ddl_trigger(s, "CREATE"))
                 } else {
@@ -389,6 +433,7 @@ impl<'a> Planner<'a> {
         let t = named(&tgt.partition_functions, &self.target_name(d).name, |f| &f.name);
         let test = |n: &str| format!("sys.partition_functions WHERE name = {}", ddl::sql_string(n));
         let create = |p: &mut Self, s: &PartitionFunction| {
+            p.recreate.insert(ObjectName::new("", &s.name));
             let sql = p.ex.listed(&test(&s.name), Check::Create, &ddl_objects::create_partition_function(s));
             p.ranked_step(Phase::Partitioning, 2, "Creating partition functions", vec![sql], true);
         };
@@ -450,8 +495,7 @@ impl<'a> Planner<'a> {
                     && self.cmp.differences.iter().any(|x| x.object_type == ObjectType::PartitionFunction && x.selected && self.same(&x.name.name, &s.function));
                 let right = src.partition_functions.iter().find(|f| self.same(&f.name, &s.function)).is_some_and(|f| f.range_right);
                 let partitions = src.partition_functions.iter().find(|f| self.same(&f.name, &s.function)).map(|f| f.boundaries.len() + 1).unwrap_or(s.filegroups.len());
-                let edge = |x: &PartitionScheme| if right { x.filegroups.first().cloned() } else { x.filegroups.get(partitions - 1).cloned() };
-                if !self.same(&s.function, &t.function) || edge(s) != edge(t) {
+                if super::unbind::scheme_recreated(s, t, src, tgt) {
                     self.drop_partition_scheme(t);
                     self.create_partition_scheme(s);
                 } else if !function_altered {
@@ -482,6 +526,7 @@ impl<'a> Planner<'a> {
     }
 
     fn create_partition_scheme(&mut self, s: &PartitionScheme) {
+        self.recreate.insert(ObjectName::new("", &s.name));
         for fg in s.filegroups.iter().filter(|f| !f.eq_ignore_ascii_case("PRIMARY")) {
             self.object_filegroups.insert(fg.clone());
         }
@@ -495,7 +540,7 @@ impl<'a> Planner<'a> {
         let users: Vec<String> = tgt
             .tables
             .iter()
-            .filter(|tab| !self.dropped.contains(&tab.object_name()) && !self.recreate.contains(&tab.object_name()))
+            .filter(|tab| !self.dropped.contains(&tab.object_name()) && !self.recreate.contains(&tab.object_name()) && self.unbound_copy(&tab.object_name()).is_none())
             .filter(|tab| {
                 let on = |st: &Storage| st.partition_column.is_some() && st.data_space.as_deref().is_some_and(|ds| self.same(ds, &t.name));
                 on(&tab.storage) || tab.indexes.iter().any(|ix| on(&ix.storage))
@@ -1342,8 +1387,8 @@ impl<'a> Planner<'a> {
 
     /// The source's permissions on an object re-created only because something it uses is
     /// (selected objects get theirs with the other permissions).
-    fn regrant(&mut self, ty: ObjectType, name: &ObjectName) {
-        if self.cmp.differences.iter().any(|d| d.object_type == ty && d.selected && d.kind != DiffKind::Equal && d.name == *name) || self.opts.has(Opt::IgnorePermissions) {
+    pub(super) fn regrant(&mut self, ty: ObjectType, name: &ObjectName) {
+        if self.cmp.differences.iter().any(|d| d.object_type == ty && d.selected && d.kind != DiffKind::Equal && d.name == *name) {
             return;
         }
         let (class, schema, object) = match securable_class(ty) {
@@ -1354,11 +1399,18 @@ impl<'a> Planner<'a> {
             .src
             .permissions
             .iter()
-            .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == Some(object))
+            .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == Some(object) && !self.opts.has(Opt::IgnorePermissions))
             .map(Permission::grant_sql)
             .collect();
         let label = if schema.is_some() { name.to_string() } else { format!("{class}:: {}", quote(object)) };
         self.step(Phase::Permissions, format!("Altering permissions on {label}"), grants);
+        if let Some(xclass) = xprop_class(ty).filter(|_| !self.opts.has(Opt::IgnoreExtendedProperties)) {
+            let props: Vec<&ExtendedProperty> =
+                self.src.extended_properties.iter().filter(|p| p.class == xclass && p.schema.as_deref() == schema && p.object.as_deref() == Some(object)).collect();
+            for p in props {
+                self.add_xprop(p, &ddl::xprop_levels(p, |s| s.to_string()));
+            }
+        }
     }
 
     /// A Service Broker object that is not deployed itself but uses one that is re-created.

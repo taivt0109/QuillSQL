@@ -1,6 +1,6 @@
 //! Scripts folders against a real SQL Server: makescripts → read back, deploying to a folder,
 //! and deploying from a folder. Run only when QUILL_TEST_SERVER is set (see compare_live.rs).
-//! Databases are named QD_sources_* and dropped afterwards.
+//! Databases are named QD_sources_*_<process id> and dropped afterwards.
 
 use std::path::{Path, PathBuf};
 
@@ -23,9 +23,14 @@ fn server() -> Option<Server> {
     Some(Server { host, auth })
 }
 
+/// Test databases get the process id, so runs from other worktrees on the same server don't collide.
+fn unique(name: &str) -> String {
+    if name == "master" { name.to_string() } else { format!("{name}_{}", std::process::id()) }
+}
+
 impl Server {
     fn spec(&self, database: &str) -> ConnectionSpec {
-        let mut spec = ConnectionSpec::new(&self.host, database, self.auth.clone());
+        let mut spec = ConnectionSpec::new(&self.host, &unique(database), self.auth.clone());
         spec.trust_server_certificate = true;
         spec
     }
@@ -34,8 +39,8 @@ impl Server {
         let rt = db::runtime().unwrap();
         rt.block_on(async {
             let mut master = db::connect_async(&self.spec("master")).await.unwrap();
-            let q = db::quote(name);
-            db::execute(&mut master, &format!("IF DB_ID({}) IS NOT NULL BEGIN ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q}; END; CREATE DATABASE {q};", db::literal(name)))
+            let q = db::quote(&unique(name));
+            db::execute(&mut master, &format!("IF DB_ID({}) IS NOT NULL BEGIN ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q}; END; CREATE DATABASE {q};", db::literal(&unique(name))))
                 .await
                 .unwrap();
             let mut conn = db::connect_async(&self.spec(name)).await.unwrap();
@@ -49,7 +54,7 @@ impl Server {
         let rt = db::runtime().unwrap();
         rt.block_on(async {
             let mut master = db::connect_async(&self.spec("master")).await.unwrap();
-            let q = db::quote(name);
+            let q = db::quote(&unique(name));
             let _ = db::execute(&mut master, &format!("ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q};")).await;
         });
     }
@@ -91,6 +96,9 @@ fn makescripts_reads_back_identical() {
         assert!(f.messages.is_empty(), "{:?}", f.messages);
         assert_identical(&f.database, &live, &opts, name);
         assert_identical(&live, &f.database, &opts.clone().without(Opt::IgnoreWhiteSpace), name);
+        // A SQL Compare snapshot of the database reads back the same.
+        let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+        assert_identical(&snp, &live, &opts, &format!("{name} snapshot"));
         // DDL triggers are not compared; they still come back.
         let ddl = |d: &Database| d.ddl_triggers.iter().map(|t| (t.name.clone(), t.disabled)).collect::<Vec<_>>();
         assert_eq!(ddl(&f.database), ddl(&live), "{name}");
@@ -114,6 +122,9 @@ fn makescripts_reads_back_identical() {
     }
 }
 
+/// The data tests run one at a time: both drive the same server hard.
+static DATA: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `quill <command> ...` with the test server's login for the live `sides`.
 fn quill(server: &Server, command: &str, sides: &[u8], args: &[String]) -> (i32, String) {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_quill"));
@@ -131,17 +142,26 @@ fn quill(server: &Server, command: &str, sides: &[u8], args: &[String]) -> (i32,
 #[test]
 fn data_compare_with_a_scripts_folder() {
     let Some(server) = server() else { return };
+    let _serial = DATA.lock().unwrap_or_else(|e| e.into_inner());
     let data = format!("{SHOP}\nGO\n{SHOP_DATA}");
     server.create("QD_sources_Data", &data);
+    let staged = || {
+        let rt = db::runtime().unwrap();
+        rt.block_on(async {
+            let mut c = db::connect_async(&server.spec("master")).await.unwrap();
+            db::query(&mut c, "SELECT name FROM sys.databases WHERE name LIKE N'QuillScripts[_]%'").await.unwrap().len()
+        })
+    };
+    let before = staged();
     let dir = temp("data");
     let d = |s: &str| s.to_string();
     let path = dir.to_string_lossy().to_string();
     // A scripts folder with schema and data.
     folder::write_all(&server.read("QD_sources_Data"), &dir, &Options::default_set()).unwrap();
-    let (code, out) = quill(&server, "data", &[1], &[d("/database1:QD_sources_Data"), format!("/makescripts:{path}")]);
+    let (code, out) = quill(&server, "data", &[1], &[format!("/database1:{}", unique("QD_sources_Data")), format!("/makescripts:{path}")]);
     assert_eq!(code, 0, "{out}");
     assert!(dir.join("Data").join("dbo.Customer_Data.sql").is_file(), "{out}");
-    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Data")]);
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Data"))]);
     assert_eq!(code, 63, "{out}");
     // Change the database, compare, and deploy the database's data to the folder.
     let rt = db::runtime().unwrap();
@@ -149,22 +169,63 @@ fn data_compare_with_a_scripts_folder() {
         let mut c = db::connect_async(&server.spec("QD_sources_Data")).await.unwrap();
         db::execute(&mut c, "UPDATE dbo.Customer SET Name = N'Anh' WHERE CustomerId = 1; DELETE FROM Sales.OrderLine WHERE LineNumber = 2;").await.unwrap();
     });
-    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Data")]);
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Data"))]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("[dbo].[Customer]") && out.contains("[Sales].[OrderLine]"), "{out}");
-    let (code, out) = quill(&server, "data", &[1], &[d("/database1:QD_sources_Data"), format!("/scripts2:{path}"), d("/synchronize")]);
+    let (code, out) = quill(&server, "data", &[1], &[format!("/database1:{}", unique("QD_sources_Data")), format!("/scripts2:{path}"), d("/synchronize")]);
     assert_eq!(code, 0, "{out}");
     assert!(std::fs::read_to_string(dir.join("Data").join("dbo.Customer_Data.sql")).unwrap().contains("N'Anh'"), "{out}");
-    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), d("/database2:QD_sources_Data")]);
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Data"))]);
     assert_eq!(code, 63, "{out}");
     // No temporary databases are left behind.
-    let left = rt.block_on(async {
-        let mut c = db::connect_async(&server.spec("master")).await.unwrap();
-        db::query(&mut c, "SELECT name FROM sys.databases WHERE name LIKE N'QuillScripts[_]%'").await.unwrap().len()
-    });
-    assert_eq!(left, 0);
+    assert!(staged() <= before);
     let _ = std::fs::remove_dir_all(&dir);
     server.drop("QD_sources_Data");
+}
+
+/// Data of many types, read from a scripts folder without a server.
+const TYPES: &str = "CREATE TABLE dbo.Types (Id int NOT NULL PRIMARY KEY, Code char(4) NULL, Name nvarchar(50) COLLATE Latin1_General_CI_AI NULL, \
+    Amount decimal(10, 3) NULL, Price money NULL, Ratio float NULL, Small real NULL, Flag bit NULL, Born date NULL, Seen datetime NULL, \
+    At datetime2(3) NULL, Zone datetimeoffset(0) NULL, Clock time(2) NULL, Guid uniqueidentifier NULL, Blob varbinary(20) NULL, Fixed binary(4) NULL, Doc xml NULL);
+GO
+INSERT dbo.Types VALUES (1, 'ab', N'Ánh', 1.25, 3.5, 1.5e10, 0.1, 1, '2001-02-03', '2020-01-02 03:04:05.833', '2020-01-02 03:04:05.123', '2020-01-02 03:04:05 +07:00', '10:11:12.34', '6F9619FF-8B86-D011-B42D-00C04FC964FF', 0x0102, 0x0A, N'<a b=\"1\"/>');
+INSERT dbo.Types VALUES (2, NULL, N'it''s', -0.001, -1, -2.25, 3, 0, NULL, '1999-12-31 23:59:59.997', NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+INSERT dbo.Types (Id) VALUES (3);
+GO
+CREATE TABLE dbo.Child (Id int NOT NULL PRIMARY KEY, TypesId int NULL REFERENCES dbo.Types (Id), Note varchar(10) NULL);
+GO
+INSERT dbo.Child VALUES (1, 1, 'x'), (2, NULL, 'y ');
+";
+
+#[test]
+fn data_compare_with_a_scripts_folder_without_a_server() {
+    let Some(server) = server() else { return };
+    let _serial = DATA.lock().unwrap_or_else(|e| e.into_inner());
+    server.create("QD_sources_Types", TYPES);
+    let dir = temp("types");
+    let d = |s: &str| s.to_string();
+    let path = dir.to_string_lossy().to_string();
+    folder::write_all(&server.read("QD_sources_Types"), &dir, &Options::default_set()).unwrap();
+    let (code, out) = quill(&server, "data", &[1], &[format!("/database1:{}", unique("QD_sources_Types")), format!("/makescripts:{path}")]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Types")), d("/verbose")]);
+    assert_eq!(code, 63, "{out}");
+    assert!(!out.contains("temporary database"), "read without a server: {out}");
+    let rt = db::runtime().unwrap();
+    rt.block_on(async {
+        let mut c = db::connect_async(&server.spec("QD_sources_Types")).await.unwrap();
+        db::execute(&mut c, "UPDATE dbo.Types SET Name = N'Anh', Amount = 2 WHERE Id = 1; DELETE dbo.Child WHERE Id = 2; INSERT dbo.Child VALUES (3, 2, 'z');").await.unwrap();
+    });
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Types"))]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("[dbo].[Types]") && out.contains("[dbo].[Child]"), "{out}");
+    // Deploy the database's data to the folder, then they are the same.
+    let (code, out) = quill(&server, "data", &[1], &[format!("/database1:{}", unique("QD_sources_Types")), format!("/scripts2:{path}"), d("/synchronize")]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Types"))]);
+    assert_eq!(code, 63, "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+    server.drop("QD_sources_Types");
 }
 
 #[test]
@@ -215,8 +276,8 @@ fn deploys_to_and_from_a_scripts_folder() {
     let settings = deploy::ScriptSettings {
         transaction_isolation_level: "SERIALIZABLE".into(),
         source: "folder".into(),
-        target: "QD_sources_Empty".into(),
-        target_database: "QD_sources_Empty".into(),
+        target: unique("QD_sources_Empty"),
+        target_database: unique("QD_sources_Empty"),
         target_major_version: empty.server.major_version,
     };
     let script = deploy::generate(&c, &after.database, &empty, &opts, &Mappings::default(), &settings).unwrap();
@@ -229,4 +290,46 @@ fn deploys_to_and_from_a_scripts_folder() {
     for name in ["QD_sources_Old", "QD_sources_New", "QD_sources_Empty"] {
         server.drop(name);
     }
+}
+
+#[test]
+fn the_other_objects_round_trip_through_snapshots() {
+    let Some(server) = server() else { return };
+    let clr = |hex: &str| format!("0x{}", hex.trim());
+    let objects = include_str!("fixtures/objects/objects.sql").replace("{CLR}", &clr(include_str!("fixtures/objects/clr.hex")));
+    server.create("QD_sources_Objects", &objects);
+    let mut live = catalog::read_database(&server.spec("QD_sources_Objects")).unwrap();
+    server.drop("QD_sources_Objects");
+    // Snapshots have no place for a classification's rank.
+    for c in live.tables.iter_mut().flat_map(|t| &mut t.columns) {
+        if let Some(s) = &mut c.sensitivity {
+            s.rank = None;
+        }
+    }
+    let opts = Options::default_set().without(Opt::IgnoreFileGroups).with(Opt::IgnoreCertificatesAndCryptoKeys);
+    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+    assert_identical(&snp, &live, &opts, "objects snapshot");
+    assert_identical(&live, &snp, &opts, "objects snapshot, the other way");
+}
+
+#[test]
+fn certificates_and_keys_round_trip_through_snapshots() {
+    let Some(server) = server() else { return };
+    server.create(
+        "QD_sources_Keys",
+        "CREATE USER KeyUser WITHOUT LOGIN;
+        CREATE CERTIFICATE QuillCert ENCRYPTION BY PASSWORD = 'Str0ng!Pass1' WITH SUBJECT = 'Quill', START_DATE = '20250101', EXPIRY_DATE = '20300101';
+        CREATE SYMMETRIC KEY QuillKey WITH ALGORITHM = AES_256 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+        CREATE ASYMMETRIC KEY QuillAsym WITH ALGORITHM = RSA_2048 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+        GRANT CONTROL ON CERTIFICATE::QuillCert TO KeyUser;
+        GRANT VIEW DEFINITION ON SYMMETRIC KEY::QuillKey TO KeyUser;
+        GRANT CONTROL ON ASYMMETRIC KEY::QuillAsym TO KeyUser;",
+    );
+    let live = catalog::read_database(&server.spec("QD_sources_Keys")).unwrap();
+    server.drop("QD_sources_Keys");
+    assert_eq!((live.certificates.len(), live.symmetric_keys.len(), live.asymmetric_keys.len()), (1, 1, 1));
+    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+    assert_identical(&snp, &live, &Options::default_set(), "keys snapshot");
+    assert_eq!(snp.certificates, live.certificates);
+    assert_eq!(snp.symmetric_keys, live.symmetric_keys);
 }
