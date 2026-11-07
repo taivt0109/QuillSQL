@@ -274,6 +274,11 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
         if ty.eq_ignore_ascii_case("EmptyDatabaseSource") {
             return SourceSpec { kind: "empty".into(), ..Default::default() };
         }
+        if ty.eq_ignore_ascii_case("BackupDatabaseSource") {
+            let files: Vec<String> = child(n, "Files").map(|f| f.children().filter(|c| c.is_element()).filter_map(|c| c.text()).map(|t| t.trim().to_string()).collect()).unwrap_or_default();
+            let backup_set = child(n, "BackupSet").map(|b| text_of(b, "BackupSetName")).unwrap_or_default();
+            return SourceSpec { kind: "backup".into(), path: files.join(";"), backup_set, ..Default::default() };
+        }
         let mut s = SourceSpec::database(&text_of(n, "ServerName"), &text_of(n, "DatabaseName"));
         let auth = text_of(n, "AuthenticationType");
         let user = text_of(n, "Username");
@@ -516,6 +521,33 @@ pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
         if side.is_snapshot() {
             x.open(element, " version=\"1\" type=\"SnapshotSource\"");
             x.value("FileName", &side.path);
+            x.close(element);
+        } else if side.is_backup() {
+            // The backup set is named; SQL Compare finds it again among the files' sets.
+            x.open(element, " version=\"1\" type=\"BackupDatabaseSource\"");
+            x.open("Files", " type=\"ArrayList\" version=\"1\"");
+            for f in side.path.split(';').filter(|f| !f.is_empty()) {
+                x.line(&format!("<value type=\"string\">{}</value>", XmlOut::escape(f)));
+            }
+            x.close("Files");
+            x.open("BackupSet", " version=\"5\" type=\"ProjectBackupSet\"");
+            x.value("BackupSetName", &side.backup_set);
+            for name in ["DatabaseName", "ServerName"] {
+                x.value(name, "");
+            }
+            x.value("StartDate", "01/01/0001 00:00:00");
+            x.value("BackupType", "0");
+            for name in ["BindingID", "DifferentialBaseGuid", "FamilyID"] {
+                x.value(name, "00000000-0000-0000-0000-000000000000");
+            }
+            x.value("RaidSequenceNumber", "1");
+            for name in ["FirstLsn", "LastLsn", "CheckpointLsn", "FullLsn"] {
+                x.value(name, "");
+            }
+            x.value("Size", "0");
+            x.value("Encrypted", "False");
+            x.value("Incomplete", "False");
+            x.close("BackupSet");
             x.close(element);
         } else if side.is_scripts() {
             x.open(element, " version=\"2\" type=\"FolderDataSource\"");
@@ -819,5 +851,22 @@ mod tests {
         assert_eq!((t.where1.as_deref(), t.key.as_slice()), (Some("Id > 5"), &["Code".to_string()][..]));
         assert_eq!(t.columns, [("Amount".to_string(), "Total".to_string())]);
         assert_eq!(p.data_mappings.schemas, [("dev".to_string(), "dbo".to_string())]);
+    }
+
+    #[test]
+    fn backup_sources_round_trip() {
+        let scp = r#"<Project version="5" type="SQLComparisonToolsProject">
+  <DataSource1 version="1" type="BackupDatabaseSource"><Files type="ArrayList" version="1"><value type="string">C:\b\a.bak</value><value type="string">C:\b\b.bak</value></Files>
+    <BackupSet version="5" type="ProjectBackupSet"><BackupSetName>Nightly</BackupSetName><DatabaseName>Shop</DatabaseName></BackupSet></DataSource1>
+  <DataSource2 version="5" type="LiveDatabaseSource"><ServerName>b</ServerName><DatabaseName>y</DatabaseName></DataSource2>
+</Project>"#;
+        let p = import_vendor(scp.as_bytes(), ProjectKind::Schema).unwrap();
+        assert!(p.source.is_backup());
+        assert_eq!((p.source.path.as_str(), p.source.backup_set.as_str()), (r"C:\b\a.bak;C:\b\b.bak", "Nightly"));
+        let out = export_vendor(&p, "01/01/2026 00:00:00");
+        let text = String::from_utf16_lossy(&out[2..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+        let again = import_vendor(text.as_bytes(), ProjectKind::Schema).unwrap();
+        assert_eq!(again.source, p.source);
+        assert!(text.contains("<DataSource1 version=\"1\" type=\"BackupDatabaseSource\">"), "{text}");
     }
 }
