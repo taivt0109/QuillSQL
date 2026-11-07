@@ -127,9 +127,9 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     c.member(Cur::trigger)?; // database-level list; DML triggers live in their table or view
     s.ddl_triggers = c.member(Cur::ddl_trigger)?;
     s.service_bindings = c.member(Cur::service_binding)?;
-    c.member(Cur::certificate)?;
-    c.member(Cur::symmetric_key)?;
-    c.member(Cur::asymmetric_key)?;
+    s.certificates = c.member(Cur::certificate)?;
+    s.symmetric_keys = c.member(Cur::symmetric_key)?;
+    s.asymmetric_keys = c.member(Cur::asymmetric_key)?;
     c.member(Cur::fulltext_stoplist)?;
     s.sequences = c.member(Cur::sequence)?;
     c.member(Cur::search_property_list)?;
@@ -184,6 +184,9 @@ struct Snap {
     assemblies: Vec<(Raw<Assembly>, Vec<u64>)>,
     assembly_references: Vec<(u8, String, u8, String)>,
     security_policies: Vec<Raw<SecurityPolicy>>,
+    certificates: Vec<Raw<Certificate>>,
+    symmetric_keys: Vec<Raw<SymmetricKey>>,
+    asymmetric_keys: Vec<Raw<AsymmetricKey>>,
     dependencies: Vec<(u8, String, u8, String)>,
     props: Vec<RawProp>,
     /// Comments blob store: module and default text by id.
@@ -1698,45 +1701,69 @@ impl Cur<'_> {
         Ok(RawSchema { name, owner, system_object, perms })
     }
 
-    fn certificate(&mut self) -> R<()> {
+    fn certificate(&mut self) -> R<Raw<Certificate>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        self.bool()?;
-        self.str()?;
-        self.str()?;
-        self.i64()?;
-        self.i64()?;
-        self.str()?;
+        let mut c = Certificate { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
+        c.private_key = key_encryption(self.i32()?).into();
+        c.active_for_dialog = self.bool()?;
+        c.issuer = self.s()?;
+        c.subject = self.s()?;
+        c.start_date = ticks_seconds(self.i64()?);
+        c.expiry_date = ticks_seconds(self.i64()?);
+        self.str()?; // serial number
         let n = self.count()?;
-        self.take(n)?;
-        self.perms()?;
-        self.two_ss(v)
+        c.thumbprint = hex(self.take(n)?);
+        let perms = self.perms()?;
+        self.two_ss(v)?;
+        Ok(Raw { item: c, perms, system: false })
     }
 
-    fn symmetric_key(&mut self) -> R<()> {
+    fn symmetric_key(&mut self) -> R<Raw<SymmetricKey>> {
         let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.take(8 + 8 + 16)?;
-        self.i32()?;
-        self.i32()?;
-        self.perms()?;
-        self.two_ss(v)
-    }
-
-    fn asymmetric_key(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        let n = self.count()?;
-        self.take(n)?;
-        for _ in 0..3 {
-            self.i32()?;
+        let mut k = SymmetricKey { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
+        k.modify_date = ticks_seconds(self.i64()?);
+        k.create_date = ticks_seconds(self.i64()?);
+        k.key_guid = guid(self.bytes()?);
+        k.key_length = self.i32()?;
+        k.algorithm = match self.i32()? {
+            1 => "RC2",
+            2 => "RC4",
+            3 => "DES",
+            4 => "TRIPLE_DES",
+            5 => "DESX",
+            6 => "AES_128",
+            7 => "AES_192",
+            8 => "AES_256",
+            _ => "",
         }
-        self.perms()?;
-        self.two_ss(v)
+        .into();
+        let perms = self.perms()?;
+        self.two_ss(v)?;
+        // The system key every database has after a master key.
+        let system = k.name == "##MS_DatabaseMasterKey##";
+        Ok(Raw { item: k, perms, system })
+    }
+
+    fn asymmetric_key(&mut self) -> R<Raw<AsymmetricKey>> {
+        let v = self.f32()?;
+        let mut k = AsymmetricKey { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
+        let n = self.count()?;
+        k.thumbprint = hex(self.take(n)?);
+        k.key_length = self.i32()?;
+        k.algorithm = match self.i32()? {
+            0 => "RSA_512",
+            1 => "RSA_1024",
+            2 => "RSA_2048",
+            _ => "",
+        }
+        .into();
+        if k.algorithm.is_empty() {
+            k.algorithm = format!("RSA_{}", k.key_length);
+        }
+        k.private_key = key_encryption(self.i32()?).into();
+        let perms = self.perms()?;
+        self.two_ss(v)?;
+        Ok(Raw { item: k, perms, system: false })
     }
 
     fn security_policy(&mut self) -> R<Raw<SecurityPolicy>> {
@@ -2396,6 +2423,18 @@ impl Snap {
             item.references.sort_by(|a, b| sql_order(a, b));
             db.assemblies.push(item);
         }
+        for c in std::mem::take(&mut self.certificates) {
+            perms_on("CERTIFICATE", None, &c.item.name, &c.perms);
+            db.certificates.push(c.item);
+        }
+        for k in std::mem::take(&mut self.symmetric_keys).into_iter().filter(|k| !k.system) {
+            perms_on("SYMMETRIC KEY", None, &k.item.name, &k.perms);
+            db.symmetric_keys.push(k.item);
+        }
+        for k in std::mem::take(&mut self.asymmetric_keys) {
+            perms_on("ASYMMETRIC KEY", None, &k.item.name, &k.perms);
+            db.asymmetric_keys.push(k.item);
+        }
         for p in std::mem::take(&mut self.security_policies) {
             perms_on("OBJECT", Some(&p.item.schema), &p.item.name, &p.perms);
             db.security_policies.push(p.item);
@@ -2899,6 +2938,26 @@ fn boundary_literal(value: Option<&str>, t: &DataType) -> String {
         "uniqueidentifier" => format!("'{{{}}}'", v.trim_matches(['{', '}']).to_ascii_uppercase()),
         _ => v.to_string(),
     }
+}
+
+/// How a certificate's or key's private key is protected, as sys.certificates codes it.
+fn key_encryption(code: i32) -> &'static str {
+    match code {
+        1 => "MK",
+        2 => "PW",
+        3 => "SK",
+        _ => "NA",
+    }
+}
+
+/// `0x` and upper-case hex.
+fn hex(b: &[u8]) -> String {
+    std::iter::once("0x".to_string()).chain(b.iter().map(|x| format!("{x:02X}"))).collect()
+}
+
+/// A .NET `DateTime` as `yyyy-MM-dd HH:mm:ss`.
+fn ticks_seconds(ticks: i64) -> String {
+    ticks_text(ticks)[..19].to_string()
 }
 
 /// A .NET `DateTime` (100 ns ticks from 0001-01-01) as `yyyy-MM-dd HH:mm:ss.fff`.

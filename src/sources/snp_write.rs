@@ -435,10 +435,10 @@ impl<'a> W<'a> {
         self.empty_coll(); // database-level trigger list
         self.coll(&ddl_triggers, |w, (t, id)| w.ddl_trigger(t, *id));
         self.coll(&db.service_bindings, W::service_binding);
-        for _ in 0..4 {
-            // Certificates, symmetric keys, asymmetric keys, full-text stoplists.
-            self.empty_coll();
-        }
+        self.coll(&db.certificates, W::certificate);
+        self.coll(&db.symmetric_keys, W::symmetric_key);
+        self.coll(&db.asymmetric_keys, W::asymmetric_key);
+        self.empty_coll(); // full-text stoplists
         self.coll(&db.sequences, W::sequence);
         self.empty_coll(); // search property lists
         self.coll(&db.security_policies, W::security_policy);
@@ -1884,6 +1884,66 @@ impl<'a> W<'a> {
         self.no_ss(3);
     }
 
+    fn certificate(&mut self, c: &Certificate) {
+        self.f32(VERSION);
+        self.s(&c.name);
+        self.str(c.owner.as_deref());
+        self.i32(key_encryption(&c.private_key));
+        self.bool(c.active_for_dialog);
+        self.s(&c.issuer);
+        self.s(&c.subject);
+        self.i64(text_ticks(&c.start_date).unwrap_or(0));
+        self.i64(text_ticks(&c.expiry_date).unwrap_or(0));
+        self.str(None); // serial number
+        let thumbprint = unhex(&c.thumbprint);
+        self.len(thumbprint.len());
+        self.b.b.extend(thumbprint);
+        self.perms_on("CERTIFICATE", None, Some(&c.name));
+        self.no_ss(2);
+    }
+
+    fn symmetric_key(&mut self, k: &SymmetricKey) {
+        self.f32(VERSION);
+        self.s(&k.name);
+        self.str(k.owner.as_deref());
+        self.i64(text_ticks(&k.modify_date).unwrap_or(0));
+        self.i64(text_ticks(&k.create_date).unwrap_or(0));
+        self.b.b.extend(guid_bytes(&k.key_guid));
+        self.i32(k.key_length);
+        self.i32(match k.algorithm.as_str() {
+            "RC2" => 1,
+            "RC4" => 2,
+            "DES" => 3,
+            "TRIPLE_DES" => 4,
+            "DESX" => 5,
+            "AES_128" => 6,
+            "AES_192" => 7,
+            "AES_256" => 8,
+            _ => 0,
+        });
+        self.perms_on("SYMMETRIC KEY", None, Some(&k.name));
+        self.no_ss(2);
+    }
+
+    fn asymmetric_key(&mut self, k: &AsymmetricKey) {
+        self.f32(VERSION);
+        self.s(&k.name);
+        self.str(k.owner.as_deref());
+        let thumbprint = unhex(&k.thumbprint);
+        self.len(thumbprint.len());
+        self.b.b.extend(thumbprint);
+        self.i32(k.key_length);
+        self.i32(match k.algorithm.as_str() {
+            "RSA_512" => 0,
+            "RSA_1024" => 1,
+            "RSA_2048" => 2,
+            _ => 3,
+        });
+        self.i32(key_encryption(&k.private_key));
+        self.perms_on("ASYMMETRIC KEY", None, Some(&k.name));
+        self.no_ss(2);
+    }
+
     fn security_policy(&mut self, p: &SecurityPolicy) {
         self.f32(VERSION);
         let id = self.id();
@@ -2356,6 +2416,29 @@ fn synonym_target(base: &str, database: &str) -> Option<ObjectName> {
         [db, schema, name] if db.eq_ignore_ascii_case(database) => Some(ObjectName::new(schema, name)),
         _ => None,
     }
+}
+
+/// The code of a private key's protection (sys.certificates.pvt_key_encryption_type).
+fn key_encryption(kind: &str) -> i32 {
+    match kind {
+        "MK" => 1,
+        "PW" => 2,
+        "SK" => 3,
+        _ => 0,
+    }
+}
+
+/// A GUID's text in the .NET byte order (the first three groups little-endian).
+fn guid_bytes(s: &str) -> [u8; 16] {
+    let b = unhex(&s.replace(['-', '{', '}'], ""));
+    let mut out = [0u8; 16];
+    if b.len() == 16 {
+        out.copy_from_slice(&b);
+        out[..4].reverse();
+        out[4..6].reverse();
+        out[6..8].reverse();
+    }
+    out
 }
 
 /// Upper- or lower-case hex (no `0x`) as bytes.
