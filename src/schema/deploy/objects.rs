@@ -76,6 +76,23 @@ fn alter_authorization(class: &str, name: &str, owner: &Option<String>) -> Strin
     format!("ALTER AUTHORIZATION ON {class}::{} TO {}", quote(name), quote(owner.as_deref().unwrap_or("dbo")))
 }
 
+/// The ALTER AUTHORIZATION class (empty for OBJECT) and explicit owner of a schema object;
+/// `None` when the database has no such object or the kind has no owner here.
+fn object_owner(db: &Database, ty: ObjectType, n: &ObjectName) -> Option<(&'static str, Option<String>)> {
+    let is = |s: &str, x: &str| s == n.schema && x == n.name;
+    Some(match ty {
+        ObjectType::Table => ("", db.tables.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::View => ("", db.views.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::Function | ObjectType::StoredProcedure => ("", db.routines.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::Sequence => ("", db.sequences.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::Synonym => ("", db.synonyms.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::SecurityPolicy => ("", db.security_policies.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::ExternalTable => ("", db.external_tables.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::UserDefinedType => ("TYPE", db.types.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        _ => return None,
+    })
+}
+
 /// Retention as days, for telling whether it gets shorter.
 fn retention_days(r: &Option<String>) -> Option<i64> {
     let r = r.as_deref()?;
@@ -241,6 +258,31 @@ impl<'a> Planner<'a> {
             }
         }
         true
+    }
+
+    /// ALTER AUTHORIZATION for schema objects whose explicit owner differs (or that are created
+    /// with one), unless IgnoreSchemaObjectAuthorization.
+    pub(super) fn authorizations(&mut self, selected: &[&Difference]) {
+        if self.opts.has(Opt::IgnoreSchemaObjectAuthorization) {
+            return;
+        }
+        for d in selected.iter().filter(|d| d.kind != DiffKind::OnlyIn2) {
+            let Some((class, owner)) = object_owner(self.src, d.object_type, &d.name) else { continue };
+            let tn = self.target_name(d);
+            let fresh = d.kind == DiffKind::OnlyIn1 || self.recreate.contains(&d.name) || self.dropped.contains(&tn);
+            let current = if fresh { None } else { object_owner(self.tgt, d.object_type, &tn).and_then(|(_, o)| o) };
+            let same = match (&owner, &current) {
+                (Some(a), Some(b)) => self.same(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if same || (fresh && owner.is_none()) {
+                continue;
+            }
+            let class = if class.is_empty() { String::new() } else { format!("{class} :: ") };
+            let to = owner.as_deref().map(quote).unwrap_or_else(|| "SCHEMA OWNER".into());
+            self.group(Phase::Authorizations, "Altering schema object authorizations", vec![format!("ALTER AUTHORIZATION ON {class}{} TO {to}", d.name.quoted())]);
+        }
     }
 
     // ---- CLR assemblies ----

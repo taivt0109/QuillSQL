@@ -326,6 +326,11 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let mut script = None;
     if args.has("scriptfile") || (args.has("synchronize") && live_target.is_some()) {
         let mut s = build_script(args, &comparison, &db1, &db2, &options, &mappings, &source1, &side2)?;
+        if matches!(side2, Side::Source(Source::Scripts { .. })) {
+            // A scripts folder is rewritten, not run: no warning about running without transactions.
+            let no_transactions = crate::schema::warnings::no_transactions().message;
+            s.warnings.retain(|w| w.message != no_transactions);
+        }
         if let Some(f) = &folder1 {
             sources::add_pre_post(&mut s, f, &options)?;
         }

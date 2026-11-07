@@ -591,6 +591,9 @@ pub fn create_table(t: &Table, name_override: Option<&str>, inline_keys: bool) -
 
 pub fn create_table_with(t: &Table, name_override: Option<&str>, inline_keys: bool, r: &Render) -> String {
     let name = qname(&t.schema, name_override.unwrap_or(&t.name));
+    if let Some(ft) = &t.file_table {
+        return file_table(&name, t, ft, r);
+    }
     let host = Host::of_table(t);
     let mut lines: Vec<String> = t
         .columns
@@ -659,6 +662,30 @@ pub fn create_table_with(t: &Table, name_override: Option<&str>, inline_keys: bo
         s.push_str(&format!("\r\nWITH\r\n(\r\n{}\r\n)", with.join(",\r\n")));
     }
     s
+}
+
+/// A FileTable: its columns, keys and defaults are fixed, so only the options are written.
+fn file_table(name: &str, t: &Table, ft: &FileTable, r: &Render) -> String {
+    let mut s = format!("CREATE TABLE {name} AS FILETABLE");
+    if !r.has(Opt::IgnoreFileGroups) && r.features.has(Feature::Filegroups) {
+        if let Some(fg) = &t.storage.data_space {
+            s.push_str(&format!(" ON {}", quote(fg)));
+        }
+        if let Some(fg) = &t.filestream_filegroup {
+            s.push_str(&format!(" FILESTREAM_ON {}", quote(fg)));
+        }
+    }
+    s.push_str(&format!("\r\nWITH\r\n(\r\n\tFILETABLE_DIRECTORY = {}, FILETABLE_COLLATE_FILENAME = {}", literal(&ft.directory), ft.filename_collation));
+    if let Some(pk) = &ft.primary_key {
+        s.push_str(&format!(", FILETABLE_PRIMARY_KEY_CONSTRAINT_NAME = {}", quote(pk)));
+    }
+    s.push_str("\r\n)");
+    s
+}
+
+/// `EXEC sp_tableoption N'[s].[t]', N'large value types out of row', 1;`.
+pub fn large_values_out_of_row(table: &str, on: bool) -> String {
+    format!("EXEC sp_tableoption {}, N'large value types out of row', {};", literal(table), u8::from(on))
 }
 
 /// `SYSTEM_VERSIONING = ON (HISTORY_TABLE = [s].[h], HISTORY_RETENTION_PERIOD = …)`; the
