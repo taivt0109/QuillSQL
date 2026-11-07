@@ -442,6 +442,10 @@ installed copies offer the update within a day.
   Compare does. Full-text and PolyBase objects, and files written by SQL Backup (`.sqb`),
   are covered by unit tests but have not been checked against a live server or real SQL Backup
   files.
+- Compare treats string literals in modules, defaults and checks as case-sensitive even when the
+  comparison is not: `'abc'` and `'ABC'` store or return different data. SQL Compare reports them
+  equal. Windows users across domains, FileTables and Stretch tables are covered by unit tests
+  only.
 - The Compare windows are in English only for now.
 - Tab colors depend on the layout of SSMS 21's document tabs and may need an update for a future
   SSMS.
