@@ -65,7 +65,7 @@ pub const FUNCTIONS: &[&str] = &[
     "VARP", "XACT_STATE", "YEAR",
 ];
 
-const DATA_TYPES: &[&str] = &[
+pub(crate) const DATA_TYPES: &[&str] = &[
     "BIGINT", "BINARY", "BIT", "CHAR", "CURSOR", "DATE", "DATETIME", "DATETIME2", "DATETIMEOFFSET",
     "DECIMAL", "FLOAT", "GEOGRAPHY", "GEOMETRY", "HIERARCHYID", "IMAGE", "INT", "MONEY", "NCHAR",
     "NTEXT", "NUMERIC", "NVARCHAR", "REAL", "ROWVERSION", "SMALLDATETIME", "SMALLINT",

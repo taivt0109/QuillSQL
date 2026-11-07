@@ -18,6 +18,8 @@ namespace QuillSql.Vsix
         private const int TimeoutMilliseconds = 5000;
         private readonly object _gate = new object();
         private Process _process;
+        /// <summary>The engine's input without a byte order mark, which would spoil the first request.</summary>
+        private StreamWriter _input;
         private BlockingCollection<string> _replies;
         private int _nextId;
 
@@ -43,7 +45,7 @@ namespace QuillSql.Vsix
                     var id = ++_nextId;
                     var line = "{\"id\":" + id + ",\"op\":" + Json.Str(op) + (string.IsNullOrEmpty(fields) ? "" : "," + fields) + "}";
                     // Writing blocks once the pipe is full, if the engine stops reading.
-                    var input = _process.StandardInput;
+                    var input = _input;
                     var sent = Task.Run(() =>
                     {
                         input.WriteLine(line);
@@ -100,6 +102,7 @@ namespace QuillSql.Vsix
                 RedirectStandardError = true,
                 StandardOutputEncoding = new UTF8Encoding(false),
             });
+            _input = new StreamWriter(_process.StandardInput.BaseStream, new UTF8Encoding(false));
             // Drain stderr so style warnings cannot fill the pipe and block the engine.
             var process = _process;
             var replies = _replies = new BlockingCollection<string>();

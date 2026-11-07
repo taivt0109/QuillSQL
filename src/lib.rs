@@ -23,6 +23,7 @@ pub mod schema;
 pub mod snippets;
 pub mod sources;
 pub mod script;
+pub mod signature;
 pub mod style;
 pub mod tools;
 pub mod transform;

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
@@ -39,6 +41,11 @@ namespace QuillSql.Vsix
         [DataMember(Name = "showSystemObjects")] public bool ShowSystemObjects { get; set; }
         [DataMember(Name = "showDefinitionBox")] public bool ShowDefinitionBox { get; set; }
         [DataMember(Name = "generateAlter")] public bool GenerateAlter { get; set; }
+        /// <summary>Prefixes left out of generated aliases, separated by commas: "tbl, vw".</summary>
+        [DataMember(Name = "ignoredPrefixes")] public string IgnoredPrefixes { get; set; }
+        /// <summary>Own aliases, one "Table = alias" a line.</summary>
+        [DataMember(Name = "ownAliases")] public string OwnAliases { get; set; }
+        [DataMember(Name = "parameterHints")] public bool ParameterHints { get; set; }
 
         // Typing
         [DataMember(Name = "closeSingleQuote")] public bool CloseSingleQuote { get; set; }
@@ -86,6 +93,9 @@ namespace QuillSql.Vsix
             ShowSystemObjects = false;
             ShowDefinitionBox = true;
             GenerateAlter = true;
+            IgnoredPrefixes = "tbl, vw, tb_, t_, v_";
+            OwnAliases = "";
+            ParameterHints = true;
             CloseSingleQuote = true;
             CloseSquareBracket = true;
             CloseParenthesis = false;
@@ -164,6 +174,24 @@ namespace QuillSql.Vsix
         /// <summary>The suggestion choices the engine applies, as a JSON object.</summary>
         public string CompletionOptionsJson() =>
             "{\"assignAliases\":" + Json.Bool(AssignAliases) + ",\"aliasWithAs\":" + Json.Bool(AliasWithAs)
-            + ",\"qualifyObjectNames\":" + Json.Bool(QualifyObjectNames) + ",\"showSystemObjects\":" + Json.Bool(ShowSystemObjects) + "}";
+            + ",\"qualifyObjectNames\":" + Json.Bool(QualifyObjectNames) + ",\"showSystemObjects\":" + Json.Bool(ShowSystemObjects)
+            + ",\"ignoredPrefixes\":[" + string.Join(",", (IgnoredPrefixes ?? "").Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(Json.Str)) + "]"
+            + ",\"aliases\":{" + string.Join(",", OwnAliasPairs().Select(p => Json.Str(p.Key) + ":" + Json.Str(p.Value))) + "}}";
+
+        /// <summary>The own aliases as table name → alias, from lines such as "Customers = cu".</summary>
+        public IEnumerable<KeyValuePair<string, string>> OwnAliasPairs()
+        {
+            foreach (var line in (OwnAliases ?? "").Split('\n'))
+            {
+                var eq = line.IndexOf('=');
+                var table = eq < 0 ? "" : line.Substring(0, eq).Trim().Trim('[', ']');
+                var alias = eq < 0 ? "" : line.Substring(eq + 1).Trim();
+                if (table.Length > 0 && alias.Length > 0)
+                {
+                    // `dbo.Customers` and `Customers` both name the table.
+                    yield return new KeyValuePair<string, string>(table.Substring(table.LastIndexOf('.') + 1).Trim('[', ']'), alias);
+                }
+            }
+        }
     }
 }

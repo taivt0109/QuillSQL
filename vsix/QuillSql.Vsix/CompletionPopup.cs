@@ -96,6 +96,8 @@ namespace QuillSql.Vsix
 
         public IEnumerable<string> Labels => _list.Items.Cast<Row>().Select(r => r.Item.Label);
 
+        public IEnumerable<CompletionItem> Items => _list.Items.Cast<Row>().Select(r => r.Item);
+
         /// <summary>A row: colored kind badge, the name, then the detail dimmed at the right.</summary>
         private static DataTemplate BuildTemplate()
         {
@@ -147,13 +149,15 @@ namespace QuillSql.Vsix
             _definition.Visibility = string.IsNullOrEmpty(info) ? Visibility.Collapsed : Visibility.Visible;
         }
 
-        public void Show(IList<CompletionItem> items, IntPtr window, int screenX, int screenY, bool showDefinition)
+        /// <summary>Opens the list with `select` selected, or nothing selected when it is -1.</summary>
+        public void Show(IList<CompletionItem> items, IntPtr window, int screenX, int screenY, bool showDefinition, int select)
         {
             _showDefinition = showDefinition;
             var rows = items.Select(i => new Row(i)).ToList();
             _list.ItemsSource = rows;
-            _list.SelectedIndex = 0;
-            _list.ScrollIntoView(_list.SelectedItem);
+            _list.SelectedIndex = Math.Min(select, rows.Count - 1);
+            _list.ScrollIntoView(_list.SelectedIndex >= 0 ? _list.SelectedItem : rows.FirstOrDefault());
+            UpdateDefinition();
             // Popup offsets are device-independent; the editor reports physical pixels.
             var scale = GetDpiForWindow(window) / 96.0;
             if (scale <= 0)
@@ -171,7 +175,8 @@ namespace QuillSql.Vsix
             {
                 return;
             }
-            var index = Math.Max(0, Math.Min(_list.Items.Count - 1, _list.SelectedIndex + delta));
+            // From no selection, the arrows start at the first item.
+            var index = _list.SelectedIndex < 0 ? 0 : Math.Max(0, Math.Min(_list.Items.Count - 1, _list.SelectedIndex + delta));
             _list.SelectedIndex = index;
             _list.ScrollIntoView(_list.SelectedItem);
         }
@@ -218,6 +223,10 @@ namespace QuillSql.Vsix
                         case "join": case "join_guess": return "⋈";
                         case "body": return "…";
                         case "parameter": return "@";
+                        case "picker": return "☑";
+                        case "type": return "Ty";
+                        case "database": return "DB";
+                        case "server": return "LS";
                         default: return "K";
                     }
                 }
@@ -231,12 +240,12 @@ namespace QuillSql.Vsix
                     {
                         case "table": case "table_function": case "cte": case "synonym": return Table;
                         case "view": return View;
-                        case "column": return Column;
+                        case "column": case "picker": return Column;
                         case "procedure": case "function": return Routine;
                         case "variable": case "global_variable": case "parameter": return Variable;
                         case "snippet": case "body": return Snippet;
                         case "join": case "join_guess": return Join;
-                        case "schema": case "alias": return Name;
+                        case "schema": case "alias": case "database": case "server": case "type": return Name;
                         default: return Keyword;
                     }
                 }

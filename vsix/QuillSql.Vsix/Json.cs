@@ -64,6 +64,8 @@ namespace QuillSql.Vsix
     {
         [DataMember(Name = "start")] public int Start { get; set; }
         [DataMember(Name = "items")] public CompletionItem[] Items { get; set; }
+        /// <summary>The item to select as the list opens, when what was typed matches it for sure.</summary>
+        [DataMember(Name = "selected")] public int? Selected { get; set; }
     }
 
     [DataContract]
@@ -75,6 +77,23 @@ namespace QuillSql.Vsix
         [DataMember(Name = "detail")] public string Detail { get; set; }
         /// <summary>A description of a database object, shown next to the list.</summary>
         [DataMember(Name = "info")] public string Info { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class SignatureReply
+    {
+        [DataMember(Name = "error")] public string Error { get; set; }
+        [DataMember(Name = "result")] public SignatureResult Result { get; set; }
+    }
+
+    /// <summary>The function or procedure whose arguments the caret is in.</summary>
+    [DataContract]
+    internal sealed class SignatureResult
+    {
+        [DataMember(Name = "name")] public string Name { get; set; }
+        [DataMember(Name = "params")] public string[] Params { get; set; }
+        [DataMember(Name = "active")] public int Active { get; set; }
+        [DataMember(Name = "returns")] public string Returns { get; set; }
     }
 
     [DataContract]

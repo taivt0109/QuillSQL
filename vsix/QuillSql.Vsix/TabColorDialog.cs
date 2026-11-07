@@ -123,7 +123,7 @@ namespace QuillSql.Vsix
             labelRow.Children.Add(label);
             panel.Children.Add(colorRow);
             panel.Children.Add(labelRow);
-            panel.Children.Add(new TextBlock { Text = Loc.T("The label shows in the bar above the editor. Other rules are in Options > Tab colors."), Opacity = 0.65, FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
+            panel.Children.Add(new TextBlock { Text = Loc.T("The label names the environment in AI Chat. Other rules are in Options > Tab colors."), Opacity = 0.65, FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) });
 
             void scopeChanged()
             {

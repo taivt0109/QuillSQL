@@ -36,7 +36,12 @@ JOIN sys.objects pt ON pt.object_id = fk.parent_object_id
 JOIN sys.objects rt ON rt.object_id = fk.referenced_object_id
 JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
 JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
-ORDER BY fk.object_id, fkc.constraint_column_id;";
+ORDER BY fk.object_id, fkc.constraint_column_id;
+SELECT name FROM sys.servers WHERE is_linked = 1 ORDER BY name;";
+
+        /// <summary>The databases on each connection's server, by connection key, once its metadata is read.</summary>
+        public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<string>> Databases =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, List<string>>();
 
         private sealed class ForeignKey
         {
@@ -86,17 +91,18 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
         private static string Bool(bool value) => value ? "true" : "false";
 
         /// <summary>Returns the engine's schema JSON and the number of objects read.</summary>
-        public static string Load(string connectionString, out int objectCount)
+        public static string Load(ConnectionTarget target, out int objectCount)
         {
             var objects = new Dictionary<int, DbObject>();
             var keys = new Dictionary<int, ForeignKey>();
             var schemas = new List<string>();
             var databases = new List<string>();
+            var linked = new List<string>();
             string database = "", defaultSchema = "dbo";
 
             var watch = System.Diagnostics.Stopwatch.StartNew();
             long opened, executed;
-            using (var connection = new SqlConnection(connectionString))
+            using (var connection = target.CreateConnection())
             using (var command = new SqlCommand(Query, connection) { CommandTimeout = 60 })
             {
                 connection.Open();
@@ -148,15 +154,19 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
                         key.Columns.Add(Json.Str(r.GetString(5)));
                         key.RefColumns.Add(Json.Str(r.GetString(6)));
                     }
+                    r.NextResult();
+                    while (r.Read()) linked.Add(r.GetString(0));
                 }
             }
 
+            Databases[target.Key] = databases;
             Log.Write("metadata query: connected in " + opened + " ms, first rows at " + executed + " ms, read all by " + watch.ElapsedMilliseconds + " ms");
             var sb = new StringBuilder();
             sb.Append("{\"database\":").Append(Json.Str(database))
               .Append(",\"defaultSchema\":").Append(Json.Str(defaultSchema))
               .Append(",\"schemas\":[").Append(string.Join(",", schemas.ConvertAll(Json.Str))).Append(']')
               .Append(",\"databases\":[").Append(string.Join(",", databases.ConvertAll(Json.Str))).Append(']')
+              .Append(",\"linkedServers\":[").Append(string.Join(",", linked.ConvertAll(Json.Str))).Append(']')
               .Append(",\"objects\":[");
             var first = true;
             foreach (var o in objects.Values)
@@ -188,14 +198,24 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
         }
     }
 
-    /// <summary>Loads each connection's metadata once, in the background.</summary>
+    /// <summary>
+    /// Loads each connection's metadata in the background, and loads it again when the objects of the
+    /// database change: checked at most once a minute while suggestions are asked for, or at once on
+    /// Ctrl+Space. The metadata already loaded keeps serving until the new one is in.
+    /// </summary>
     internal static class MetadataCache
     {
+        private const string StampQuery = @"SELECT ISNULL(CONVERT(varchar(33), MAX(modify_date), 126), '') + '|' + CONVERT(varchar(12), COUNT(*))
+FROM sys.objects WHERE is_ms_shipped = 0;";
+        private static readonly TimeSpan CheckEvery = TimeSpan.FromSeconds(60);
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, string> State = new Dictionary<string, string>();
+        private static readonly Dictionary<string, string> Stamps = new Dictionary<string, string>();
+        private static readonly Dictionary<string, DateTime> Checked = new Dictionary<string, DateTime>();
+        private static readonly HashSet<string> Checking = new HashSet<string>();
 
         /// <summary>Starts loading if needed; returns true once the engine has the metadata.</summary>
-        public static bool EnsureLoaded(ConnectionTarget target)
+        public static bool EnsureLoaded(ConnectionTarget target, bool checkNow = false)
         {
             if (!target.CanQuery)
             {
@@ -205,44 +225,104 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
             {
                 if (State.TryGetValue(target.Key, out var state))
                 {
+                    if (state == "loaded")
+                    {
+                        if (!Checking.Contains(target.Key) && (checkNow || !Checked.TryGetValue(target.Key, out var at) || DateTime.UtcNow - at > CheckEvery))
+                        {
+                            Checking.Add(target.Key);
+                            Checked[target.Key] = DateTime.UtcNow;
+                            _ = System.Threading.Tasks.Task.Run(() => CheckForChanges(target));
+                        }
+                        return true;
+                    }
                     // After a failure, wait before trying the server again.
                     if (!(state.StartsWith("failed:") && DateTime.UtcNow.Ticks - long.Parse(state.Substring(7)) > TimeSpan.FromSeconds(30).Ticks))
                     {
-                        return state == "loaded";
+                        return false;
                     }
                 }
                 State[target.Key] = "loading";
             }
             _ = System.Threading.Tasks.Task.Run(() =>
             {
-                var result = "failed";
-                try
-                {
-                    var started = DateTime.Now;
-                    var schema = MetadataLoader.Load(target.ConnectionString, out var count);
-                    var loadedAt = DateTime.Now;
-                    var reply = EngineProcess.Shared.Request("load", "\"key\":" + Json.Str(target.Key) + ",\"schema\":" + schema);
-                    var error = reply == null ? "no reply" : Json.Parse<ErrorOnlyReply>(reply)?.Error;
-                    if (error == null)
-                    {
-                        result = "loaded";
-                        Log.Write("metadata for " + target.Description + ": " + count + " objects in " + (int)(DateTime.Now - started).TotalMilliseconds + " ms (engine took " + (int)(DateTime.Now - loadedAt).TotalMilliseconds + " ms)");
-                    }
-                    else
-                    {
-                        Log.Write("engine rejected metadata: " + error);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log.Error("loading metadata for " + target.Description, ex);
-                }
+                var loaded = Load(target);
                 lock (Gate)
                 {
-                    State[target.Key] = result == "loaded" ? result : "failed:" + DateTime.UtcNow.Ticks;
+                    State[target.Key] = loaded ? "loaded" : "failed:" + DateTime.UtcNow.Ticks;
+                    Checked[target.Key] = DateTime.UtcNow;
                 }
             });
             return false;
+        }
+
+        private static bool Load(ConnectionTarget target)
+        {
+            try
+            {
+                var started = DateTime.Now;
+                // Read before the metadata, so a change made while it loads is seen by the next check.
+                var stamp = Stamp(target);
+                var schema = MetadataLoader.Load(target, out var count);
+                var loadedAt = DateTime.Now;
+                var reply = EngineProcess.Shared.Request("load", "\"key\":" + Json.Str(target.Key) + ",\"schema\":" + schema);
+                var error = reply == null ? "no reply" : Json.Parse<ErrorOnlyReply>(reply)?.Error;
+                if (error != null)
+                {
+                    Log.Write("engine rejected metadata: " + error);
+                    return false;
+                }
+                lock (Gate)
+                {
+                    Stamps[target.Key] = stamp;
+                }
+                Log.Write("metadata for " + target.Description + ": " + count + " objects in " + (int)(DateTime.Now - started).TotalMilliseconds + " ms (engine took " + (int)(DateTime.Now - loadedAt).TotalMilliseconds + " ms)");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("loading metadata for " + target.Description, ex);
+                return false;
+            }
+        }
+
+        private static void CheckForChanges(ConnectionTarget target)
+        {
+            try
+            {
+                var stamp = Stamp(target);
+                string known;
+                lock (Gate)
+                {
+                    Stamps.TryGetValue(target.Key, out known);
+                }
+                if (stamp != known)
+                {
+                    Log.Write("objects changed on " + target.Description + ": reloading suggestions");
+                    Load(target);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Verbose("checking " + target.Description + " for changes: " + ex.Message);
+            }
+            finally
+            {
+                lock (Gate)
+                {
+                    Checking.Remove(target.Key);
+                }
+            }
+        }
+
+        /// <summary>The latest change and the number of the database's objects: any CREATE, ALTER or DROP moves it.</summary>
+        private static string Stamp(ConnectionTarget target)
+        {
+            using (var connection = target.CreateConnection())
+            using (var command = new SqlCommand(StampQuery, connection) { CommandTimeout = 15 })
+            {
+                connection.Open();
+                return command.ExecuteScalar() as string;
+            }
         }
 
         public static void Clear()
@@ -250,6 +330,8 @@ ORDER BY fk.object_id, fkc.constraint_column_id;";
             lock (Gate)
             {
                 State.Clear();
+                Stamps.Clear();
+                Checked.Clear();
             }
         }
     }
