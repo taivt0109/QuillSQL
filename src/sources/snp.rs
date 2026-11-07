@@ -109,9 +109,9 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     if !c.null_member() {
         s.xml_blobs = c.blob_store()?.0;
     }
-    c.member(Cur::assembly)?;
+    s.assemblies = c.member(Cur::assembly)?;
     if !c.null_member() {
-        c.dependencies()?;
+        s.assembly_references = c.dependencies()?;
     }
     s.synonyms = c.member(Cur::synonym)?;
     s.xml_schema_collections = c.member(Cur::xml_schema_collection)?;
@@ -158,7 +158,7 @@ struct Snap {
     functions: Vec<RawModule>,
     procedures: Vec<RawModule>,
     views: Vec<RawView>,
-    types: Vec<UserType>,
+    types: Vec<Raw<UserType>>,
     users: Vec<RawUser>,
     roles: Vec<RawRole>,
     schemas: Vec<RawSchema>,
@@ -180,6 +180,9 @@ struct Snap {
     xml_schema_collections: Vec<(Raw<XmlSchemaCollection>, i32)>,
     xml_blobs: HashMap<u64, Vec<u8>>,
     assembly_blobs: HashMap<u64, Vec<u8>>,
+    /// Assemblies with the blob ids of their files.
+    assemblies: Vec<(Raw<Assembly>, Vec<u64>)>,
+    assembly_references: Vec<(u8, String, u8, String)>,
     dependencies: Vec<(u8, String, u8, String)>,
     props: Vec<RawProp>,
     /// Comments blob store: module and default text by id.
@@ -276,10 +279,29 @@ struct Raw<T> {
 
 #[derive(Default)]
 struct RawParam {
+    name: String,
     size: i32,
     scale: i32,
     precision: i32,
     type_name: String,
+    type_schema: String,
+    default: Option<String>,
+    output: bool,
+}
+
+impl RawParam {
+    /// The type as written in DDL: `nvarchar(50)`, `[dbo].[Point]`.
+    fn type_sql(&self) -> String {
+        if is_user_schema(&self.type_schema) {
+            DataType { name: self.type_name.clone(), schema: Some(self.type_schema.clone()), ..Default::default() }.sql()
+        } else {
+            system_type(&self.type_name, self.size, self.precision, self.scale).sql()
+        }
+    }
+
+    fn parameter(&self) -> Parameter {
+        Parameter { name: self.name.clone(), data_type: self.type_sql(), output: self.output, default: self.default.clone() }
+    }
 }
 
 struct RawDdlTrigger {
@@ -1247,22 +1269,22 @@ impl Cur<'_> {
     fn param(&mut self) -> R<RawParam> {
         let v = self.f32()?;
         self.i32()?;
-        self.str()?;
-        let mut p = RawParam::default();
+        let mut p = RawParam { name: self.s()?, ..Default::default() };
         if v >= 4.0 {
             (p.size, p.scale, p.precision) = (self.i32()?, self.i32()?, self.i32()?);
             p.type_name = self.s()?;
             if v >= 6.0 {
-                self.str()?;
+                p.type_schema = self.s()?;
             }
-            self.bool()?;
-            self.str()?;
-            self.bool()?;
-            self.bool()?;
+            let has_default = self.bool()?;
+            let default = self.str()?;
+            p.default = default.filter(|_| has_default);
+            p.output = self.bool()?;
+            self.bool()?; // XML document
             if v < 13.7912 {
                 self.str()?;
             }
-            self.str()?;
+            self.str()?; // XML schema collection
         }
         if v >= 13.63 {
             self.str()?;
@@ -1304,20 +1326,21 @@ impl Cur<'_> {
             for b in &mut binding {
                 *b = self.s()?;
             }
-            if self.i32()? > 0 {
-                self.coll(Cur::field)?;
-            }
+            let result_columns = if self.i32()? > 0 { self.coll(Cur::field)? } else { Vec::new() };
             clr = self.bool()?;
-            self.params()?;
-            if self.bool()? {
-                self.param()?;
+            let params = self.params()?;
+            let returns = if self.bool()? { Some(self.param()?) } else { None };
+            if clr || function_type == 4 {
+                r.parameters = params.iter().map(RawParam::parameter).collect();
+                r.returns = returns.filter(|_| result_columns.is_empty()).map(|p| p.type_sql());
+                r.result_columns = result_columns.iter().enumerate().map(|(i, f)| column(f, i + 1)).collect();
             }
         }
         if v >= 4.1 {
-            self.bool()?;
+            self.bool()?; // system object
         }
         if v >= 4.2 {
-            self.bool()?;
+            r.null_on_null_input = self.bool()?;
         }
         if v >= 7.0 {
             self.str()?;
@@ -1345,7 +1368,8 @@ impl Cur<'_> {
             (false, _) => RoutineKind::ScalarFunction,
         };
         if clr || function_type == 4 {
-            r.clr_method = Some(binding.iter().map(|b| quote(b)).collect::<Vec<_>>().join("."));
+            // Aggregates name only the assembly and the class.
+            r.clr_method = Some(clr_method(&binding));
         } else {
             r.settings = settings;
         }
@@ -1383,7 +1407,10 @@ impl Cur<'_> {
                 clr = self.bool()?;
                 r.encrypted = self.bool()?;
             }
-            self.params()?;
+            let params = self.params()?;
+            if clr {
+                r.parameters = params.iter().map(RawParam::parameter).collect();
+            }
         }
         if (5.3..6.2).contains(&v) {
             self.bool()?;
@@ -1406,7 +1433,7 @@ impl Cur<'_> {
         }
         if clr {
             r.kind = RoutineKind::ClrProcedure;
-            r.clr_method = Some(binding.iter().map(|b| quote(b)).collect::<Vec<_>>().join("."));
+            r.clr_method = Some(clr_method(&binding));
         } else {
             r.settings = settings;
         }
@@ -1475,9 +1502,10 @@ impl Cur<'_> {
         Ok(BindableObject { schema, name, definition })
     }
 
-    fn user_type(&mut self) -> R<UserType> {
+    fn user_type(&mut self) -> R<Raw<UserType>> {
         let v = self.f32()?;
         let mut ty = UserType { name: self.s()?, schema: self.s()?, ..Default::default() };
+        let mut perms = Vec::new();
         self.eprops()?;
         self.bool()?;
         ty.nullable = self.bool()?;
@@ -1511,11 +1539,11 @@ impl Cur<'_> {
                 }
                 -2 => {
                     ty.kind = UserTypeKind::Clr;
-                    ty.clr_class = Some(format!("{assembly}.{class}"));
+                    ty.clr_class = Some(format!("{}.{}", requote(&assembly), quote(&class)));
                 }
                 _ => {}
             }
-            self.perms()?;
+            perms = self.perms()?;
         }
         if ty.kind == UserTypeKind::Alias {
             ty.base_type = Some(system_type(&base, length, precision, scale));
@@ -1529,7 +1557,7 @@ impl Cur<'_> {
         if v >= 13.21 {
             self.strs()?;
         }
-        Ok(ty)
+        Ok(Raw { item: ty, perms, system: false })
     }
 
     fn synonym(&mut self) -> R<(Synonym, Vec<RawPerm>)> {
@@ -1762,32 +1790,39 @@ impl Cur<'_> {
         }
     }
 
-    fn assembly(&mut self) -> R<()> {
+    fn assembly(&mut self) -> R<(Raw<Assembly>, Vec<u64>)> {
         let versioned = self.versioned_record()?;
-        self.str()?;
-        self.str()?;
+        let mut a = Assembly { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
         self.i32()?;
-        self.bool()?;
+        self.bool()?; // case-sensitive
         self.eprops()?;
-        self.take(16)?;
-        self.str()?;
-        self.bool()?;
+        self.take(16)?; // MVID
+        a.clr_name = self.s()?;
+        a.visible = self.bool()?;
         let n = self.count()?;
+        let mut blobs = Vec::new();
         for _ in 0..n {
             let file_versioned = self.versioned_record()?;
-            self.str()?;
-            self.u64()?;
-            self.i32()?;
+            a.files.push(AssemblyFile { name: self.s()?, content: String::new() });
+            blobs.push(self.u64()?);
+            self.i32()?; // length
             if file_versioned {
                 self.ss()?;
             }
         }
-        self.i32()?;
-        self.perms()?;
+        a.permission_set = match self.i32()? {
+            2 => "EXTERNAL_ACCESS",
+            3 => "UNSAFE",
+            _ => "SAFE",
+        }
+        .into();
+        let mut perms = self.perms()?;
+        // SQL Compare drops EXECUTE on assemblies when it loads a snapshot.
+        perms.retain(|p| !p.action.eq_ignore_ascii_case("EXECUTE"));
         if versioned {
             self.sss(3)?;
         }
-        Ok(())
+        Ok((Raw { item: a, perms, system: false }, blobs))
     }
 
     fn xml_schema_collection(&mut self) -> R<(Raw<XmlSchemaCollection>, i32)> {
@@ -2324,6 +2359,17 @@ impl Snap {
         }
         db.event_notifications = std::mem::take(&mut self.event_notifications);
         db.event_notifications.sort_by(|a, b| a.name.cmp(&b.name));
+        for (a, blobs) in std::mem::take(&mut self.assemblies) {
+            let mut item = a.item;
+            perms_on("ASSEMBLY", None, &item.name, &a.perms);
+            for (f, id) in item.files.iter_mut().zip(blobs) {
+                f.content = self.assembly_blobs.get(&id).map(|b| b.iter().map(|x| format!("{x:02X}")).collect()).unwrap_or_default();
+            }
+            let me = quote(&item.name);
+            item.references = self.assembly_references.iter().filter(|d| d.1 == me).map(|d| unquote(&d.3)).collect();
+            item.references.sort_by(|a, b| sql_order(a, b));
+            db.assemblies.push(item);
+        }
         for (x, id) in std::mem::take(&mut self.xml_schema_collections) {
             let mut item = x.item;
             perms_on("XML SCHEMA COLLECTION", Some(&item.schema), &item.name, &x.perms);
@@ -2339,7 +2385,10 @@ impl Snap {
             perms_on("OBJECT", Some(&syn.schema), &syn.name, &perms);
             db.synonyms.push(syn);
         }
-        db.types = std::mem::take(&mut self.types);
+        for t in std::mem::take(&mut self.types) {
+            perms_on("TYPE", Some(&t.item.schema), &t.item.name, &t.perms);
+            db.types.push(t.item);
+        }
         for ty in &mut db.types {
             ty.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             ty.check_constraints.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2406,10 +2455,13 @@ impl Snap {
             if named(&FIXED_ROLES, &r.name) || named(&BUILT_IN_USERS, &r.name) {
                 continue;
             }
+            // An application role's owner field holds its default schema.
+            let owner = r.owner.clone().filter(|o| !o.is_empty());
             db.principals.push(Principal {
                 name: r.name.clone(),
                 kind: if r.app_role { "APPLICATION_ROLE" } else { "DATABASE_ROLE" }.into(),
-                owner: r.owner.clone().filter(|o| !o.is_empty()),
+                owner: owner.clone().filter(|_| !r.app_role),
+                default_schema: owner.filter(|_| r.app_role),
                 ..Default::default()
             });
         }
@@ -2634,6 +2686,13 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         bound_rule: f.bound_rule.as_deref().map(requote),
         sensitivity: None,
     }
+}
+
+/// `[assembly].[class].[method]` from a binding; the assembly is stored quoted.
+fn clr_method(binding: &[String; 3]) -> String {
+    let assembly = &binding[0];
+    let assembly = if assembly.starts_with('[') && assembly.ends_with(']') { unquote(assembly) } else { assembly.clone() };
+    std::iter::once(assembly.as_str()).chain(binding[1..].iter().map(String::as_str)).filter(|b| !b.is_empty()).map(quote).collect::<Vec<_>>().join(".")
 }
 
 fn is_user_schema(schema: &str) -> bool {
