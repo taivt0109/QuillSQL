@@ -1,0 +1,553 @@
+# Known differences between quill and the Redgate tools; see README.md.
+
+[[known]]
+scenario = "*"
+oracle = "names"
+finding = "new"
+reason = "quill brackets principal, schema and DDL-trigger names in report fqn/console (role-[App], schema-[App], ddltrigger-[T]); Redgate writes them bare (role-App)"
+
+[[known]]
+scenario = "schema-dbo-grant"
+oracle = "check"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-grant"
+oracle = "converge-quill"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-grant"
+oracle = "diffset"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-grant"
+oracle = "exit"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-grant"
+oracle = "names"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-grant"
+oracle = "outcome"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so GRANT ... ON SCHEMA::dbo is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-xprop"
+oracle = "check"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-xprop"
+oracle = "converge-quill"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-xprop"
+oracle = "diffset"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-xprop"
+oracle = "exit"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-xprop"
+oracle = "names"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+
+[[known]]
+scenario = "schema-dbo-xprop"
+oracle = "outcome"
+finding = "schema-model H1"
+reason = "schema dbo is never compared, so its extended property is not seen or deployed"
+
+[[known]]
+scenario = "schema-mapped-table-rename"
+oracle = "check"
+finding = "schema-model H3"
+reason = "a mapped pair with different names is reported identical and never renamed"
+
+[[known]]
+scenario = "schema-mapped-table-rename"
+oracle = "converge-quill"
+finding = "schema-model H3"
+reason = "a mapped pair with different names is reported identical and never renamed"
+
+[[known]]
+scenario = "schema-mapped-table-rename"
+oracle = "diffset"
+finding = "schema-model H3"
+reason = "a mapped pair with different names is reported identical and never renamed"
+
+[[known]]
+scenario = "schema-mapped-table-rename"
+oracle = "exit"
+finding = "schema-model H3"
+reason = "a mapped pair with different names is reported identical and never renamed"
+
+[[known]]
+scenario = "schema-mapped-table-rename"
+oracle = "names"
+finding = "schema-model H3"
+reason = "a mapped pair with different names is reported identical and never renamed"
+
+[[known]]
+scenario = "schema-mapped-table-rename"
+oracle = "converge-redgate"
+finding = "new"
+reason = "after Redgate renamed the target, quill keeps the project's stale mapping Client->Customer and reports Client as only in 1 and only in 2 instead of pairing by name"
+
+[[known]]
+scenario = "schema-refreshview"
+oracle = "check"
+finding = "schema-deploy H2"
+reason = "SELECT * views (direct and through a synonym) are not refreshed with sp_refreshview after the table gains a column"
+
+[[known]]
+scenario = "schema-view-chain"
+oracle = "check"
+finding = "schema-deploy H2"
+reason = "V2 (SELECT * FROM V1) is not refreshed after V1 is altered"
+
+[[known]]
+scenario = "schema-staticdata"
+oracle = "check"
+finding = "sources-cli H4"
+reason = "/include:StaticData does nothing: no data comparison, exit 63 instead of 0, lookup rows not deployed"
+
+[[known]]
+scenario = "schema-staticdata"
+oracle = "converge-quill"
+finding = "sources-cli H4"
+reason = "/include:StaticData does nothing: no data comparison, exit 63 instead of 0, lookup rows not deployed"
+
+[[known]]
+scenario = "schema-staticdata"
+oracle = "exit"
+finding = "sources-cli H4"
+reason = "/include:StaticData does nothing: no data comparison, exit 63 instead of 0, lookup rows not deployed"
+
+[[known]]
+scenario = "schema-columnstore"
+oracle = "check"
+finding = "new"
+reason = "deploying a nonclustered columnstore index writes CREATE NONCLUSTERED COLUMNSTORE INDEX without its column list; SQL Server rejects it (error 35336)"
+
+[[known]]
+scenario = "schema-columnstore"
+oracle = "converge-quill"
+finding = "new"
+reason = "deploying a nonclustered columnstore index writes CREATE NONCLUSTERED COLUMNSTORE INDEX without its column list; SQL Server rejects it (error 35336)"
+
+[[known]]
+scenario = "schema-columnstore"
+oracle = "outcome"
+finding = "new"
+reason = "deploying a nonclustered columnstore index writes CREATE NONCLUSTERED COLUMNSTORE INDEX without its column list; SQL Server rejects it (error 35336)"
+
+[[known]]
+scenario = "schema-temporal"
+oracle = "check"
+finding = "new"
+reason = "rebuilding a plain table into a system-versioned one copies rows without the period columns, so the INSERT into the rebuild table fails on NULL ValidFrom"
+
+[[known]]
+scenario = "schema-temporal"
+oracle = "converge-quill"
+finding = "new"
+reason = "rebuilding a plain table into a system-versioned one copies rows without the period columns, so the INSERT into the rebuild table fails on NULL ValidFrom"
+
+[[known]]
+scenario = "schema-temporal"
+oracle = "outcome"
+finding = "new"
+reason = "rebuilding a plain table into a system-versioned one copies rows without the period columns, so the INSERT into the rebuild table fails on NULL ValidFrom"
+
+[[known]]
+scenario = "schema-type-changes"
+oracle = "check"
+finding = "new"
+reason = "varchar(20) -> nvarchar(30) loses the column's data (NULL after deployment); Redgate keeps it"
+
+[[known]]
+scenario = "schema-type-changes"
+oracle = "warnings"
+finding = "new"
+reason = "quill warns 'cannot be cast ... The script may fail' (High) and 'table must be rebuilt' (Medium) for varchar->nvarchar; Redgate gives no warning and alters in place"
+
+[[known]]
+scenario = "schema-schemabound-view"
+oracle = "warnings"
+finding = "new"
+reason = "Redgate warns (Medium) that the schema-bound view will have its schemabinding dropped and reapplied; quill gives no warning"
+
+[[known]]
+scenario = "schema-security"
+oracle = "diffset"
+finding = "new"
+reason = "quill reports user Loader as different because its role membership differs; Redgate attributes membership to the role only"
+
+[[known]]
+scenario = "schema-triggers"
+oracle = "converge-redgate"
+finding = "new"
+reason = "quill compares the trigger text literally: Redgate deploys CREATE TRIGGER [dbo].[T_Ins] ON [dbo].[T] and quill then reports the table different from the source text CREATE TRIGGER dbo.T_Ins ON dbo.T"
+
+[[known]]
+scenario = "schema-empty-target"
+oracle = "converge-redgate"
+finding = "new"
+reason = "same as schema-triggers: bracketed trigger header written by Redgate makes quill report the table different"
+
+[[known]]
+scenario = "data-views-backup"
+oracle = "diffset"
+finding = "data H1"
+reason = "indexed view is compared when database 1 is a backup; Redgate excludes views from non-live comparisons"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "check"
+finding = "data H2"
+reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "converge-quill"
+finding = "data H2"
+reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "converge-redgate"
+finding = "data H2"
+reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "diffset"
+finding = "data H2"
+reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "exit"
+finding = "data H2"
+reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "outcome"
+finding = "data H2"
+reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
+
+[[known]]
+scenario = "data-mot-backup"
+oracle = "warnings"
+finding = "new"
+reason = "quill prints 'not compared: no primary key or unique index' warnings Redgate does not print"
+
+[[known]]
+scenario = "data-where-scripts"
+oracle = "check"
+finding = "data H3"
+reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
+
+[[known]]
+scenario = "data-where-scripts"
+oracle = "converge-quill"
+finding = "data H3"
+reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
+
+[[known]]
+scenario = "data-where-scripts"
+oracle = "converge-redgate"
+finding = "data H3"
+reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
+
+[[known]]
+scenario = "data-where-scripts"
+oracle = "diffset"
+finding = "data H3"
+reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
+
+[[known]]
+scenario = "data-where-scripts"
+oracle = "exit"
+finding = "data H3"
+reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
+
+[[known]]
+scenario = "data-where-scripts"
+oracle = "outcome"
+finding = "data H3"
+reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
+
+[[known]]
+scenario = "data-where-live"
+oracle = "check"
+finding = "new"
+reason = "quill ignores Set*WhereClause actions whose TableName is Redgate's pair form [dbo].[Orders]:[dbo].[Orders] (the form Redgate needs), so the whole table is compared and deployed"
+
+[[known]]
+scenario = "data-where-live"
+oracle = "converge-redgate"
+finding = "new"
+reason = "quill ignores Set*WhereClause actions whose TableName is Redgate's pair form [dbo].[Orders]:[dbo].[Orders] (the form Redgate needs), so the whole table is compared and deployed"
+
+[[known]]
+scenario = "data-where-live"
+oracle = "diffset"
+finding = "new"
+reason = "quill ignores Set*WhereClause actions whose TableName is Redgate's pair form [dbo].[Orders]:[dbo].[Orders] (the form Redgate needs), so the whole table is compared and deployed"
+
+[[known]]
+scenario = "data-project-where-excludecolumns"
+oracle = "check"
+finding = "data H5"
+reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
+
+[[known]]
+scenario = "data-project-where-excludecolumns"
+oracle = "converge-redgate"
+finding = "data H5"
+reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
+
+[[known]]
+scenario = "data-project-where-excludecolumns"
+oracle = "diffset"
+finding = "data H5"
+reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
+
+[[known]]
+scenario = "data-project-where-excludecolumns"
+oracle = "outcome"
+finding = "data H5"
+reason = "project WHERE clauses lost (here also because of the pair-form TableName, see data-where-live); rows outside the filter are deployed"
+
+[[known]]
+scenario = "data-sdc-sessionsettings"
+oracle = "check"
+finding = "data H6, sources-cli H2"
+reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
+
+[[known]]
+scenario = "data-sdc-sessionsettings"
+oracle = "converge-redgate"
+finding = "data H6, sources-cli H2"
+reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
+
+[[known]]
+scenario = "data-sdc-sessionsettings"
+oracle = "diffset"
+finding = "data H6, sources-cli H2"
+reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
+
+[[known]]
+scenario = "data-sdc-sessionsettings"
+oracle = "outcome"
+finding = "data H6, sources-cli H2"
+reason = "SessionSettings bits 2/4/8 are ignored: rows only in database 2 are deleted although the project leaves them out"
+
+[[known]]
+scenario = "data-sdc-deselectall-selectitem"
+oracle = "check"
+finding = "data H7, sources-cli H3"
+reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
+
+[[known]]
+scenario = "data-sdc-deselectall-selectitem"
+oracle = "converge-redgate"
+finding = "data H7, sources-cli H3"
+reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
+
+[[known]]
+scenario = "data-sdc-deselectall-selectitem"
+oracle = "diffset"
+finding = "data H7, sources-cli H3"
+reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
+
+[[known]]
+scenario = "data-lob-backup"
+oracle = "check"
+finding = "data H8"
+reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
+
+[[known]]
+scenario = "data-lob-backup"
+oracle = "converge-quill"
+finding = "data H8"
+reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
+
+[[known]]
+scenario = "data-lob-backup"
+oracle = "exit"
+finding = "data H8"
+reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
+
+[[known]]
+scenario = "data-lob-backup"
+oracle = "outcome"
+finding = "data H8"
+reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
+
+[[known]]
+scenario = "data-scripts-no-datafile"
+oracle = "check"
+finding = "sources-cli H1"
+reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
+
+[[known]]
+scenario = "data-scripts-no-datafile"
+oracle = "converge-redgate"
+finding = "sources-cli H1"
+reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
+
+[[known]]
+scenario = "data-scripts-no-datafile"
+oracle = "diffset"
+finding = "sources-cli H1"
+reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
+
+[[known]]
+scenario = "data-scripts-no-datafile"
+oracle = "outcome"
+finding = "sources-cli H1"
+reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
+
+[[known]]
+scenario = "data-binary-key"
+oracle = "check"
+finding = "new"
+reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
+
+[[known]]
+scenario = "data-binary-key"
+oracle = "converge-quill"
+finding = "new"
+reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
+
+[[known]]
+scenario = "data-binary-key"
+oracle = "diffset"
+finding = "new"
+reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
+
+[[known]]
+scenario = "data-binary-key"
+oracle = "outcome"
+finding = "new"
+reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
+
+[[known]]
+scenario = "data-unicode"
+oracle = "check"
+finding = "new"
+reason = "quill compares nvarchar by code points; Redgate uses the column collation, so e+combining acute = é and two different emoji (supplementary characters) are equal for Redgate"
+
+[[known]]
+scenario = "data-unicode"
+oracle = "converge-redgate"
+finding = "new"
+reason = "quill compares nvarchar by code points; Redgate uses the column collation, so e+combining acute = é and two different emoji (supplementary characters) are equal for Redgate"
+
+[[known]]
+scenario = "data-unicode"
+oracle = "diffset"
+finding = "new"
+reason = "quill compares nvarchar by code points; Redgate uses the column collation, so e+combining acute = é and two different emoji (supplementary characters) are equal for Redgate"
+
+[[known]]
+scenario = "data-type-pairs"
+oracle = "converge-quill"
+finding = "AUDIT2-BRIEF deviation"
+reason = "documented deviation: date/datetime pairs are compared by value; Redgate reports datetime vs datetime2 (and the other cross-type rows) as different"
+
+[[known]]
+scenario = "data-type-pairs"
+oracle = "diffset"
+finding = "AUDIT2-BRIEF deviation"
+reason = "documented deviation: date/datetime pairs are compared by value; Redgate reports datetime vs datetime2 (and the other cross-type rows) as different"
+
+[[known]]
+scenario = "data-missing-from-2-as-include"
+oracle = "converge-quill"
+finding = "new"
+reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
+
+[[known]]
+scenario = "data-missing-from-2-as-include"
+oracle = "converge-redgate"
+finding = "new"
+reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
+
+[[known]]
+scenario = "data-missing-from-2-as-include"
+oracle = "diffset"
+finding = "new"
+reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
+
+[[known]]
+scenario = "data-missing-from-2-as-include"
+oracle = "exit"
+finding = "new"
+reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
+
+[[known]]
+scenario = "data-missing-from-2-as-include"
+oracle = "outcome"
+finding = "new"
+reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
+
+[[known]]
+scenario = "data-missing-from-2-as-include"
+oracle = "warnings"
+finding = "new"
+reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
+
+[[known]]
+scenario = "data-no-key"
+oracle = "warnings"
+finding = "new"
+reason = "quill prints 'not compared: no primary key or unique index' warnings (plain and High); Redgate prints none"
+
+[[known]]
+scenario = "data-views-scripts"
+oracle = "warnings"
+finding = "new"
+reason = "quill prints key / unmatched-column warnings for the view from a scripts folder; Redgate prints none"
+
+[[known]]
+scenario = "data-collation-mismatch"
+oracle = "warnings"
+finding = "new"
+reason = "quill warns (High) that key collations vary; Redgate prints no warning"
+
+[[known]]
+scenario = "data-fk-cycle"
+oracle = "warnings"
+finding = "new"
+reason = "quill warns (High) about a circular dependency; Redgate prints no warning"
+
+[[known]]
+scenario = "data-temporal"
+oracle = "warnings"
+finding = "new"
+reason = "quill prints 'Excluded ValidFrom because it is GENERATED ALWAYS AS $AsRowStart' with an unfilled placeholder; Redgate prints nothing"

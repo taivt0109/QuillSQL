@@ -1,0 +1,2 @@
+kind = "data"
+about = "Memory-optimized table between live databases (baseline for data H2)"

@@ -1,0 +1,3 @@
+kind = "schema"
+about = "SELECT * views (direct and through a synonym) over a table that gains a column must be refreshed"
+finding = "schema-deploy H2"

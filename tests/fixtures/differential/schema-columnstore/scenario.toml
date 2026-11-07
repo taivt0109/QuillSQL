@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Clustered columnstore table and a nonclustered columnstore index only in db1"

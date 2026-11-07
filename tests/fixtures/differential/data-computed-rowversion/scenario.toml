@@ -1,0 +1,3 @@
+kind = "data"
+about = "Computed and rowversion columns are not deployed"
+judge_args = ['/options:None']

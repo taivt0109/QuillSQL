@@ -1,0 +1,4 @@
+kind = "data"
+about = "Scripts folder as database 1: a table empty in db1 (no data script) has rows in db2"
+finding = "sources-cli H1"
+source = "scripts"

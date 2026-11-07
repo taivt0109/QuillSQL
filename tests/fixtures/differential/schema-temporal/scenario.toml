@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Table becomes system-versioned with a history table"

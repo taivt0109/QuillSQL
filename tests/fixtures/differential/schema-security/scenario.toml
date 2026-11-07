@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Schema with a table, role with members, users without login, object permissions"

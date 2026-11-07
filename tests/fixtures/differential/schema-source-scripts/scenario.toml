@@ -1,0 +1,3 @@
+kind = "schema"
+about = "Mixed objects, database 1 is a scripts"
+source = "scripts"

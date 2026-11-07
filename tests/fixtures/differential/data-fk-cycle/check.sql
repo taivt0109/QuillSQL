@@ -1,0 +1,1 @@
+SELECT 'A' t, * FROM dbo.A UNION ALL SELECT 'B', * FROM dbo.B ORDER BY 1, 2

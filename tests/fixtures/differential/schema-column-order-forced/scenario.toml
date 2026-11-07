@@ -1,0 +1,3 @@
+kind = "schema"
+about = "Same columns in another order with /options:Default,ForceColumnOrder"
+args = ['/options:Default,ForceColumnOrder']

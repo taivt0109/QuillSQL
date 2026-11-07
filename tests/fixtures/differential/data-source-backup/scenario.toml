@@ -1,0 +1,3 @@
+kind = "data"
+about = "Database 1 is a backup: two tables with all row kinds"
+source = "backup"

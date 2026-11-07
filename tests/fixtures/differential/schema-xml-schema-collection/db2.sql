@@ -1,0 +1,3 @@
+CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, X xml NULL)
+GO
+INSERT dbo.T VALUES (1, N'<doc>a</doc>')

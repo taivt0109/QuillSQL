@@ -1,0 +1,3 @@
+CREATE TABLE dbo.Order_Line (Id int NOT NULL CONSTRAINT PK_OL PRIMARY KEY, V int)
+GO
+INSERT dbo.Order_Line VALUES (1, 1)

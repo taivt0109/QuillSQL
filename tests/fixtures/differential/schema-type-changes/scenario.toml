@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Column types change: int to bigint, varchar to nvarchar, decimal precision, date to datetime2"

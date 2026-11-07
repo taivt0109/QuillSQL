@@ -1,0 +1,3 @@
+kind = "data"
+about = "/includeColumns compares only the named columns"
+args = ['/includeColumns:dbo.E:Id,Name']

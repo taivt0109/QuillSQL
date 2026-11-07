@@ -1,0 +1,4 @@
+kind = "data"
+about = "/exclude:Additional leaves rows only in database 2 alone"
+args = ['/exclude:Additional']
+oracles = ["outcome", "check", "diffset", "warnings", "exit"]

@@ -1,0 +1,4 @@
+kind = "schema"
+about = "/assertidentical on databases that differ"
+args = ['/assertidentical']
+oracles = ["exit", "diffset", "names", "warnings"]

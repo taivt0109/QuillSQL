@@ -1,0 +1,3 @@
+kind = "data"
+about = "Floats beyond 15 digits with /options:Default,UseFullPrecisionForComparison"
+args = ['/options:Default,UseFullPrecisionForComparison']

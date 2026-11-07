@@ -1,0 +1,1 @@
+SELECT * FROM dbo.B ORDER BY K

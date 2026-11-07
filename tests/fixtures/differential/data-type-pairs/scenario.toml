@@ -1,0 +1,2 @@
+kind = "data"
+about = "Same column with different types on each side: int/bigint, varchar/nvarchar, datetime/datetime2, decimal scales"

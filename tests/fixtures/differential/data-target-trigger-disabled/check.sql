@@ -1,0 +1,2 @@
+SELECT * FROM dbo.T ORDER BY Id
+SELECT COUNT(*) FROM dbo.Log

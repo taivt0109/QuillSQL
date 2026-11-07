@@ -1,0 +1,2 @@
+kind = "schema"
+about = "CREATE RULE and CREATE DEFAULT bound to a column only in db1"

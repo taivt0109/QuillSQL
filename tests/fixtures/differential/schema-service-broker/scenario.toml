@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Message type, contract, queue and service only in db1"

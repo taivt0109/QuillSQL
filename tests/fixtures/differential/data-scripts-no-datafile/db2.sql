@@ -1,0 +1,6 @@
+CREATE TABLE dbo.Filled (Id int NOT NULL CONSTRAINT PK_Filled PRIMARY KEY, V int)
+GO
+CREATE TABLE dbo.Empty (Id int NOT NULL CONSTRAINT PK_Empty PRIMARY KEY, V int)
+GO
+INSERT dbo.Filled VALUES (1, 5)
+INSERT dbo.Empty VALUES (1, 1), (2, 2)
