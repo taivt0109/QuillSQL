@@ -111,6 +111,8 @@ mod rc {
     pub const ROLE_OWNER: i64 = 51;
     pub const CONSTRAINT_TO_INDEX: i64 = 93;
     pub const TEMPORAL_HISTORY: i64 = 112;
+    pub const MODULE_TO_ASSEMBLY: i64 = 11;
+    pub const TYPE_TO_ASSEMBLY: i64 = 38;
     pub const SECURITY_PREDICATE: i64 = 11;
     pub const EDGE_CONSTRAINT: i64 = 28;
     pub const SCHEME_FUNCTION: i64 = 31;
@@ -132,6 +134,7 @@ mod vc {
     pub const RETENTION: i64 = 123;
     pub const STATS_FILTER: i64 = 67;
     pub const PARTITION_BOUNDARY: i64 = 30;
+    pub const ASSEMBLY_ENTRY: i64 = 11;
     pub const TESSELLATION: i64 = 92;
     pub const PREDICATE: i64 = 112;
     pub const GRAPH_TYPE: i64 = 128;
@@ -363,7 +366,16 @@ impl Builder<'_> {
                         }
                     }
                 }
-                240 => ty.kind = UserTypeKind::Clr,
+                240 => {
+                    ty.kind = UserTypeKind::Clr;
+                    let id = t.int("id");
+                    if let Some(asm) = self.single_ref(rc::TYPE_TO_ASSEMBLY, id, 0).map(|r| r.int("indepid")) {
+                        let class = self.cat.system("sysbinsubobjs").into_iter().find(|b| b.int("class") == 11 && b.int("idmajor") == asm && b.int("subid") == id).map(|b| b.str("name"));
+                        if let (Some(a), Some(c)) = (self.assembly_name(asm), class) {
+                            ty.clr_class = Some(format!("{}.{}", crate::db::quote(&a), crate::db::quote(&c)));
+                        }
+                    }
+                }
                 x => ty.base_type = Some(self.data_type(x, x, t.int("length"), t.int("prec"), t.int("scale"))),
             }
             types.push(ty);
@@ -765,6 +777,38 @@ impl Builder<'_> {
         }
     }
 
+    fn assembly_name(&self, id: i64) -> Option<String> {
+        self.cat.system("sysclsobjs").into_iter().find(|r| r.int("class") == 10 && r.int("id") == id).map(|r| r.str("name"))
+    }
+
+    /// `[assembly].[class].[method]` of a CLR module (no method for an aggregate).
+    fn clr_method(&self, id: i32) -> Option<String> {
+        let asm = self.assembly_name(self.single_ref(rc::MODULE_TO_ASSEMBLY, id as i64, 0)?.int("indepid"))?;
+        let part = |n: i64| self.value(vc::ASSEMBLY_ENTRY, id as i64, 0, n).and_then(|r| text_of(r.get("value")));
+        let mut m = format!("{}.{}", crate::db::quote(&asm), crate::db::quote(&part(1)?));
+        if let Some(method) = part(2) {
+            m.push_str(&format!(".{}", crate::db::quote(&method)));
+        }
+        Some(m)
+    }
+
+    /// Parameters and return type of a CLR module.
+    fn clr_signature(&self, id: i32) -> (Vec<Parameter>, Option<String>) {
+        let mut pars: Vec<SysRow> = self.cat.parameters.get(&id).cloned().unwrap_or_default();
+        pars.sort_by_key(|p| p.int("colid"));
+        let mut returns = None;
+        let mut out = Vec::new();
+        for p in pars {
+            let ty = self.data_type(p.int("utype"), p.int("xtype"), p.int("length"), p.int("prec"), p.int("scale")).sql();
+            if p.int("colid") == 0 {
+                returns = Some(ty);
+            } else {
+                out.push(Parameter { name: p.str("name"), data_type: ty, output: p.int("status") & 0x200 != 0, default: None });
+            }
+        }
+        (out, returns)
+    }
+
     fn execute_as(&self, id: i32) -> Option<String> {
         let p = self.single_ref(rc::EXECUTE_AS, id as i64, 0)?.int("indepid");
         if p == -2 { Some("OWNER".into()) } else { self.principal(p) }
@@ -798,6 +842,10 @@ impl Builder<'_> {
                 _ => RoutineKind::ClrAggregate,
             };
             let native = matches!(o.kind.as_str(), "P" | "FN" | "IF") && o.flag(st::NATIVE);
+            let clr = self.clr_method(o.id);
+            // CLR modules have no SQL text, so their settings read as on.
+            let settings = if clr.is_some() { ModuleSettings { ansi_nulls: true, quoted_identifier: true } } else { settings };
+            let (parameters, returns) = if clr.is_some() { self.clr_signature(o.id) } else { (Vec::new(), None) };
             self.db.routines.push(Routine {
                 schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(),
                 name: o.name.clone(),
@@ -808,6 +856,10 @@ impl Builder<'_> {
                 settings,
                 execute_as: self.execute_as(o.id),
                 native_compilation: native,
+                null_on_null_input: clr.is_some() && o.flag(0x200000),
+                clr_method: clr,
+                parameters,
+                returns,
                 ..Default::default()
             });
         }
@@ -1459,6 +1511,18 @@ impl Builder<'_> {
             }
             for c in t.columns.iter().filter_map(|c| c.data_type.schema.as_ref().map(|s| (s, &c.data_type.name))) {
                 deps.insert((from.clone(), ObjectName::new(c.0, c.1)), true);
+            }
+        }
+        // CLR modules and types depend on their assembly.
+        let assembly = |m: &str| ObjectName::new(crate::catalog::KEY_ASSEMBLY, m.trim_start_matches('[').split("].").next().unwrap_or_default().trim_end_matches(']'));
+        for r in &self.db.routines {
+            if let Some(m) = &r.clr_method {
+                deps.insert((ObjectName::new(&r.schema, &r.name), assembly(m)), true);
+            }
+        }
+        for t in &self.db.types {
+            if let Some(c) = &t.clr_class {
+                deps.insert((ObjectName::new(&t.schema, &t.name), assembly(c)), true);
             }
         }
         self.db.dependencies = deps.into_iter().map(|((from, to), strong)| Dependency { from, to, strong }).collect();
