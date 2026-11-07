@@ -105,7 +105,8 @@ impl<'a> Record<'a> {
             return Field::Null;
         }
         let i = (-c.offset - 1) as usize;
-        let Some(&end) = self.var_ends.get(i) else { return Field::Null };
+        // Trailing empty variable columns are not stored; the null bitmap tells them from NULLs.
+        let Some(&end) = self.var_ends.get(i) else { return if self.nulls.is_some() { Field::Bytes(&[]) } else { Field::Null } };
         let start = if i == 0 { self.var_start } else { (self.var_ends[i - 1] & 0x7fff) as usize };
         let stop = (end & 0x7fff) as usize;
         if stop < start || stop > self.bytes.len() {

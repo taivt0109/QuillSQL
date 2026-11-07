@@ -244,6 +244,8 @@ fn overrides(args: &Args, db1: &Database, case_sensitive: bool) -> Result<(DataM
 fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
     match source {
         Source::Live(spec) => Ok(spec),
+        // A backup is read directly; the spec only names it.
+        Source::Backup(b) => Ok(ConnectionSpec::new("", &b.describe(), crate::db::Auth::Windows)),
         _ => Err(ArgError::new(exit::USAGE, format!("data compare needs database {n} to be a live database"))),
     }
 }
@@ -306,6 +308,11 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
         crate::sources::staging::stage(path, revision.as_deref(), host).map(Some).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))
     };
+    let open = |s: &Source| match s {
+        Source::Backup(b) => super::backups::open(b).map(Some),
+        _ => Ok(None),
+    };
+    let backup1 = open(&source1)?;
     let staged1 = stage(&source1)?;
     let spec1 = match &staged1 {
         Some(s) => s.spec.clone(),
@@ -318,19 +325,28 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         crate::catalog::read_database_with(spec, false).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, format!("{}: {e}", spec.describe())))
     };
     if let Some(dir) = args.get("makescripts") {
+        if backup1.is_some() {
+            return Err(ArgError::new(exit::USAGE, "/makescripts needs database 1 to be a live database"));
+        }
         let db1 = read(&spec1)?;
         return make_scripts(&spec1, &db1, &options, Path::new(dir), args);
     }
     let source2 = source2.ok_or_else(|| ArgError::new(exit::USAGE, "give database 2: /server2 and /database2"))?;
+    let backup2 = open(&source2)?;
     let staged2 = stage(&source2)?;
     let spec2 = match &staged2 {
         Some(s) => s.spec.clone(),
         None => live(source2, 2)?,
     };
-    let mut db1 = read(&spec1)?;
-    let mut db2 = read(&spec2)?;
+    let read_side = |backup: &Option<crate::sources::backup::Backup>, spec: &ConnectionSpec| match backup {
+        Some(b) => b.read_database().map_err(super::backups::error),
+        None => read(spec),
+    };
+    let mut db1 = read_side(&backup1, &spec1)?;
+    let mut db2 = read_side(&backup2, &spec2)?;
     // A scripts folder is named by its folder, as SQL Data Compare does.
     let label = |staged: &Option<crate::sources::staging::Staging>, spec: &ConnectionSpec, db: &mut Database| match staged {
+        _ if spec.server.is_empty() => db.name.clone(),
         Some(s) => {
             db.name = s.folder.database.name.clone();
             db.name.clone()
@@ -366,7 +382,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
     }
     let deselected: Vec<crate::catalog::ObjectName> = project.iter().flat_map(|p| p.deselected.iter().map(|d| crate::catalog::ObjectName::new(&d.schema, &d.name))).collect();
-    let result = compare::compare(&spec1, &spec2, &db1, &db2, &options, &user, |p| rules.includes(p) && !deselected.contains(&p.source), parallel, |p, r| {
+    let result = compare::compare_sides(side(&backup1, &spec1), side(&backup2, &spec2), &db1, &db2, &options, &user, |p| rules.includes(p) && !deselected.contains(&p.source), parallel, |p, r| {
         if verbose {
             eprintln!("Compared {} ({} rows differ)", p.source, r.count(RowKind::Different) + r.count(RowKind::OnlyIn1) + r.count(RowKind::OnlyIn2));
         }
@@ -412,9 +428,9 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         settings.transaction_isolation_level = args.get("transactionIsolationLevel").unwrap_or("SERIALIZABLE").to_ascii_uppercase();
         settings.kinds = rules.kinds;
         settings.max_transaction_bytes = (max_mb > 0).then_some(max_mb * 1_048_576);
-        settings.source_connection = Some(spec1.clone());
+        settings.source_connection = backup1.is_none().then(|| spec1.clone());
         let mut s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
-        common::add_backup(args, project.as_ref().map(|p| &p.backup), staged2.is_none().then_some(&spec2), &mut s)?;
+        common::add_backup(args, project.as_ref().map(|p| &p.backup), (staged2.is_none() && backup2.is_none()).then_some(&spec2), &mut s)?;
         common::write_script(args, &s)?;
         common::report_warnings(args, &s);
         common::check_warnings(args, &s)?;
@@ -457,6 +473,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         return Ok(exit::EXECUTION_FAILED);
     }
     Ok(exit::SUCCESS)
+}
+
+/// Where a side's rows come from.
+fn side<'a>(backup: &'a Option<crate::sources::backup::Backup>, spec: &'a ConnectionSpec) -> compare::Side<'a> {
+    match backup {
+        Some(b) => compare::Side::Backup(b),
+        None => compare::Side::Live(spec),
+    }
 }
 
 /// `server.database`, as the summary and the script header name a database.

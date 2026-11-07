@@ -3,12 +3,15 @@
 //! backup) and SQL Backup files. The pages of the backup set are read like the database's own
 //! files; the system base tables give the catalog and the tables give the data.
 
+mod binxml;
 pub mod catalog;
 pub mod collation;
+pub mod compressed;
 pub mod mtf;
 pub mod pages;
 pub mod record;
 pub mod rows;
+mod sha256;
 pub mod sqb;
 pub mod tables;
 mod text;
