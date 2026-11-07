@@ -1083,6 +1083,10 @@ impl Reader {
                 }
                 _ => continue,
             }
+            // SQL Source Control's link and SQL Clone's marker are not part of the schema.
+            if p.is_source_control_marker() || p.is_clone_marker(self.db.case_sensitive()) {
+                continue;
+            }
             self.db.extended_properties.push(p);
         }
         Ok(())

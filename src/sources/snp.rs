@@ -1791,6 +1791,9 @@ impl Snap {
         self.principals(&mut db, &mut permissions);
         db.permissions = permissions;
         db.extended_properties = extended_properties(&self.props);
+        // SQL Clone's marker is not part of the schema.
+        let cs = self.case_sensitive;
+        db.extended_properties.retain(|p| !p.is_clone_marker(cs));
         db.dependencies = self.dependencies(&db);
         db.collation = collation(&db, self.case_sensitive);
 

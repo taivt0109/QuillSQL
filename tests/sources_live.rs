@@ -333,3 +333,28 @@ fn certificates_and_keys_round_trip_through_snapshots() {
     assert_eq!(snp.certificates, live.certificates);
     assert_eq!(snp.symmetric_keys, live.symmetric_keys);
 }
+
+#[test]
+fn source_control_and_clone_markers_are_not_schema() {
+    let Some(server) = server() else { return };
+    server.create(
+        "QD_sources_Markers",
+        "EXEC sp_addextendedproperty N'SQLSourceControl Scripts Location', N'<x/>';
+        EXEC sp_addextendedproperty N'sqlsourcecontrol Database Revision', N'7';
+        EXEC sp_addextendedproperty N'IsSQLCloneDatabase', N'1';
+        EXEC sp_addextendedproperty N'Owner', N'Team';",
+    );
+    let live = server.read("QD_sources_Markers");
+    server.drop("QD_sources_Markers");
+    let names: Vec<&str> = live.extended_properties.iter().filter(|p| p.class == "DATABASE").map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Owner"]);
+    // A scripts folder or a snapshot with the clone marker reads without it too.
+    let mut marked = live.clone();
+    marked.extended_properties.push(catalog::ExtendedProperty { class: "DATABASE".into(), name: "IsSQLCloneDatabase".into(), value: Some("1".into()), ..Default::default() });
+    let dir = temp("markers");
+    folder::write_all(&marked, &dir, &Options::default_set()).unwrap();
+    assert_identical(&folder::read(&dir).unwrap().database, &live, &Options::default_set(), "folder");
+    let _ = std::fs::remove_dir_all(&dir);
+    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&marked)).unwrap();
+    assert!(!snp.extended_properties.iter().any(|p| p.name == "IsSQLCloneDatabase"));
+}
