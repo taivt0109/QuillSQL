@@ -440,9 +440,11 @@ impl<'a> W<'a> {
             self.empty_coll();
         }
         self.coll(&db.sequences, W::sequence);
-        for _ in 0..6 {
-            // Search property lists, security policies, external file formats, external data
-            // sources, external tables, database-scoped credentials.
+        self.empty_coll(); // search property lists
+        self.coll(&db.security_policies, W::security_policy);
+        for _ in 0..4 {
+            // External file formats, external data sources, external tables, database-scoped
+            // credentials.
             self.empty_coll();
         }
     }
@@ -463,16 +465,28 @@ impl<'a> W<'a> {
             .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == object)
             .filter(|p| statement(&p.state).is_some())
             .collect();
-        self.f32(COLL);
-        self.len(list.len());
-        let cs = self.cs;
+        // Column permissions with the same state, action and grantee are one record.
+        let mut records: Vec<(&Permission, Vec<&str>)> = Vec::new();
         for p in list {
+            match (&p.column, records.iter_mut().find(|(r, cols)| !cols.is_empty() && r.state == p.state && r.permission == p.permission && r.grantee == p.grantee)) {
+                (Some(c), Some((_, cols))) => cols.push(c),
+                (Some(c), None) => records.push((p, vec![c.as_str()])),
+                (None, _) => records.push((p, Vec::new())),
+            }
+        }
+        self.f32(COLL);
+        self.len(records.len());
+        let cs = self.cs;
+        for (p, columns) in records {
             self.f32(VERSION);
             self.i32(i32::from(statement(&p.state).unwrap_or(GRANT)));
             self.s(&p.permission);
             self.s(&p.grantee);
             self.bool(cs);
-            self.bool(false); // no column list
+            self.bool(!columns.is_empty());
+            if !columns.is_empty() {
+                self.strs(&columns);
+            }
         }
     }
 
@@ -715,7 +729,14 @@ impl<'a> W<'a> {
         }
         let mut indexes: Vec<&Index> = t.indexes.iter().filter(|i| i.kind != IndexKind::Heap).collect();
         indexes.sort_by_key(|i| (index_rank(i), i.name.clone()));
-        self.coll(&indexes, |w, ix| w.index(t, ix, rec.type_table));
+        // Statistics are index records of their own kind.
+        self.coll_head(cs, indexes.len() + t.statistics.len());
+        for ix in indexes {
+            self.index(t, ix, rec.type_table);
+        }
+        for s in &t.statistics {
+            self.statistic(s);
+        }
         self.coll(&t.foreign_keys, |w, fk| w.foreign_key(t, fk));
         self.coll(&t.check_constraints, |w, ck| w.check(t, ck));
         let parent = t.object_name().quoted();
@@ -787,7 +808,7 @@ impl<'a> W<'a> {
             None => self.bool(false),
         }
         self.bool(false); // large value types out of row
-        self.empty_coll(); // edge constraints
+        self.coll(&t.edge_constraints, W::edge_constraint);
         self.i32(0); // ALTER TABLE SET script sources
     }
 
@@ -877,7 +898,7 @@ impl<'a> W<'a> {
         self.bool(c.hidden);
         self.u8(0); // graph column kind
         self.no_ss(3);
-        self.sensitivity();
+        self.sensitivity(c.sensitivity.as_ref());
         self.str(ty.udt.as_deref());
     }
 
@@ -912,17 +933,65 @@ impl<'a> W<'a> {
         self.bool(false);
         self.u8(0);
         self.no_ss(3);
-        self.sensitivity();
+        self.sensitivity(None);
         self.str(None);
     }
 
-    /// An empty data classification.
-    fn sensitivity(&mut self) {
+    /// A column's data classification (the format has no rank).
+    fn sensitivity(&mut self, s: Option<&Sensitivity>) {
         self.f32(VERSION);
-        for _ in 0..4 {
-            self.str(None);
+        for x in [s.and_then(|s| s.label.as_deref()), s.and_then(|s| s.label_id.as_deref()), s.and_then(|s| s.information_type.as_deref()), s.and_then(|s| s.information_type_id.as_deref())] {
+            self.str(x);
         }
         self.no_ss(5);
+    }
+
+    /// A CREATE STATISTICS object, as an index record of kind 1.
+    fn statistic(&mut self, s: &Statistic) {
+        let cs = self.cs;
+        self.f32(VERSION);
+        self.u8(1);
+        self.bool(cs);
+        self.s(&s.name);
+        self.len(s.columns.len());
+        for c in &s.columns {
+            self.s(c);
+            self.bool(false);
+            self.bool(false);
+            self.i32(0);
+        }
+        let mut flags = 0x0Ci16;
+        if s.no_recompute {
+            flags |= 0x2;
+        }
+        if s.incremental {
+            flags |= 0x100;
+        }
+        self.i16(flags);
+        self.s("PRIMARY");
+        self.u8(0); // fill factor
+        self.i32(0);
+        self.bool(false); // system named
+        self.no_ss(3);
+        self.bool(false); // FileTable primary key
+        self.f32(7.5);
+        self.str(s.filter.as_deref());
+    }
+
+    fn edge_constraint(&mut self, e: &EdgeConstraint) {
+        self.f32(VERSION);
+        self.s(&e.name);
+        self.bool(e.disabled);
+        let id = self.id();
+        self.i32(id);
+        self.bool(e.not_trusted);
+        self.len(e.connections.len());
+        for (from, to) in &e.connections {
+            self.s(&from.quoted());
+            self.s(&to.quoted());
+        }
+        self.bool(e.system_named);
+        self.no_ss(2);
     }
 
     fn index(&mut self, t: &Table, ix: &Index, type_table: bool) {
@@ -1813,6 +1882,35 @@ impl<'a> W<'a> {
         });
         self.perms_on("ASSEMBLY", None, Some(&a.name));
         self.no_ss(3);
+    }
+
+    fn security_policy(&mut self, p: &SecurityPolicy) {
+        self.f32(VERSION);
+        let id = self.id();
+        self.i32(id);
+        self.s(&p.schema);
+        self.s(&p.name);
+        self.str(None); // authorization
+        self.bool(p.enabled);
+        self.bool(p.schema_bound);
+        self.bool(p.not_for_replication);
+        self.len(p.predicates.len());
+        for q in &p.predicates {
+            self.s(&q.function);
+            self.s(&q.arguments);
+            self.s(&q.table.quoted());
+            self.i32(i32::from(q.kind == "BLOCK"));
+            self.i32(match q.operation.as_deref() {
+                Some("AFTER INSERT") => 1,
+                Some("AFTER UPDATE") => 2,
+                Some("BEFORE UPDATE") => 3,
+                Some("BEFORE DELETE") => 4,
+                _ => 0,
+            });
+        }
+        self.no_eprops();
+        self.perms("OBJECT", &p.schema, Some(&p.name));
+        self.no_ss(2);
     }
 
     fn xml_schema_collection(&mut self, x: &XmlSchemaCollection, id: i32) {

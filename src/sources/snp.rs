@@ -133,7 +133,7 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     c.member(Cur::fulltext_stoplist)?;
     s.sequences = c.member(Cur::sequence)?;
     c.member(Cur::search_property_list)?;
-    c.member(Cur::security_policy)?;
+    s.security_policies = c.member(Cur::security_policy)?;
     c.coll(Cur::external_file_format)?;
     c.coll(Cur::external_data_source)?;
     c.coll(Cur::external_table)?;
@@ -183,6 +183,7 @@ struct Snap {
     /// Assemblies with the blob ids of their files.
     assemblies: Vec<(Raw<Assembly>, Vec<u64>)>,
     assembly_references: Vec<(u8, String, u8, String)>,
+    security_policies: Vec<Raw<SecurityPolicy>>,
     dependencies: Vec<(u8, String, u8, String)>,
     props: Vec<RawProp>,
     /// Comments blob store: module and default text by id.
@@ -195,7 +196,9 @@ struct RawPerm {
     statement: i32,
     action: String,
     grantee: String,
-    /// Column-level, or an old enum action: not modelled.
+    /// Column-level: the columns it is on.
+    columns: Vec<String>,
+    /// An old enum action: not modelled.
     skip: bool,
 }
 
@@ -228,6 +231,7 @@ struct RawField {
     hidden: bool,
     bound_default: Option<String>,
     bound_rule: Option<String>,
+    sensitivity: Option<Sensitivity>,
 }
 
 #[derive(Default)]
@@ -257,6 +261,8 @@ struct RawTable {
     retention: Option<String>,
     is_node: bool,
     is_edge: bool,
+    statistics: Vec<Statistic>,
+    edge_constraints: Vec<EdgeConstraint>,
 }
 
 struct RawTrigger {
@@ -347,11 +353,13 @@ struct Cur<'a> {
     depth: u32,
     /// Every extended property met so far; they are attached by their level names, not their owner.
     props: Vec<RawProp>,
+    /// Statistics records met in the index collection being read.
+    stats: Vec<Statistic>,
 }
 
 impl<'a> Cur<'a> {
     fn new(b: &'a [u8]) -> Self {
-        Cur { b, p: 0, depth: 0, props: Vec::new() }
+        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new() }
     }
 
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
@@ -540,11 +548,8 @@ impl<'a> Cur<'a> {
             let action = if v < 12.48 { c.i32()?.to_string() } else { c.s()? };
             let grantee = c.s()?;
             c.bool()?;
-            let columns = c.bool()?;
-            if columns {
-                c.strs()?;
-            }
-            Ok(RawPerm { statement, action, grantee, skip: columns || v < 12.48 })
+            let columns = if c.bool()? { c.strs()? } else { Vec::new() };
+            Ok(RawPerm { statement, action, grantee, columns, skip: v < 12.48 })
         })
     }
 
@@ -786,9 +791,11 @@ impl Cur<'_> {
         }
         if v >= 13.44 {
             let sv = self.f32()?;
-            for _ in 0..4 {
-                self.str()?;
+            let mut s = Sensitivity::default();
+            for x in [&mut s.label, &mut s.label_id, &mut s.information_type, &mut s.information_type_id] {
+                *x = self.str()?.filter(|v| !v.is_empty());
             }
+            f.sensitivity = (s != Sensitivity::default()).then_some(s);
             if sv >= 13.46 {
                 self.sss(5)?;
             }
@@ -880,7 +887,12 @@ impl Cur<'_> {
             }
             1 => {
                 self.f32()?;
-                self.str()?;
+                let filter = self.str()?.filter(|f| !f.is_empty());
+                // Statistics SQL Server makes itself are not kept.
+                if !ix.name.starts_with("_WA_Sys_") {
+                    let columns = cols.iter().map(|(_, (name, _, _))| name.clone()).collect();
+                    self.stats.push(Statistic { name: ix.name, columns, filter, no_recompute: ix.no_recompute, incremental: ix.incremental });
+                }
                 return Ok(None);
             }
             2 => {
@@ -1120,7 +1132,11 @@ impl Cur<'_> {
         self.eprops()?;
         self.i32()?;
         t.perms = self.perms()?;
+        let outer = std::mem::take(&mut self.stats);
         t.indexes = self.coll(Cur::index)?.into_iter().flatten().collect();
+        // The internal unique index of a graph table is not part of its definition.
+        t.indexes.retain(|ix| !ix.name.starts_with("GRAPH_UNIQUE_INDEX_"));
+        t.statistics = std::mem::replace(&mut self.stats, outer);
         t.foreign_keys = self.coll(Cur::foreign_key)?;
         t.checks = self.coll(Cur::check_constraint)?;
         t.triggers = self.coll(Cur::trigger)?;
@@ -1218,7 +1234,7 @@ impl Cur<'_> {
             self.bool()?;
         }
         if v >= 13.7 {
-            self.coll(Cur::edge_constraint)?;
+            t.edge_constraints = self.coll(Cur::edge_constraint)?;
         }
         if v >= 21.0 {
             self.ss_list()?;
@@ -1226,19 +1242,20 @@ impl Cur<'_> {
         Ok(t)
     }
 
-    fn edge_constraint(&mut self) -> R<()> {
+    fn edge_constraint(&mut self) -> R<EdgeConstraint> {
         self.f32()?;
-        self.str()?;
-        self.bool()?;
+        let mut e = EdgeConstraint { name: self.s()?, disabled: self.bool()?, ..Default::default() };
         self.i32()?;
-        self.bool()?;
+        e.not_trusted = self.bool()?;
         let n = self.count()?;
         for _ in 0..n {
-            self.str()?;
-            self.str()?;
+            let from = two_part(&self.s()?).unwrap_or_default();
+            let to = two_part(&self.s()?).unwrap_or_default();
+            e.connections.push((from, to));
         }
-        self.bool()?;
-        self.sss(2)
+        e.system_named = self.bool()?;
+        self.sss(2)?;
+        Ok(e)
     }
 
     fn table_item(&mut self) -> R<RawTable> {
@@ -1722,30 +1739,39 @@ impl Cur<'_> {
         self.two_ss(v)
     }
 
-    fn security_policy(&mut self) -> R<()> {
+    fn security_policy(&mut self) -> R<Raw<SecurityPolicy>> {
         let v = self.f32()?;
         self.i32()?;
-        for _ in 0..3 {
-            self.str()?;
-        }
-        self.bool()?;
+        let mut p = SecurityPolicy { schema: self.s()?, name: self.s()?, ..Default::default() };
+        self.str()?; // authorization
+        p.enabled = self.bool()?;
         if v >= 23.0 {
-            self.bool()?;
+            p.schema_bound = self.bool()?;
         }
-        self.bool()?;
+        p.not_for_replication = self.bool()?;
         let n = self.count()?;
         for _ in 0..n {
-            for _ in 0..3 {
-                self.str()?;
-            }
+            let mut q = SecurityPredicate { kind: "FILTER".into(), function: requote(&self.s()?), arguments: self.s()?, ..Default::default() };
+            q.table = two_part(&self.s()?).unwrap_or_default();
             if v >= 11.36 {
-                self.i32()?;
-                self.i32()?;
+                if self.i32()? == 1 {
+                    q.kind = "BLOCK".into();
+                }
+                q.operation = match self.i32()? {
+                    1 => Some("AFTER INSERT"),
+                    2 => Some("AFTER UPDATE"),
+                    3 => Some("BEFORE UPDATE"),
+                    4 => Some("BEFORE DELETE"),
+                    _ => None,
+                }
+                .map(String::from);
             }
+            p.predicates.push(q);
         }
         self.eprops()?;
-        self.perms()?;
-        self.two_ss(v)
+        let perms = self.perms()?;
+        self.two_ss(v)?;
+        Ok(Raw { item: p, perms, system: false })
     }
 
     /// The trailing pair of script sources most objects have from version 11.45.
@@ -2230,13 +2256,11 @@ impl Snap {
         let mut permissions = Vec::new();
         // Permissions ON <class>::[schema].[name], or ON <class>::[name] for securables without a schema.
         let mut perms_on = |class: &str, schema: Option<&str>, name: &str, perms: &[RawPerm]| {
-            for p in perms {
-                if let Some(mut p) = permission(p) {
-                    p.class = class.into();
-                    p.schema = schema.map(String::from);
-                    p.object = Some(name.into());
-                    permissions.push(p);
-                }
+            for mut p in perms.iter().flat_map(permission) {
+                p.class = class.into();
+                p.schema = schema.map(String::from);
+                p.object = Some(name.into());
+                permissions.push(p);
             }
         };
 
@@ -2273,6 +2297,8 @@ impl Snap {
                     0 => None,
                     n => Some(ChangeTracking { track_columns_updated: n == 2 }),
                 },
+                statistics: t.statistics,
+                edge_constraints: t.edge_constraints,
                 ..Default::default()
             };
             table.storage = Storage {
@@ -2370,6 +2396,10 @@ impl Snap {
             item.references.sort_by(|a, b| sql_order(a, b));
             db.assemblies.push(item);
         }
+        for p in std::mem::take(&mut self.security_policies) {
+            perms_on("OBJECT", Some(&p.item.schema), &p.item.name, &p.perms);
+            db.security_policies.push(p.item);
+        }
         for (x, id) in std::mem::take(&mut self.xml_schema_collections) {
             let mut item = x.item;
             perms_on("XML SCHEMA COLLECTION", Some(&item.schema), &item.name, &x.perms);
@@ -2399,12 +2429,10 @@ impl Snap {
             if s.system_object && s.name != "dbo" {
                 continue;
             }
-            for p in &s.perms {
-                if let Some(mut p) = permission(p) {
-                    p.class = "SCHEMA".into();
-                    p.schema = Some(s.name.clone());
-                    permissions.push(p);
-                }
+            for mut p in s.perms.iter().flat_map(permission) {
+                p.class = "SCHEMA".into();
+                p.schema = Some(s.name.clone());
+                permissions.push(p);
             }
             db.schemas.push(Schema { name: s.name.clone(), owner: s.owner.clone() });
         }
@@ -2581,11 +2609,19 @@ fn state(statement: i32) -> Option<&'static str> {
 }
 
 /// An object or schema permission without its securable.
-fn permission(p: &RawPerm) -> Option<Permission> {
-    if p.skip || SYSTEM_GRANTEES.iter().any(|g| g.eq_ignore_ascii_case(&p.grantee)) {
-        return None;
-    }
-    Some(Permission { grantee: p.grantee.clone(), permission: p.action.clone(), state: state(p.statement)?.into(), ..Default::default() })
+/// The model's permissions for a stored one: one per column for a column-level permission.
+fn permission(p: &RawPerm) -> Vec<Permission> {
+    let Some(state) = state(p.statement).filter(|_| !p.skip && !SYSTEM_GRANTEES.iter().any(|g| g.eq_ignore_ascii_case(&p.grantee))) else {
+        return Vec::new();
+    };
+    let one = |column: Option<&String>| Permission {
+        grantee: p.grantee.clone(),
+        permission: p.action.clone(),
+        state: state.into(),
+        column: column.cloned(),
+        ..Default::default()
+    };
+    if p.columns.is_empty() { vec![one(None)] } else { p.columns.iter().map(|c| one(Some(c))).collect() }
 }
 
 /// Properties named by sp_addextendedproperty levels, in the live reader's classes.
@@ -2684,7 +2720,7 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         masking_function: (!f.masking.is_empty()).then(|| f.masking.clone()),
         bound_default: f.bound_default.as_deref().map(requote),
         bound_rule: f.bound_rule.as_deref().map(requote),
-        sensitivity: None,
+        sensitivity: f.sensitivity.clone(),
     }
 }
 
@@ -2977,8 +3013,9 @@ mod tests {
         let mut c = Cur::new(&bytes);
         let perms = c.perms().unwrap();
         assert_eq!(perms.len(), 2);
-        assert_eq!(permission(&perms[0]).unwrap().grant_sql(), "DENY DELETE TO [Reporting]");
-        assert!(permission(&perms[1]).is_none(), "column permissions are not modelled");
+        assert_eq!(permission(&perms[0])[0].grant_sql(), "DENY DELETE TO [Reporting]");
+        let column = permission(&perms[1]);
+        assert_eq!((column.len(), column[0].column.as_deref()), (1, Some("Name")));
         c.ss().unwrap();
         c.ss().unwrap();
         assert_eq!(c.p, bytes.len());

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use quillsql::catalog::{self, Database};
 use quillsql::db::{self, Auth, ConnectionSpec};
-use quillsql::schema::{self, DiffKind, Mappings, ObjectType, Opt, Options, deploy};
+use quillsql::schema::{self, DiffKind, Mappings, Opt, Options, deploy};
 use quillsql::sources::{folder, parse};
 
 struct Server {
@@ -64,12 +64,6 @@ const SHOP_CHANGES: &str = include_str!("fixtures/compare/shop_changes.sql");
 const XML_SPATIAL: &str = include_str!("fixtures/compare/sources_xml_spatial.sql");
 const BINDINGS: &str = include_str!("fixtures/compare/sources_bindings.sql");
 const SHOP_DATA: &str = include_str!("fixtures/compare/shop_data.sql");
-
-/// Object types our .snp files do not carry in full yet (the objects fixture).
-const NOT_IN_SNP: [ObjectType; 2] = [
-    ObjectType::SecurityPolicy,
-    ObjectType::Table,
-];
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("quill-sources-{name}-{}", std::process::id()));
@@ -299,17 +293,16 @@ fn the_other_objects_round_trip_through_snapshots() {
     let clr = |hex: &str| format!("0x{}", hex.trim());
     let objects = include_str!("fixtures/objects/objects.sql").replace("{CLR}", &clr(include_str!("fixtures/objects/clr.hex")));
     server.create("QD_sources_Objects", &objects);
-    let live = catalog::read_database(&server.spec("QD_sources_Objects")).unwrap();
+    let mut live = catalog::read_database(&server.spec("QD_sources_Objects")).unwrap();
     server.drop("QD_sources_Objects");
+    // Snapshots have no place for a classification's rank.
+    for c in live.tables.iter_mut().flat_map(|t| &mut t.columns) {
+        if let Some(s) = &mut c.sensitivity {
+            s.rank = None;
+        }
+    }
     let opts = Options::default_set().without(Opt::IgnoreFileGroups).with(Opt::IgnoreCertificatesAndCryptoKeys);
-    let bytes = quillsql::sources::snp_write::write(&live);
-    if let Ok(p) = std::env::var("QUILL_DUMP_SNP") {
-        std::fs::write(p, &bytes).unwrap();
-    }
-    let snp = quillsql::sources::snp::read(&bytes).unwrap();
-    for (x, y) in [(&snp, &live), (&live, &snp)] {
-        let c = schema::compare(x, y, &opts, &Mappings::default());
-        let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal && !NOT_IN_SNP.contains(&d.object_type)).collect();
-        assert!(left.is_empty(), "{left:#?}");
-    }
+    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+    assert_identical(&snp, &live, &opts, "objects snapshot");
+    assert_identical(&live, &snp, &opts, "objects snapshot, the other way");
 }
