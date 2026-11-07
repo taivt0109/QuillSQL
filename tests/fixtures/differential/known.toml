@@ -37,18 +37,6 @@ finding = "schema-model H1"
 reason = "compared now (schema-model); the deployment is still missing (schema-deploy): extended property on schema dbo"
 
 [[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "check"
-finding = "schema-model H3"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): sp_rename of the mapped table"
-
-[[known]]
-scenario = "schema-mapped-table-rename"
-oracle = "converge-quill"
-finding = "schema-model H3"
-reason = "compared now (schema-model); the deployment is still missing (schema-deploy): sp_rename of the mapped table"
-
-[[known]]
 scenario = "schema-refreshview"
 oracle = "check"
 finding = "schema-deploy H2"
@@ -467,21 +455,3 @@ scenario = "data-temporal"
 oracle = "warnings"
 finding = "new"
 reason = "quill prints 'Excluded ValidFrom because it is GENERATED ALWAYS AS $AsRowStart' with an unfilled placeholder; Vendor prints nothing"
-
-[[known]]
-scenario = "schema-security"
-oracle = "check"
-finding = "new"
-reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
-
-[[known]]
-scenario = "schema-security"
-oracle = "converge-quill"
-finding = "new"
-reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
-
-[[known]]
-scenario = "schema-security"
-oracle = "outcome"
-finding = "new"
-reason = "membership is now reported on the role (Readers: Loader only in 2); quill's deployment does not yet drop/add members from a role difference (schema-deploy)"
