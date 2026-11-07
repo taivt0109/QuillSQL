@@ -1354,6 +1354,7 @@ COMMIT TRANSACTION\r\nGO\r\n";
             minor_name: Some("FK_Orders_Customers".into()),
             name: "MS_Description".into(),
             value: Some("to customers".into()),
+            value_type: None,
         });
         let opts = DataOptions::default_set().with(DataOpt::DropConstraintsAndIndexes);
         let sql = generate(&result, &db, &opts, &SyncSettings::new("a.b", "c.d", "d")).unwrap().sql;

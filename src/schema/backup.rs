@@ -237,6 +237,9 @@ impl Plan<'_> {
         script.sql.insert_str(at, &format!("{}\r\nGO\r\n", batch.trim_end_matches(['\r', '\n'])));
         script.batches.insert(0, batch);
         script.sql.push_str(&self.restore_comment());
+        // With a backup taken first, running without transactions is no longer worth a warning.
+        let no_transactions = super::warnings::no_transactions().message;
+        script.warnings.retain(|w| w.message != no_transactions);
     }
 }
 

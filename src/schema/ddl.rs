@@ -205,7 +205,8 @@ fn storage_clause(st: &Storage, r: &Render) -> String {
     }
 }
 
-fn compression_option(st: &Storage, r: &Render) -> Option<String> {
+/// `DATA_COMPRESSION = â€¦`, per partition group on a partitioned object unless filegroups are ignored.
+pub fn compression_option(st: &Storage, r: &Render) -> Option<String> {
     if r.has(Opt::IgnoreDataCompression) {
         return None;
     }
@@ -330,8 +331,10 @@ fn kind_words(ix: &Index) -> &'static str {
 fn fields(ix: &Index) -> String {
     let mut s = String::new();
     if is_columnstore(ix) {
-        if ix.kind != IndexKind::ClusteredColumnstore && !ix.columns.is_empty() {
-            s.push_str(&format!(" ({})", ix.columns.iter().map(|c| quote(&c.name)).collect::<Vec<_>>().join(", ")));
+        // The catalog lists a nonclustered columnstore index's columns as included ones.
+        let cols: Vec<String> = ix.columns.iter().map(|c| quote(&c.name)).chain(ix.included.iter().map(|c| quote(c))).collect();
+        if ix.kind != IndexKind::ClusteredColumnstore && !cols.is_empty() {
+            s.push_str(&format!(" ({})", cols.join(", ")));
         }
         return s;
     }
@@ -588,6 +591,9 @@ pub fn create_table(t: &Table, name_override: Option<&str>, inline_keys: bool) -
 
 pub fn create_table_with(t: &Table, name_override: Option<&str>, inline_keys: bool, r: &Render) -> String {
     let name = qname(&t.schema, name_override.unwrap_or(&t.name));
+    if let Some(ft) = &t.file_table {
+        return file_table(&name, t, ft, r);
+    }
     let host = Host::of_table(t);
     let mut lines: Vec<String> = t
         .columns
@@ -656,6 +662,30 @@ pub fn create_table_with(t: &Table, name_override: Option<&str>, inline_keys: bo
         s.push_str(&format!("\r\nWITH\r\n(\r\n{}\r\n)", with.join(",\r\n")));
     }
     s
+}
+
+/// A FileTable: its columns, keys and defaults are fixed, so only the options are written.
+fn file_table(name: &str, t: &Table, ft: &FileTable, r: &Render) -> String {
+    let mut s = format!("CREATE TABLE {name} AS FILETABLE");
+    if !r.has(Opt::IgnoreFileGroups) && r.features.has(Feature::Filegroups) {
+        if let Some(fg) = &t.storage.data_space {
+            s.push_str(&format!(" ON {}", quote(fg)));
+        }
+        if let Some(fg) = &t.filestream_filegroup {
+            s.push_str(&format!(" FILESTREAM_ON {}", quote(fg)));
+        }
+    }
+    s.push_str(&format!("\r\nWITH\r\n(\r\n\tFILETABLE_DIRECTORY = {}, FILETABLE_COLLATE_FILENAME = {}", literal(&ft.directory), ft.filename_collation));
+    if let Some(pk) = &ft.primary_key {
+        s.push_str(&format!(", FILETABLE_PRIMARY_KEY_CONSTRAINT_NAME = {}", quote(pk)));
+    }
+    s.push_str("\r\n)");
+    s
+}
+
+/// `EXEC sp_tableoption N'[s].[t]', N'large value types out of row', 1;`.
+pub fn large_values_out_of_row(table: &str, on: bool) -> String {
+    format!("EXEC sp_tableoption {}, N'large value types out of row', {};", literal(table), u8::from(on))
 }
 
 /// `SYSTEM_VERSIONING = ON (HISTORY_TABLE = [s].[h], HISTORY_RETENTION_PERIOD = …)`; the
@@ -930,14 +960,45 @@ pub fn xprop_levels(p: &ExtendedProperty, schema_map: impl Fn(&str) -> String) -
     args.join(", ")
 }
 
+/// A property value that is not a string goes through a variable of its sql_variant base type:
+/// `DECLARE @xp int\r\nSELECT @xp=5\r\n`. Empty for strings and NULL.
+pub fn xprop_variable(p: &ExtendedProperty) -> String {
+    let (Some(v), Some(ty)) = (p.value.as_deref(), p.value_type.as_deref()) else { return String::new() };
+    let ty = ty.to_ascii_lowercase();
+    let declared = match ty.as_str() {
+        "nvarchar" | "varchar" | "nchar" | "char" | "sysname" => return String::new(),
+        "varbinary" | "binary" => format!("{ty} ({})", (v.len().saturating_sub(2) / 2).max(1)),
+        "decimal" | "numeric" => {
+            let digits = v.trim_start_matches('-');
+            let scale = digits.split_once('.').map(|(_, f)| f.len()).unwrap_or(0);
+            let precision = (digits.len() - usize::from(scale > 0)).max(18);
+            format!("{ty} ({precision}, {scale})")
+        }
+        _ => ty.clone(),
+    };
+    let value = match ty.as_str() {
+        "varbinary" | "binary" | "tinyint" | "smallint" | "int" | "bigint" | "bit" | "decimal" | "numeric" | "float" | "real" | "money" | "smallmoney" => v.to_string(),
+        _ => literal(v),
+    };
+    format!("DECLARE @xp {declared}\r\nSELECT @xp={value}\r\n")
+}
+
+/// The value argument: `@xp` after xprop_variable, a string literal (plain for varchar) or NULL.
+fn xprop_value(p: &ExtendedProperty) -> String {
+    match (p.value.as_deref(), p.value_type.as_deref()) {
+        (None, _) => "NULL".into(),
+        _ if !xprop_variable(p).is_empty() => "@xp".into(),
+        (Some(v), Some(t)) if t.eq_ignore_ascii_case("varchar") => format!("'{}'", v.replace('\'', "''")),
+        (Some(v), _) => literal(v),
+    }
+}
+
 pub fn add_xprop(p: &ExtendedProperty, levels: &str) -> String {
-    let value = p.value.as_deref().map(literal).unwrap_or_else(|| "NULL".into());
-    format!("EXEC sp_addextendedproperty {}, {value}, {levels}", literal(&p.name))
+    format!("EXEC sp_addextendedproperty {}, {}, {levels}", literal(&p.name), xprop_value(p))
 }
 
 pub fn update_xprop(p: &ExtendedProperty, levels: &str) -> String {
-    let value = p.value.as_deref().map(literal).unwrap_or_else(|| "NULL".into());
-    format!("EXEC sp_updateextendedproperty {}, {value}, {levels}", literal(&p.name))
+    format!("{}EXEC sp_updateextendedproperty {}, {}, {levels}", xprop_variable(p), literal(&p.name), xprop_value(p))
 }
 
 pub fn drop_xprop(p: &ExtendedProperty, levels: &str) -> String {

@@ -247,7 +247,7 @@ fn normalize(sql: &str, kind: TextKind, opts: &Options) -> Vec<Token> {
 
 /// `CREATE OR ALTER` → `CREATE`, and drops the object name after `CREATE <kind>` (and the
 /// owner after a trigger's `ON` when owners are ignored).
-fn module_header(tokens: Vec<Token>, opts: &Options) -> Vec<Token> {
+fn module_header(mut tokens: Vec<Token>, opts: &Options) -> Vec<Token> {
     let significant: Vec<usize> = (0..tokens.len()).filter(|&i| !tokens[i].is_trivia()).collect();
     let Some(create) = significant.iter().position(|&i| tokens[i].is_word("CREATE")) else { return tokens };
     let mut drop = vec![false; tokens.len()];
@@ -277,15 +277,25 @@ fn module_header(tokens: Vec<Token>, opts: &Options) -> Vec<Token> {
             break;
         }
     }
-    if kind_word.as_deref() == Some("TRIGGER") && opts.has(Opt::IgnoreOwners) {
-        // ON [owner].[table]: keep only the last part.
-        if let Some(on) = (name_end..significant.len()).find(|&p| tokens[significant[p]].is_word("ON")) {
-            let mut p = on + 1;
+    if kind_word.as_deref() == Some("TRIGGER")
+        && let Some(on) = (name_end..significant.len()).find(|&p| tokens[significant[p]].is_word("ON"))
+    {
+        let mut p = on + 1;
+        if opts.has(Opt::IgnoreOwners) {
+            // ON [owner].[table]: keep only the last part.
             while significant.get(p + 1).is_some_and(|&j| tokens[j].text == ".") {
                 drop[significant[p]] = true;
                 drop[significant[p + 1]] = true;
                 p += 2;
             }
+        }
+        // The table is named with or without brackets: `ON [T]` is `ON T`.
+        if let Some(&i) = significant.get(p)
+            && tokens[i].kind == Tok::Quoted
+            && tokens[i].text.starts_with('[')
+        {
+            tokens[i].text = unquote(&tokens[i]);
+            tokens[i].kind = Tok::Word;
         }
     }
     // Remove dropped tokens and the whitespace that preceded each of them.
@@ -489,6 +499,15 @@ mod tests {
         let none = Options::none();
         assert!(!eq("CREATE VIEW v AS SELECT 1", "CREATE VIEW v AS\nSELECT 1", TextKind::Module, &none));
         assert!(eq("CREATE VIEW v AS\r\nSELECT 1", "CREATE VIEW v AS\nSELECT 1", TextKind::Module, &none));
+    }
+
+    #[test]
+    fn trigger_header_brackets() {
+        let o = Options::default_set().with(Opt::IgnoreOwners);
+        let a = "CREATE TRIGGER dbo.T_Ins ON dbo.T AFTER INSERT AS SELECT 1";
+        let b = "CREATE TRIGGER [dbo].[T_Ins] ON [dbo].[T] AFTER INSERT AS SELECT 1";
+        assert!(eq(a, b, TextKind::Module, &o));
+        assert!(!eq(a, "CREATE TRIGGER dbo.T_Ins ON dbo.U AFTER INSERT AS SELECT 1", TextKind::Module, &o));
     }
 
     #[test]

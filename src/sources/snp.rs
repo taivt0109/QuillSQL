@@ -769,12 +769,13 @@ impl Cur<'_> {
         self.bool()?;
         let name = self.s()?;
         let n = self.count()?;
-        let mut cols = self.list(n, |c| {
+        let cols = self.list(n, |c| {
             let col = (c.s()?, c.bool()?, c.bool()?);
             let id = if v >= 17.0 { c.i32()? } else { 0 };
             Ok((id, col))
         })?;
-        cols.sort_by_key(|(id, _)| *id);
+        // The records are in key order; the id is the column's index_column_id, which can differ
+        // (SQL Server numbers a history table's (ValidTo, ValidFrom) index by column order).
         let flags = self.i16()?;
         let filegroup = self.str()?;
         let fill_factor = self.u8()?;

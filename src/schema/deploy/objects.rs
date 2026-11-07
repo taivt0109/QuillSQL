@@ -76,6 +76,23 @@ fn alter_authorization(class: &str, name: &str, owner: &Option<String>) -> Strin
     format!("ALTER AUTHORIZATION ON {class}::{} TO {}", quote(name), quote(owner.as_deref().unwrap_or("dbo")))
 }
 
+/// The ALTER AUTHORIZATION class (empty for OBJECT) and explicit owner of a schema object;
+/// `None` when the database has no such object or the kind has no owner here.
+fn object_owner(db: &Database, ty: ObjectType, n: &ObjectName) -> Option<(&'static str, Option<String>)> {
+    let is = |s: &str, x: &str| s == n.schema && x == n.name;
+    Some(match ty {
+        ObjectType::Table => ("", db.tables.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::View => ("", db.views.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::Function | ObjectType::StoredProcedure => ("", db.routines.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::Sequence => ("", db.sequences.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::Synonym => ("", db.synonyms.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::SecurityPolicy => ("", db.security_policies.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::ExternalTable => ("", db.external_tables.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        ObjectType::UserDefinedType => ("TYPE", db.types.iter().find(|t| is(&t.schema, &t.name))?.owner.clone()),
+        _ => return None,
+    })
+}
+
 /// Retention as days, for telling whether it gets shorter.
 fn retention_days(r: &Option<String>) -> Option<i64> {
     let r = r.as_deref()?;
@@ -197,6 +214,75 @@ impl<'a> Planner<'a> {
             }
         }
         true
+    }
+
+    /// A table whose check constraints, defaults or computed columns call a function that is
+    /// dropped: those parts go before the drop and come back (from the source when it has the
+    /// table) once the function is there again. Returns whether `dep` was such a table.
+    pub(super) fn function_user(&mut self, function: &ObjectName, dep: &ObjectName) -> bool {
+        let (src, tgt) = (self.src, self.tgt);
+        let Some(t) = tgt.table(&dep.schema, &dep.name) else { return false };
+        if !self.dropped.contains(function) || !tgt.routines.iter().any(|r| r.schema == function.schema && r.name == function.name) {
+            return true;
+        }
+        if self.dropped.contains(dep) || self.recreate.contains(dep) {
+            return true;
+        }
+        let needle = format!("[{}].[{}]", function.schema.to_lowercase(), function.name.to_lowercase());
+        let calls = |text: &str| text.to_lowercase().contains(&needle);
+        let s = src.table(&dep.schema, &dep.name);
+        let table = dep.quoted();
+        for ck in t.check_constraints.iter().filter(|c| calls(&c.definition)) {
+            self.drop_check(dep, &ck.name);
+            let ck = s.and_then(|s| s.check_constraints.iter().find(|c| self.same(&c.name, &ck.name))).unwrap_or(ck);
+            self.add_check(dep, ck);
+        }
+        for c in &t.columns {
+            let sc = s.and_then(|s| s.columns.iter().find(|x| self.same(&x.name, &c.name))).unwrap_or(c);
+            if let Some(df) = c.default.as_ref().filter(|df| calls(&df.definition)) {
+                self.drop_default(dep, &c.name, df);
+                if let Some(df) = &sc.default {
+                    let sql = self.ex.default_constraint(dep, &sc.name, &df.name, Check::Create, &ddl::add_default(&table, &sc.name, df));
+                    self.step(Phase::CreateDefaults, format!("Altering {dep}"), vec![sql]);
+                }
+            }
+            if c.computed.as_ref().is_some_and(|x| calls(&x.definition)) {
+                self.release_column(t, &c.name, false);
+                let drop = self.ex.columns(dep, &[&c.name], Check::Drop, &format!("ALTER TABLE {table} DROP COLUMN {}", quote(&c.name)));
+                self.step(Phase::DropDefaults, format!("Altering {dep}"), vec![drop]);
+                if sc.computed.is_some() {
+                    let def = ddl::column_definition_with(sc, true, &self.r, t.memory_optimized);
+                    let add = self.ex.columns(dep, &[&sc.name], Check::Create, &format!("ALTER TABLE {table} ADD {def}"));
+                    self.step(Phase::BindColumns, format!("Altering {dep}"), vec![add]);
+                }
+            }
+        }
+        true
+    }
+
+    /// ALTER AUTHORIZATION for schema objects whose explicit owner differs (or that are created
+    /// with one), unless IgnoreSchemaObjectAuthorization.
+    pub(super) fn authorizations(&mut self, selected: &[&Difference]) {
+        if self.opts.has(Opt::IgnoreSchemaObjectAuthorization) {
+            return;
+        }
+        for d in selected.iter().filter(|d| d.kind != DiffKind::OnlyIn2) {
+            let Some((class, owner)) = object_owner(self.src, d.object_type, &d.name) else { continue };
+            let tn = self.target_name(d);
+            let fresh = d.kind == DiffKind::OnlyIn1 || self.recreate.contains(&d.name) || self.dropped.contains(&tn);
+            let current = if fresh { None } else { object_owner(self.tgt, d.object_type, &tn).and_then(|(_, o)| o) };
+            let same = match (&owner, &current) {
+                (Some(a), Some(b)) => self.same(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if same || (fresh && owner.is_none()) {
+                continue;
+            }
+            let class = if class.is_empty() { String::new() } else { format!("{class} :: ") };
+            let to = owner.as_deref().map(quote).unwrap_or_else(|| "SCHEMA OWNER".into());
+            self.group(Phase::Authorizations, "Altering schema object authorizations", vec![format!("ALTER AUTHORIZATION ON {class}{} TO {to}", d.name.quoted())]);
+        }
     }
 
     // ---- CLR assemblies ----
@@ -399,15 +485,18 @@ impl<'a> Planner<'a> {
                 if let Some(t) = t.filter(|_| rebuild) {
                     let sql = drop(self, t);
                     self.group(Phase::DropDdlTriggers, "Dropping DDL triggers", vec![sql]);
+                } else if t.is_none() && self.rerunnable() {
+                    let sql = drop(self, s);
+                    self.group(Phase::DropDdlTriggers, "Dropping DDL triggers", vec![sql]);
                 }
                 let create = t.is_none() || rebuild;
                 if create {
                     self.recreate.insert(ObjectName::new("", &s.name));
                 }
                 let mut statements = vec![if create {
-                    self.ex.ddl_trigger(&s.name, Check::Create, &ddl_objects::ddl_trigger(s, "CREATE"))
+                    self.ex.ddl_trigger(&s.name, Check::Create, &ddl_objects::ddl_trigger(s, self.ddl_verb("CREATE")))
                 } else {
-                    self.ex.ddl_trigger(&s.name, Check::Alter, &ddl_objects::ddl_trigger(s, "ALTER"))
+                    self.ex.ddl_trigger(&s.name, Check::Alter, &ddl_objects::ddl_trigger(s, self.ddl_verb("ALTER")))
                 }];
                 let was_disabled = if create { false } else { t.is_some_and(|t| t.disabled) };
                 if s.disabled || (create && disable_all) {
@@ -956,7 +1045,7 @@ impl<'a> Planner<'a> {
 
     /// Indexes, constraints and statistics of a table that is not deployed itself, dropped
     /// because a column changed type, come back from the target's definitions.
-    fn restore_released(&mut self, t: &'a Table) {
+    pub(super) fn restore_released(&mut self, t: &'a Table) {
         if self.cmp.differences.iter().any(|d| d.object_type == ObjectType::Table && d.selected && self.target_name(d) == t.object_name()) {
             return;
         }
@@ -1029,6 +1118,9 @@ impl<'a> Planner<'a> {
                         after.push(format!("ALTER TABLE {name} ALTER COLUMN {} {} HIDDEN", quote(&c.name), if c.hidden { "ADD" } else { "DROP" }));
                     }
                 }
+                if pk_dropped {
+                    self.warn(warn::temporal_primary_key(&name.to_string()));
+                }
                 if history_moved || pk_dropped {
                     self.versioning_off(t);
                     return (true, (before, after));
@@ -1052,11 +1144,13 @@ impl<'a> Planner<'a> {
         match (&s.temporal, &t.temporal) {
             (Some(x), None) => {
                 self.retention_warning(s);
+                self.create_history(s);
                 self.step(Phase::Versioning, "", vec![format!("ALTER TABLE {name} SET ({})", ddl::system_versioning(x, &self.r))]);
             }
             (None, Some(y)) => self.drop_old_history(&y.history_table),
             (Some(x), Some(y)) => {
                 if was_switched_off {
+                    self.create_history(s);
                     self.step(Phase::Versioning, "", vec![format!("ALTER TABLE {name} SET ({})", ddl::system_versioning(x, &self.r))]);
                     if self.key(&x.history_table.to_string()) != self.key(&y.history_table.to_string()) {
                         self.drop_old_history(&y.history_table);
@@ -1071,6 +1165,24 @@ impl<'a> Planner<'a> {
             }
             (None, None) => {}
         }
+    }
+
+    /// The source's history table of a table that becomes system-versioned (or changes history
+    /// table), when the target does not have it: SQL Server would make one without its indexes.
+    pub(super) fn create_history(&mut self, s: &'a Table) {
+        let src = self.src;
+        let Some(x) = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal)) else { return };
+        let Some(h) = src.table(&x.history_table.schema, &x.history_table.name) else { return };
+        if self.tgt.table(&h.schema, &h.name).is_some() {
+            return;
+        }
+        let name = h.object_name();
+        let mut statements = vec![ddl::create_table_with(h, None, false, &self.r)];
+        for ix in &h.indexes {
+            statements.extend(ddl::create_index_with(&name.quoted(), ix, &self.r, &Host::of_table(h)));
+        }
+        self.recreate.insert(name.clone());
+        self.module_step(Phase::CreateObjects, format!("Creating {name}"), statements, &ModuleSettings::default());
     }
 
     fn drop_old_history(&mut self, h: &ObjectName) {
@@ -1108,6 +1220,7 @@ impl<'a> Planner<'a> {
         }
         if let Some(x) = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal)) {
             self.retention_warning(s);
+            self.create_history(s);
             self.step(Phase::Versioning, "", vec![format!("ALTER TABLE {name} SET ({})", ddl::system_versioning(x, &self.r))]);
         }
     }

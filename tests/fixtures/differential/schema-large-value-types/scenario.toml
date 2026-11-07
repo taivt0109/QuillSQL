@@ -1,0 +1,3 @@
+kind = "schema"
+about = "sp_tableoption 'large value types out of row' set only in db1"
+finding = "schema-model L1"
