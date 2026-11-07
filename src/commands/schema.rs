@@ -365,7 +365,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
 fn identifier(source: &Source, db: &Database) -> String {
     match source {
         Source::Live(spec) => format!("{}.{}", spec.server, db.name),
-        Source::Snapshot(_) | Source::Scripts { .. } => db.name.clone(),
+        Source::Snapshot(_) | Source::Scripts { .. } | Source::Backup(_) => db.name.clone(),
     }
 }
 
@@ -496,6 +496,7 @@ fn report_source(side: Option<&Source>, db: &Database) -> report::DataSource {
             database: db.name.clone(),
             created: None,
         },
+        Some(Source::Backup(_)) => report::DataSource { kind: "backup", server: String::new(), database: db.name.clone(), created: None },
         None => report::DataSource { kind: "", server: String::new(), database: String::new(), created: None },
     }
 }
@@ -583,6 +584,7 @@ fn spec_of(side: Option<&Source>) -> crate::project::SourceSpec {
         }
         Some(Source::Snapshot(p)) => SourceSpec { kind: "snapshot".into(), path: p.display().to_string(), ..Default::default() },
         Some(Source::Scripts { path, .. }) => SourceSpec { kind: "scripts".into(), path: path.display().to_string(), ..Default::default() },
+        Some(Source::Backup(b)) => SourceSpec { kind: "backup".into(), path: b.describe(), backup_set: b.set.clone().unwrap_or_default(), ..Default::default() },
         None => SourceSpec { kind: "empty".into(), ..Default::default() },
     }
 }
@@ -637,6 +639,7 @@ fn describe(side: Option<&Source>, db: &Database) -> String {
         Some(Source::Live(spec)) => format!("{}.{}", spec.server, db.name),
         Some(Source::Snapshot(path)) => format!("{} (snapshot {})", db.name, path.display()),
         Some(Source::Scripts { path, .. }) => format!("{} (scripts folder {})", db.name, path.display()),
+        Some(Source::Backup(b)) => format!("{} (backup {})", db.name, b.describe()),
         None => "Empty".into(),
     }
 }

@@ -1,6 +1,7 @@
 //! Comparison sources besides live databases: scripts folders, source control and SQL Compare
 //! snapshots.
 
+pub mod backup;
 pub mod datafolder;
 pub mod expr;
 pub mod events;

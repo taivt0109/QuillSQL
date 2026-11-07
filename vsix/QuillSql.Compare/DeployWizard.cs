@@ -117,7 +117,7 @@ namespace QuillSql.Compare
             var methodPage = Ui.Column(deploy, deployOptions, script, scriptNote, backup);
             if (_target == null)
             {
-                var why = Ui.Text("The target is a snapshot, an empty database or a source control revision, so the changes can only be scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
+                var why = Ui.Text("The target is a snapshot, a backup, an empty database or a source control revision, so the changes can only be scripted.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
                 why.Margin = new Thickness(0, 14, 0, 0);
                 methodPage.Children.Add(why);
             }
