@@ -2377,7 +2377,10 @@ impl Builder {
                         && x.name == p.name
                 };
                 self.db.extended_properties.retain(|x| !same(x));
-                self.db.extended_properties.push(p);
+                // SQL Clone's marker is not part of the schema.
+                if !p.is_clone_marker(self.db.case_sensitive()) {
+                    self.db.extended_properties.push(p);
+                }
                 Ok(())
             }
             "sp_addrolemember" => {
