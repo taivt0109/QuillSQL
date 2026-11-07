@@ -33,6 +33,16 @@ fn backup_switches() {
         assert_eq!(o.status.code(), Some(64), "{}", text(&o));
         assert!(text(&o).contains("The number of passwords specified should equal the number of backup files supplied."), "{}", text(&o));
     }
+    // An encrypted SQL Backup file and no (or a wrong) password.
+    let sqb = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sqb/v5_aes128_lz.sqb");
+    for extra in [None, Some("/backuppasswords1:wrong")] {
+        let mut args = vec![format!("/backup1:{sqb}"), format!("/backup2:{junk}")];
+        args.extend(extra.map(str::to_string));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let o = quill("schema", &args);
+        assert_eq!(o.status.code(), Some(65), "{}", text(&o));
+        assert!(text(&o).contains("No passwords were supplied or they were not correct for the encrypted backup files - 'Cannot decrypt SQB file..'"), "{}", text(&o));
+    }
     // A backup cannot be deployed to, and /backupset needs /backup.
     let o = quill("schema", &["/db1:x", &format!("/backup2:{junk}"), "/synchronize"]);
     assert_eq!(o.status.code(), Some(8), "{}", text(&o));
