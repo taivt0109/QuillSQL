@@ -646,3 +646,21 @@ pub fn temporal_primary_key(t: &str) -> Warning {
         format!("The table {t} is a temporal table on which the primary key has changed.\r\nWe therefore need to rebuild this to prevent script ordering errors relating to the primary key."),
     )
 }
+
+/// Deploying to a scripts folder: a user without a login loses that fact.
+pub fn user_without_login_folder(u: &str) -> Warning {
+    w(
+        Severity::Medium,
+        u,
+        format!("The user {u} does not have an associated login. If this is a contained user, that information won't be stored in the scripts folder and you'll need to create the user manually in any databases you deploy to from this scripts folder."),
+    )
+}
+
+/// An SQL Change Automation project is the source: its migration scripts play no part.
+pub fn sca_migrations_ignored() -> Warning {
+    w(
+        Severity::Medium,
+        "",
+        "Be aware that any migration scripts in your SQL Change Automation project are ignored when using QuillSQL Compare.\r\nThe comparison will use the state of the project as represented by the Programmable Objects and Offline Schema Model folders.".into(),
+    )
+}
