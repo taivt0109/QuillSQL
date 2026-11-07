@@ -389,3 +389,27 @@ fn sql_compare_reads_our_snapshots_as_identical() {
         assert_eq!(out.status.code(), Some(63), "{name}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 }
+
+#[test]
+fn assemblies_written_as_dlls_read_back() {
+    let Some(server) = server() else { return };
+    let clr = |hex: &str| format!("0x{}", hex.trim());
+    let objects = include_str!("fixtures/objects/objects.sql").replace("{CLR}", &clr(include_str!("fixtures/objects/clr.hex")));
+    server.create("QD_sources_Dlls", &objects);
+    let live = server.read("QD_sources_Dlls");
+    server.drop("QD_sources_Dlls");
+    let dir = temp("dlls");
+    let opts = Options::default_set().without(Opt::IgnoreFileGroups).with(Opt::IgnoreCertificatesAndCryptoKeys).with(Opt::WriteAssembliesAsDlls);
+    folder::write_all(&live, &dir, &opts).unwrap();
+    let dll = dir.join("Assemblies").join("QuillClr.dll");
+    assert_eq!(std::fs::read(&dll).unwrap().len() * 2, live.assemblies[0].files[0].content.len());
+    assert!(!dir.join("Assemblies").join("QuillClr.sql").exists());
+    let f = folder::read(&dir).unwrap();
+    assert!(f.messages.is_empty(), "{:?}", f.messages);
+    // An image has no place for the assembly's grants and extended properties.
+    let compared = opts.with(Opt::IgnoreExtendedProperties).with(Opt::IgnorePermissions);
+    let c = schema::compare(&f.database, &live, &compared, &Mappings::default());
+    let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal && d.object_type == schema::ObjectType::Assembly).collect();
+    assert!(left.is_empty(), "{left:#?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

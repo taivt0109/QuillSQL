@@ -408,7 +408,7 @@ pub fn script_files(dir: &Path, info: &FolderInfo) -> Vec<PathBuf> {
                 if !name.starts_with('.') && !same_path(&p, &custom) {
                     stack.push(p);
                 }
-            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sql")) {
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sql") || x.eq_ignore_ascii_case("dll")) {
                 let in_data = !info.prefix("Data").is_empty() && same_path(&d, &data);
                 let listed = info.data_files.iter().any(|f| f.eq_ignore_ascii_case(&name));
                 if !in_data && !listed {
@@ -445,6 +445,14 @@ pub fn read(dir: &Path) -> Result<Folder, String> {
     let mut reader = parse::Reader::new(info.defaults());
     for file in files {
         let bytes = std::fs::read(&file).map_err(|e| format!("An error occurred while reading from the scripts folder '{}': {e}", dir.display()))?;
+        if file.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll")) {
+            // An assembly written as its image (WriteAssembliesAsDlls): named after the file,
+            // owned by dbo, SAFE, as SQL Compare reads it.
+            let name = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
+            reader.add_file(&file, &format!("CREATE ASSEMBLY {}\r\nAUTHORIZATION [dbo]\r\nFROM 0x{hex}\r\nWITH PERMISSION_SET=SAFE\r\nGO\r\n", crate::db::quote(&name)));
+            continue;
+        }
         reader.add_file(&file, &decode(&bytes, &info.encoding));
     }
     let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.display().to_string());
@@ -501,6 +509,43 @@ fn file_stem(schema: &str, name: &str) -> String {
         s.push('_');
     }
     s
+}
+
+/// Marks the file content of an assembly written as its image (WriteAssembliesAsDlls).
+const BINARY: &str = "\u{0}binary\n";
+
+/// An assembly as its files: the main image, then `name\thex` for each further file.
+pub fn binary_script(a: &Assembly) -> String {
+    let mut s = BINARY.to_string();
+    for f in &a.files {
+        s.push_str(&format!("{}\t{}\n", f.name, f.content));
+    }
+    s
+}
+
+/// The `.dll` for an assembly written as its image (unless it already has a file of its own).
+fn binary_path(p: &Path, text: &str) -> PathBuf {
+    if text.starts_with(BINARY) && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sql")) { p.with_extension("dll") } else { p.to_path_buf() }
+}
+
+/// Writes a script, or an assembly's image with its further files as `.netmodule`s beside it.
+fn write_file(p: &Path, text: &str, encoding: &str) -> Result<(), String> {
+    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let Some(files) = text.strip_prefix(BINARY) else {
+        return std::fs::write(p, encode(text, encoding)).map_err(|e| err(p, e));
+    };
+    let unhex = |h: &str| -> Vec<u8> { (0..h.len() / 2).filter_map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok()).collect() };
+    for (i, line) in files.lines().enumerate() {
+        let (name, hex) = line.split_once('\t').unwrap_or(("", line));
+        let target = if i == 0 {
+            p.to_path_buf()
+        } else {
+            let stem = Path::new(&name.replace('\\', "/")).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| name.to_string());
+            p.with_file_name(format!("{}.netmodule", sanitize(&stem)))
+        };
+        std::fs::write(&target, unhex(hex)).map_err(|e| err(&target, e))?;
+    }
+    Ok(())
 }
 
 /// Where SQL Compare puts an object in a new folder, relative to the folder.
@@ -625,11 +670,11 @@ pub fn write_all(db: &Database, dir: &Path, o: &Options) -> Result<usize, String
     let paths = assign_paths(&keys, &info, &HashMap::new(), None);
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for (k, text) in &scripts {
-        let p = dir.join(&paths[k]);
+        let p = dir.join(binary_path(&paths[k], text));
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        std::fs::write(&p, encode(text, &info.encoding)).map_err(|e| format!("{}: {e}", p.display()))?;
+        write_file(&p, text, &info.encoding)?;
     }
     let info_path = dir.join(INFO_FILE);
     std::fs::write(&info_path, info.xml()).map_err(|e| format!("Failed to write database information file: {}. Original error message: {e}", info_path.display()))?;
@@ -776,7 +821,13 @@ pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &
             keys.push(k.clone());
         }
     }
-    let paths = assign_paths(&keys, &target.info, &origins, target.project.as_ref());
+    let mut paths = assign_paths(&keys, &target.info, &origins, target.project.as_ref());
+    // Assemblies written as images go in .dll files.
+    for (k, text) in after_scripts.iter().map(|(k, t)| (k, t)).chain(before.iter()) {
+        if let Some(p) = paths.get_mut(k) {
+            *p = binary_path(p, text);
+        }
+    }
     let mut dirty: Vec<PathBuf> = Vec::new();
     for k in &keys {
         if before.get(k) != after_map.get(k) {
@@ -807,7 +858,7 @@ pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        std::fs::write(&full, encode(&text, &target.info.encoding)).map_err(|e| format!("{}: {e}", full.display()))?;
+        write_file(&full, &text, &target.info.encoding)?;
         changes.written.push(rel);
     }
     if target.info.file.is_none() {

@@ -564,7 +564,7 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
         ));
     }
     // Statistics, edge constraints, the full-text index and sensitivity classification.
-    for s in crate::schema::ddl_objects::table_parts(t) {
+    for s in crate::schema::ddl_objects::table_parts(t, o.has(Opt::InlineFulltextFields)) {
         out.batch(&s);
     }
     permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), o);

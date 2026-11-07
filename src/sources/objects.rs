@@ -47,6 +47,7 @@ pub fn ddl_trigger_file(db: &Database, t: &DdlTrigger, o: &Options) -> String {
 pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
     let key = |ty, s: &str, n: &str| (FileKind::Object(ty), s.to_string(), n.to_string());
     let mut out: Vec<(ObjectKey, String)> = Vec::new();
+    let mut images: Vec<(ObjectKey, String)> = Vec::new();
     let mut add = |k: ObjectKey, mut v: Vec<String>, g: Vec<String>| {
         v.extend(g);
         // Extended properties of the object.
@@ -65,6 +66,11 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
         out.push((k, script::statements(&v)));
     };
     for a in &db.assemblies {
+        if o.has(crate::schema::Opt::WriteAssembliesAsDlls) {
+            // The image itself, as SQL Compare writes it; grants and properties have no place there.
+            images.push((key(ObjectType::Assembly, "", &a.name), super::folder::binary_script(a)));
+            continue;
+        }
         add(key(ObjectType::Assembly, "", &a.name), d::create_assembly(a), grants(db, "ASSEMBLY", None, &a.name, o));
     }
     for x in &db.xml_schema_collections {
@@ -137,6 +143,7 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
     for x in &db.external_tables {
         add(key(ObjectType::ExternalTable, &x.schema, &x.name), vec![d::create_external_table(x)], grants(db, "OBJECT", Some(&x.schema), &x.name, o));
     }
+    out.extend(images);
     out
 }
 
