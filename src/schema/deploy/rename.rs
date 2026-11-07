@@ -113,3 +113,18 @@ impl<'a> Planner<'a> {
         self.renames = renames;
     }
 }
+
+/// Warnings for writing the selected differences to a scripts folder rather than a script.
+pub fn folder_warnings(cmp: &Comparison, src: &Database) -> Vec<Warning> {
+    let mut out = Vec::new();
+    for d in cmp.differences.iter().filter(|d| d.selected && d.object_type == ObjectType::User && d.kind != DiffKind::OnlyIn2) {
+        if let Some(u) = src.principals.iter().find(|p| p.name == d.name.name)
+            && u.login.is_none()
+            && matches!(u.kind.as_str(), "SQL_USER" | "WINDOWS_USER" | "WINDOWS_GROUP")
+            && !u.name.eq_ignore_ascii_case("guest")
+        {
+            out.push(warn::user_without_login_folder(&u.name));
+        }
+    }
+    out
+}

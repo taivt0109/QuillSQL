@@ -326,6 +326,9 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let mut script = None;
     if args.has("scriptfile") || (args.has("synchronize") && live_target.is_some()) {
         let mut s = build_script(args, &comparison, &db1, &db2, &options, &mappings, &source1, &side2)?;
+        if args.has("sca1") {
+            s.warnings.push(crate::schema::warnings::sca_migrations_ignored());
+        }
         if matches!(side2, Side::Source(Source::Scripts { .. })) {
             // A scripts folder is rewritten, not run: no warning about running without transactions.
             let no_transactions = crate::schema::warnings::no_transactions().message;
@@ -350,6 +353,9 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         if matches!(side2, Side::Source(Source::Scripts { revision: Some(_), .. })) {
             return Err(ArgError::new(exit::USAGE, "/synchronize cannot write to a source control revision; give the scripts folder with /scripts2"));
         }
+        let warnings = deploy::DeploymentScript { warnings: deploy::folder_warnings(&comparison, &db1), ..Default::default() };
+        common::report_warnings(args, &warnings);
+        common::check_warnings(args, &warnings)?;
         sources::sync_folder(&db1, f, &comparison.differences, &options)?;
         return Ok(exit::SUCCESS);
     }

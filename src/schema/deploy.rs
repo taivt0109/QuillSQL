@@ -24,6 +24,7 @@ use crate::db::{literal, quote};
 
 mod objects;
 mod rename;
+pub use rename::folder_warnings;
 #[cfg(test)]
 mod tests_fix;
 mod unbind;
