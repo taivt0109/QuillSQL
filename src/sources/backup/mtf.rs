@@ -96,7 +96,8 @@ impl Compressed {
             }
             match h[0] {
                 // 0x21: SQL Server 2022 blocks (28-byte header); 0x81: earlier ones (8 bytes).
-                0x21 | 0x81 if h[4..8] == [0xff; 4] || h[0] == 0x81 => {
+                // The 2022 header's bytes 4..24 vary from block to block (mostly all ones).
+                0x21 | 0x81 => {
                     let header = if h[0] == 0x21 { 28 } else { 8 };
                     let ulen = (h[1] as u64) << 9;
                     let clen = u16::from_le_bytes([h[2], h[3]]) as u64;
@@ -115,7 +116,8 @@ impl Compressed {
                     raw += STORED_BLOCK;
                 }
                 _ => {
-                    // Padding to the next 4 KB boundary.
+                    // Padding to the next 4 KB boundary; at a boundary, the end of the blocks (a
+                    // trailer may follow).
                     if raw.is_multiple_of(STORED_BLOCK) {
                         break;
                     }
@@ -157,7 +159,7 @@ impl Compressed {
 /// Whether a compressed block starts `b` and holds the tape header.
 fn first_block(b: &[u8]) -> bool {
     let header = match b[0] {
-        0x21 if b[4..8] == [0xff; 4] => 28,
+        0x21 => 28,
         0x81 => 8,
         _ => return false,
     };
@@ -465,5 +467,62 @@ mod tests {
         let b = [(y >> 6) as u8, (((y & 0x3f) << 2) | (11 >> 2)) as u8, (((11 & 3) << 6) | (7 << 1)) as u8, (6 << 4 | 4 >> 2) as u8, 5];
         assert_eq!(mtf_date(&b).unwrap().to_string(), "2026-11-07 06:04:05");
         assert_eq!(Lsn(37, 160, 1).to_string(), "00000037:00000160:0001");
+    }
+
+    /// A compressed block holding `data` with every literal coded in 8 bits: the code of byte b
+    /// is b itself, so the bit stream is the bytes in order, in little-endian 16-bit words.
+    fn block(fields: [u8; 20], data: &[u8]) -> Vec<u8> {
+        let mut body = vec![0x88u8; 128];
+        body.extend_from_slice(&[0; 128]);
+        for pair in data.chunks(2) {
+            body.extend_from_slice(&[*pair.get(1).unwrap_or(&0), pair[0]]);
+        }
+        let mut b = vec![0x21, (data.len() >> 9) as u8];
+        b.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        b.extend_from_slice(&fields);
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&body);
+        b
+    }
+
+    #[test]
+    fn compressed_blocks_whatever_their_header_fields() {
+        // Bytes 4..24 of a 2022 block header are mostly all ones, but not always.
+        let mut odd = [0u8; 20];
+        odd[..8].copy_from_slice(&[0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        let other = [7, 9, 0xec, 3, 10, 0, 0, 0, 0x98, 0x47, 0x9b, 0x37, 14, 0, 0, 0, 0, 0, 0, 0];
+        let tape: Vec<u8> = b"TAPE".iter().copied().chain((0..1020).map(|i| (i % 251) as u8)).collect();
+        let pages: Vec<u8> = (0..8192u32).map(|i| (i * 7 % 256) as u8).collect();
+        let mut file = b"MSSQLBAK".to_vec();
+        file.resize(480, 0);
+        for (fields, data) in [([0xff; 20], &tape[..]), (odd, &pages[..]), (other, &pages[..4096]), ([0xff; 20], &tape[..])] {
+            file.extend(block(fields, data));
+        }
+        file.resize(file.len().next_multiple_of(4096) + 4096, 0);
+        let c = Compressed::open(Arc::new(Memory(file.clone()))).unwrap();
+        assert_eq!(c.len(), 1024 * 2 + 8192 + 4096);
+        let mut all = vec![0u8; 1024 * 2 + 8192 + 4096];
+        assert_eq!(read_full(&c, 0, &mut all), all.len());
+        assert_eq!(all, [&tape[..], &pages, &pages[..4096], &tape].concat());
+
+        // A trailer after the blocks ends them.
+        let at = file.len() - 4096;
+        file[at..at + 16].copy_from_slice(&[0, 0x3a, 0x27, 9, 0, 0, 0, 0, 0, 0, 0x40, 0xf1, 0, 0, 0, 0]);
+        assert_eq!(Compressed::open(Arc::new(Memory(file))).unwrap().len(), c.len());
+    }
+
+    struct Memory(Vec<u8>);
+
+    impl Medium for Memory {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            let start = (offset as usize).min(self.0.len());
+            let n = buf.len().min(self.0.len() - start);
+            buf[..n].copy_from_slice(&self.0[start..start + n]);
+            Ok(n)
+        }
+
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
     }
 }
