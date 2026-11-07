@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::features::{Feature, Features};
 use super::options::{Opt, Options};
 use super::text::{self, TextKind};
 use crate::catalog::*;
@@ -306,6 +307,11 @@ pub fn compare(db1: &Database, db2: &Database, opts: &Options, mappings: &Mappin
     result
 }
 
+/// What a side's server supports; a model without a server (scripts) supports everything.
+fn features(db: &Database) -> Features {
+    if db.server.major_version == 0 && db.server.engine_edition == 0 { Features::latest() } else { Features::of(&db.server, 0, 0, false) }
+}
+
 fn is_function(r: &Routine) -> bool {
     !matches!(r.kind, RoutineKind::Procedure | RoutineKind::ClrProcedure)
 }
@@ -362,6 +368,12 @@ pub(super) struct Comparer<'a> {
     pub(super) opts: &'a Options,
     mappings: &'a Mappings,
     case_sensitive: bool,
+    /// Both servers have Stretch Database.
+    stretch: bool,
+    /// The extended-property class of the columns compared: TABLE, or TYPE for table types.
+    xprop_class: &'static str,
+    /// The target refuses a trigger's WITH APPEND, so it is left out of the comparison.
+    no_with_append: bool,
     result: Comparison,
 }
 
@@ -373,6 +385,9 @@ impl<'a> Comparer<'a> {
             opts,
             mappings,
             case_sensitive: opts.has(Opt::CaseSensitiveObjectDefinition),
+            stretch: features(db1).has(Feature::Stretch) && features(db2).has(Feature::Stretch),
+            no_with_append: features(db2).has(Feature::NoWithAppend),
+            xprop_class: "TABLE",
             result: Comparison::default(),
         }
     }
@@ -391,6 +406,14 @@ impl<'a> Comparer<'a> {
 
     pub(super) fn same_name(&self, a: &str, b: &str) -> bool {
         self.key(a) == self.key(b)
+    }
+
+    /// The explicit owner of a schema object (`None` = the schema's owner), unless
+    /// IgnoreSchemaObjectAuthorization.
+    pub(super) fn authorization(&self, d: &mut Diffs, a: Option<&str>, b: Option<&str>) {
+        if !self.opts.has(Opt::IgnoreSchemaObjectAuthorization) && a.map(|x| self.key(x)) != b.map(|x| self.key(x)) {
+            d.add("Authorization", a.map(Into::into), b.map(Into::into));
+        }
     }
 
     /// The schema in database 2 that a database-1 schema maps to.
@@ -464,8 +487,12 @@ impl<'a> Comparer<'a> {
         }
     }
 
+    /// Schemas, dbo included: dbo is never reported only in one database (it always exists),
+    /// but its owner, permissions and extended properties are compared.
     fn schemas(&mut self) {
-        let skip = |s: &Schema| s.name == "dbo";
+        let has_dbo = |db: &Database| db.schemas.iter().any(|s| s.name == "dbo");
+        let both = has_dbo(self.db1) && has_dbo(self.db2);
+        let skip = |s: &Schema| s.name == "dbo" && !both;
         let left: Vec<&Schema> = self.db1.schemas.iter().filter(|s| !skip(s)).collect();
         let right: Vec<&Schema> = self.db2.schemas.iter().filter(|s| !skip(s)).collect();
         let empty = String::new();
@@ -484,6 +511,8 @@ impl<'a> Comparer<'a> {
                 d.out
             },
         );
+        // dbo is listed only when it differs.
+        self.result.differences.retain(|d| !(d.object_type == ObjectType::Schema && d.kind == DiffKind::Equal && d.name.name == "dbo"));
         // Schemas have no schema of their own.
         for diff in &mut self.result.differences {
             if diff.object_type == ObjectType::Schema {
@@ -505,15 +534,27 @@ impl<'a> Comparer<'a> {
                 .tables
                 .iter()
                 .find(|m| self.same_name(&m.source.schema, &t1.schema) && self.same_name(&m.source.name, &t1.name));
-            let target = match mapping {
-                Some(m) => index.get(&(self.key(&m.target.schema), self.key(&m.target.name))).copied(),
-                None => index.get(&(self.key(&self.target_schema(&t1.schema)), self.key(&t1.name))).copied(),
+            // A mapping whose target table is not there (renamed already) falls back to the name.
+            let by_name = || index.get(&(self.key(&self.target_schema(&t1.schema)), self.key(&t1.name))).copied();
+            let mapped = mapping.and_then(|m| index.get(&(self.key(&m.target.schema), self.key(&m.target.name))).copied());
+            // A mapping to nothing (empty target) keeps the table unpaired.
+            let (target, mapping) = match (mapped, mapping) {
+                (Some(i), _) => (Some(i), mapping),
+                (None, Some(m)) if m.target.name.is_empty() => (None, None),
+                _ => (by_name(), None),
             };
             match target {
-                Some(i) if !db2.tables[i].history_table => {
+                Some(i) if !db2.tables[i].history_table && !matched[i] => {
                     matched[i] = true;
                     let t2 = &db2.tables[i];
                     let mut d = Diffs::default();
+                    // A mapped pair with another name is different: deploying renames the table.
+                    if !self.same_name(&t1.name, &t2.name) {
+                        d.add("Name", Some(t1.name.clone()), Some(t2.name.clone()));
+                    }
+                    if !self.same_name(&self.target_schema(&t1.schema), &t2.schema) {
+                        d.add("Owner", Some(t1.schema.clone()), Some(t2.schema.clone()));
+                    }
                     self.table(&mut d, t1, t2, mapping);
                     self.push(ObjectType::Table, Some(t1.object_name()), Some(t2.object_name()), d.out);
                 }
@@ -529,6 +570,16 @@ impl<'a> Comparer<'a> {
 
     fn table(&mut self, d: &mut Diffs, a: &Table, b: &Table, mapping: Option<&TableMapping>) {
         let o = self.opts;
+        self.authorization(d, a.owner.as_deref(), b.owner.as_deref());
+        d.prop("FileTable", a.file_table.is_some(), b.file_table.is_some());
+        if let (Some(x), Some(y)) = (&a.file_table, &b.file_table) {
+            if !self.same_name(&x.directory, &y.directory) {
+                d.add("Directory name", Some(x.directory.clone()), Some(y.directory.clone()));
+            }
+            if !self.same_name(&x.filename_collation, &y.filename_collation) {
+                d.add("Filename collation", Some(x.filename_collation.clone()), Some(y.filename_collation.clone()));
+            }
+        }
         if !o.has(Opt::IgnoreChangeTracking) {
             d.prop("Change tracking", a.change_tracking.is_some(), b.change_tracking.is_some());
             if let (Some(x), Some(y)) = (&a.change_tracking, &b.change_tracking) {
@@ -543,15 +594,23 @@ impl<'a> Comparer<'a> {
             if let (Some(h1), Some(h2)) =
                 (self.db1.table(&x.history_table.schema, &x.history_table.name), self.db2.table(&y.history_table.schema, &y.history_table.name))
             {
+                // The history table is compared in full: columns, indexes, storage, properties.
                 d.enter("History table", Some(&h1.name), Some(&h2.name));
-                self.columns(d, h1, h2, None);
+                self.table(d, h1, h2, None);
                 d.leave();
             }
         }
         d.prop("Memory optimized", a.memory_optimized, b.memory_optimized);
         d.opt_prop("Durability", a.durability.as_deref(), b.durability.as_deref());
         d.opt_prop("Graph table", a.graph.as_deref(), b.graph.as_deref());
-        self.columns(d, a, b, mapping);
+        if self.stretch {
+            d.prop("Remote data archive state", a.remote_data_archive, b.remote_data_archive);
+        }
+        d.prop("Large value types out of row", a.large_value_types_out_of_row, b.large_value_types_out_of_row);
+        // A FileTable's columns are fixed.
+        if a.file_table.is_none() || b.file_table.is_none() {
+            self.columns(d, a, b, mapping);
+        }
         self.indexes(d, &a.indexes, &b.indexes, a.memory_optimized);
         if !o.has(Opt::IgnoreKeys) {
             self.foreign_keys(d, a, b, mapping);
@@ -667,7 +726,7 @@ impl<'a> Comparer<'a> {
                     column_props(d, x, y, self.opts, a.memory_optimized, false);
                     self.sensitivity(d, x, y);
                     let minor = |c: &Column| Some(c.name.clone());
-                    self.xprops_minor(d, "TABLE", &a.schema, &a.name, &b.name, "COLUMN", minor(x), minor(y));
+                    self.xprops_minor(d, self.xprop_class, &a.schema, &a.name, &b.name, "COLUMN", minor(x), minor(y));
                     d.leave();
                 }
                 (Some(x), None) => d.only1("Column", &x.name),
@@ -950,7 +1009,7 @@ impl<'a> Comparer<'a> {
     fn triggers(&self, d: &mut Diffs, a: &[Trigger], b: &[Trigger]) {
         let o = self.opts;
         let keep = |t: &&Trigger| {
-            !(o.has(Opt::IgnoreInsteadOfTriggers) && t.instead_of) && !(o.has(Opt::IgnoreReplicationTriggers) && t.not_for_replication)
+            !(o.has(Opt::IgnoreInsteadOfTriggers) && t.instead_of) && !(o.has(Opt::IgnoreReplicationTriggers) && is_replication_trigger(&t.name))
         };
         let left: Vec<&Trigger> = a.iter().filter(keep).collect();
         let right: Vec<&Trigger> = b.iter().filter(keep).collect();
@@ -962,7 +1021,31 @@ impl<'a> Comparer<'a> {
                     let y = right[j];
                     d.enter("Trigger", Some(&x.name), Some(&y.name));
                     d.prop("Disabled", x.disabled, y.disabled);
-                    self.module_text(d, &x.definition, &y.definition, x.encrypted, y.encrypted);
+                    let clr = |t: &Trigger| t.clr_method.is_some();
+                    d.prop("Is CLR object", clr(x), clr(y));
+                    if clr(x) && clr(y) {
+                        let part = |t: &Trigger, i: usize| t.clr_method.as_deref().map(|m| clr_part(m, i));
+                        for (i, what) in ["CLR assembly", "CLR class", "CLR method"].into_iter().enumerate() {
+                            if part(x, i).map(|v| self.key(&v)) != part(y, i).map(|v| self.key(&v)) {
+                                d.add(what, part(x, i), part(y, i));
+                            }
+                        }
+                        let kind = |t: &Trigger| match t.execute_as.as_deref() {
+                            None => "CALLER",
+                            Some(e) if e.eq_ignore_ascii_case("OWNER") => "OWNER",
+                            Some(e) if e.eq_ignore_ascii_case("SELF") => "SELF",
+                            Some(_) => "USER",
+                        };
+                        d.prop("Execute as", kind(x), kind(y));
+                        if kind(x) == "USER" && kind(y) == "USER" && !self.same_name(x.execute_as.as_deref().unwrap_or_default(), y.execute_as.as_deref().unwrap_or_default()) {
+                            d.add("Execute as user", x.execute_as.clone(), y.execute_as.clone());
+                        }
+                    } else {
+                        // A target that refuses WITH APPEND gets the trigger without it.
+                        let text = |t: &Trigger| if self.no_with_append { strip_with_append(&t.definition) } else { t.definition.clone() };
+                        self.module_text(d, &text(x), &text(y), x.encrypted, y.encrypted);
+                        self.settings(d, &x.settings, &y.settings);
+                    }
                     d.prop("Events", x.events.join(", "), y.events.join(", "));
                     if !o.has(Opt::IgnoreInsteadOfTriggers) {
                         d.prop("INSTEAD OF", x.instead_of, y.instead_of);
@@ -988,6 +1071,9 @@ impl<'a> Comparer<'a> {
 
     pub(super) fn module_text(&self, d: &mut Diffs, a: &str, b: &str, enc_a: bool, enc_b: bool) {
         let o = self.opts;
+        // With AddWithEncryption the source is deployed encrypted: an unencrypted target differs.
+        let enc_a = enc_a || (o.has(Opt::AddWithEncryption) && !o.has(Opt::IgnoreWithEncryption) && !has_with_encryption(a));
+        let enc_b = enc_b || (o.has(Opt::AddWithEncryption) && !o.has(Opt::IgnoreWithEncryption) && has_with_encryption(b));
         if enc_a || enc_b {
             // Without decryption only the flag can be compared.
             d.prop("Encrypted", enc_a, enc_b);
@@ -1014,8 +1100,19 @@ impl<'a> Comparer<'a> {
 
     fn view(&self, a: &View, b: &View) -> Vec<PropDiff> {
         let mut d = Diffs::default();
+        self.authorization(&mut d, a.owner.as_deref(), b.owner.as_deref());
         self.module_text(&mut d, &a.definition, &b.definition, a.encrypted, b.encrypted);
         self.settings(&mut d, &a.settings, &b.settings);
+        for x in &a.columns {
+            if let Some(y) = b.columns.iter().find(|y| self.same_name(&x.name, &y.name)) {
+                let mut sub = Diffs::default();
+                self.xprops_minor(&mut sub, "VIEW", &a.schema, &a.name, &b.name, "COLUMN", Some(x.name.clone()), Some(y.name.clone()));
+                for mut p in sub.out {
+                    p.location.insert(0, Frame { name: "Column".into(), source: Some(x.name.clone()), target: Some(y.name.clone()) });
+                    d.out.push(p);
+                }
+            }
+        }
         if !self.opts.has(Opt::IgnoreTriggers) {
             self.triggers(&mut d, &a.triggers, &b.triggers);
         }
@@ -1029,6 +1126,7 @@ impl<'a> Comparer<'a> {
 
     fn routine(&self, a: &Routine, b: &Routine) -> Vec<PropDiff> {
         let mut d = Diffs::default();
+        self.authorization(&mut d, a.owner.as_deref(), b.owner.as_deref());
         let clr = |r: &Routine| r.clr_method.is_some();
         d.prop("CLR", clr(a), clr(b));
         if clr(a) && clr(b) {
@@ -1052,6 +1150,16 @@ impl<'a> Comparer<'a> {
         d.prop("Allow NULLs", a.nullable, b.nullable);
         d.opt_prop("Base type", a.base_type.as_ref().map(DataType::sql).as_deref(), b.base_type.as_ref().map(DataType::sql).as_deref());
         d.opt_prop("CLR class", a.clr_class.as_deref(), b.clr_class.as_deref());
+        self.authorization(&mut d, a.owner.as_deref(), b.owner.as_deref());
+        if !self.opts.has(Opt::IgnoreBindings) {
+            let key = |n: &Option<String>| n.as_ref().map(|x| self.key(x));
+            if key(&a.bound_default) != key(&b.bound_default) {
+                d.add("Bound default", a.bound_default.clone(), b.bound_default.clone());
+            }
+            if key(&a.bound_rule) != key(&b.bound_rule) {
+                d.add("Bound rule", a.bound_rule.clone(), b.bound_rule.clone());
+            }
+        }
         if a.kind == UserTypeKind::Table && b.kind == UserTypeKind::Table {
             // Table types: compare as tables; their constraint names are always generated.
             let opts = self.opts.clone().with(Opt::IgnoreConstraintNames);
@@ -1067,17 +1175,20 @@ impl<'a> Comparer<'a> {
             };
             let (ta, tb) = (as_table(a), as_table(b));
             let mut sub = sub;
+            sub.xprop_class = "TYPE";
             sub.columns(&mut d, &ta, &tb, None);
             sub.indexes(&mut d, &ta.indexes, &tb.indexes, ta.memory_optimized);
             sub.checks(&mut d, &ta.check_constraints, &tb.check_constraints);
             d.prop("Memory optimized", a.memory_optimized, b.memory_optimized);
         }
         self.xprops(&mut d, "TYPE", Some(&a.schema), &a.name, &b.name);
+        self.permissions(&mut d, "TYPE", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         d.out
     }
 
     fn sequence(&self, a: &Sequence, b: &Sequence) -> Vec<PropDiff> {
         let mut d = Diffs::default();
+        self.authorization(&mut d, a.owner.as_deref(), b.owner.as_deref());
         d.prop("Data type", a.data_type.sql(), b.data_type.sql());
         d.prop("START WITH", &a.start, &b.start);
         d.prop("INCREMENT BY", &a.increment, &b.increment);
@@ -1105,23 +1216,23 @@ impl<'a> Comparer<'a> {
         if parts(&a.base_object) != parts(&b.base_object) {
             d.add("Referenced object", Some(a.base_object.clone()), Some(b.base_object.clone()));
         }
+        self.authorization(&mut d, a.owner.as_deref(), b.owner.as_deref());
         self.xprops(&mut d, "SYNONYM", Some(&a.schema), &a.name, &b.name);
         self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
         d.out
     }
 
-    /// Users (unless IgnoreUsers) and roles; role membership is reported on the member.
+    /// Roles and users. Role membership is reported on the role. Users named after Windows
+    /// principals pair across domains (`DEV\svc` with `PROD\svc`) when their logins match too.
+    /// Fixed roles, `public` and `guest` are not in the model's principal list: they are reported
+    /// (never as one-sided) only when their members or database-level permissions differ.
     fn principals(&mut self) {
-        let o = self.opts;
-        let keep = |p: &&Principal| p.is_role() || !o.has(Opt::IgnoreUsers);
-        let left: Vec<&Principal> = self.db1.principals.iter().filter(keep).collect();
-        let right: Vec<&Principal> = self.db2.principals.iter().filter(keep).collect();
         let empty = String::new();
-        for (ty, role) in [(ObjectType::Role, true), (ObjectType::User, false)] {
-            let l: Vec<&Principal> = left.iter().copied().filter(|p| p.is_role() == role).collect();
-            let r: Vec<&Principal> = right.iter().copied().filter(|p| p.is_role() == role).collect();
-            self.objects(ty, &l, &r, |p| (&empty, &p.name), |c, a, b| c.principal(a, b));
-        }
+        let roles = |db: &'a Database| db.principals.iter().filter(|p| p.is_role()).collect::<Vec<_>>();
+        let (r1, r2) = (roles(self.db1), roles(self.db2));
+        self.objects(ObjectType::Role, &r1, &r2, |p| (&empty, &p.name), |c, a, b| c.principal(a, b));
+        self.users();
+        self.builtin_principals();
         for diff in &mut self.result.differences {
             if matches!(diff.object_type, ObjectType::Role | ObjectType::User) {
                 diff.name.schema.clear();
@@ -1129,54 +1240,183 @@ impl<'a> Comparer<'a> {
         }
     }
 
+    /// The name of a principal without its Windows domain, for pairing.
+    fn principal_key(&self, name: &str) -> String {
+        self.key(without_domain(name))
+    }
+
+    fn users(&mut self) {
+        let users = |db: &'a Database| db.principals.iter().filter(|p| !p.is_role()).collect::<Vec<_>>();
+        let (left, right) = (users(self.db1), users(self.db2));
+        let mut used = vec![false; right.len()];
+        let mut pairs: Vec<(usize, Option<usize>)> = Vec::new();
+        for (i, a) in left.iter().enumerate() {
+            let j = right.iter().enumerate().position(|(j, b)| !used[j] && self.same_name(&a.name, &b.name));
+            if let Some(j) = j {
+                used[j] = true;
+            }
+            pairs.push((i, j));
+        }
+        // Left over: the first user with the same name and login once the domains are removed.
+        let login = |p: &Principal| p.login.as_deref().map(|l| self.principal_key(l));
+        for (i, slot) in pairs.iter_mut() {
+            if slot.is_some() {
+                continue;
+            }
+            let a = left[*i];
+            *slot = right.iter().enumerate().position(|(j, b)| {
+                !used[j] && self.principal_key(&a.name) == self.principal_key(&b.name) && login(a) == login(b)
+            });
+            if let Some(j) = *slot {
+                used[j] = true;
+            }
+        }
+        for (i, j) in pairs {
+            let a = left[i];
+            let n1 = Some(ObjectName::new("", &a.name));
+            match j {
+                Some(j) => {
+                    let props = self.principal(a, right[j]);
+                    self.push(ObjectType::User, n1, Some(ObjectName::new("", &right[j].name)), props);
+                }
+                None => self.push(ObjectType::User, n1, None, Vec::new()),
+            }
+        }
+        for (j, b) in right.iter().enumerate() {
+            if !used[j] {
+                self.push(ObjectType::User, None, Some(ObjectName::new("", &b.name)), Vec::new());
+            }
+        }
+    }
+
+    /// Fixed roles (members), `public` and `guest` (database-level permissions).
+    fn builtin_principals(&mut self) {
+        let case_sensitive = self.case_sensitive;
+        let same = move |a: &str, b: &str| if case_sensitive { a == b } else { a.to_lowercase() == b.to_lowercase() };
+        let in_model = |db: &Database, n: &str| db.principals.iter().any(|p| same(&p.name, n));
+        let mut fixed: Vec<String> = Vec::new();
+        for db in [self.db1, self.db2] {
+            for r in db.principals.iter().flat_map(|p| &p.member_of) {
+                if !in_model(self.db1, r) && !in_model(self.db2, r) && !fixed.iter().any(|f| same(f, r)) {
+                    fixed.push(r.clone());
+                }
+            }
+        }
+        for name in fixed {
+            let mut d = Diffs::default();
+            self.members(&mut d, &name, &name);
+            if !d.out.is_empty() {
+                self.push(ObjectType::Role, Some(ObjectName::new("", &name)), Some(ObjectName::new("", &name)), d.out);
+            }
+        }
+        for (ty, name) in [(ObjectType::Role, "public"), (ObjectType::User, "guest")] {
+            if in_model(self.db1, name) || in_model(self.db2, name) {
+                continue;
+            }
+            let mut d = Diffs::default();
+            self.database_permissions(&mut d, name, name);
+            if !d.out.is_empty() {
+                self.push(ty, Some(ObjectName::new("", name)), Some(ObjectName::new("", name)), d.out);
+            }
+        }
+    }
+
     fn principal(&self, a: &Principal, b: &Principal) -> Vec<PropDiff> {
         let o = self.opts;
         let mut d = Diffs::default();
-        d.prop("Type", &a.kind, &b.kind);
-        if !a.is_role() && !o.has(Opt::IgnoreUserProperties) {
-            // Windows logins compare without their domain.
-            let login = |p: &Principal| p.login.as_deref().map(|l| self.key(l.rsplit('\\').next().unwrap_or(l)));
-            if login(a) != login(b) {
-                d.add("Login", a.login.clone(), b.login.clone());
+        if a.is_role() || b.is_role() {
+            d.prop("Type", &a.kind, &b.kind);
+            if a.kind == "APPLICATION_ROLE" && b.kind == "APPLICATION_ROLE" {
+                d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
             }
-            d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
-            d.opt_prop("Certificate", a.certificate.as_deref(), b.certificate.as_deref());
-            d.opt_prop("Asymmetric key", a.asymmetric_key.as_deref(), b.asymmetric_key.as_deref());
+            if !o.has(Opt::IgnoreOwners) && !o.has(Opt::IgnoreSchemaObjectAuthorization) {
+                d.opt_prop("Owner", a.owner.as_deref(), b.owner.as_deref());
+            }
+            self.members(&mut d, &a.name, &b.name);
+            self.database_permissions(&mut d, &a.name, &b.name);
+        } else {
+            let windows = |p: &Principal| p.kind.starts_with("WINDOWS") && p.name.contains('\\');
+            let as_windows = windows(a) && windows(b);
+            let login = |p: &Principal, domain: bool| {
+                p.login.as_deref().map(|l| if domain { self.key(l) } else { self.principal_key(l) })
+            };
+            if !self.same_name(&a.name, &b.name) {
+                if !as_windows {
+                    d.add("User name", Some(a.name.clone()), Some(b.name.clone()));
+                } else if login(a, false) != login(b, false) {
+                    d.add("Login name", a.login.clone(), b.login.clone());
+                }
+            }
+            if !o.has(Opt::IgnoreUserProperties) {
+                // Windows logins compare without their domain.
+                if login(a, !as_windows) != login(b, !as_windows) && !(as_windows && !self.same_name(&a.name, &b.name)) {
+                    d.add("Login name", a.login.clone(), b.login.clone());
+                }
+                d.prop("User type", &a.kind, &b.kind);
+                d.opt_prop("Asymmetric key", a.asymmetric_key.as_deref(), b.asymmetric_key.as_deref());
+                d.opt_prop("Certificate", a.certificate.as_deref(), b.certificate.as_deref());
+                // A user without a default schema uses dbo.
+                let schema = |p: &Principal| self.key(p.default_schema.as_deref().unwrap_or("dbo"));
+                if schema(a) != schema(b) {
+                    d.add("Default schema", a.default_schema.clone(), b.default_schema.clone());
+                }
+            }
+            if !o.has(Opt::IgnorePermissions) && !o.has(Opt::IgnoreUsers) {
+                d.prop("CONNECT", if a.no_connect { "Revoked" } else { "Granted" }, if b.no_connect { "Revoked" } else { "Granted" });
+            }
+            if !o.has(Opt::IgnoreUsers) {
+                self.database_permissions(&mut d, &a.name, &b.name);
+            }
         }
-        if a.kind == "APPLICATION_ROLE" && b.kind == "APPLICATION_ROLE" {
-            d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
+        self.xprops(&mut d, "USER", None, &a.name, &b.name);
+        d.out
+    }
+
+    /// The members of a role (users only without IgnoreUsers), matched without Windows domains.
+    fn members(&self, d: &mut Diffs, role1: &str, role2: &str) {
+        let ignore_users = self.opts.has(Opt::IgnoreUsers);
+        let of = |db: &'a Database, role: &str| -> Vec<&'a Principal> {
+            db.principals
+                .iter()
+                .filter(|p| (p.is_role() || !ignore_users) && p.member_of.iter().any(|r| self.same_name(r, role)))
+                .collect()
+        };
+        let (x, y) = (of(self.db1, role1), of(self.db2, role2));
+        let has = |list: &[&Principal], n: &str| list.iter().any(|p| self.principal_key(&p.name) == self.principal_key(n));
+        for m in x.iter().filter(|m| !has(&y, &m.name)) {
+            d.only1("Member", &m.name);
         }
-        if !a.is_role() && !o.has(Opt::IgnorePermissions) {
-            d.prop("CONNECT", if a.no_connect { "Revoked" } else { "Granted" }, if b.no_connect { "Revoked" } else { "Granted" });
+        for m in y.iter().filter(|m| !has(&x, &m.name)) {
+            d.only2("Member", &m.name);
         }
-        if a.is_role() && !o.has(Opt::IgnoreOwners) && !o.has(Opt::IgnoreSchemaObjectAuthorization) {
-            d.opt_prop("Owner", a.owner.as_deref(), b.owner.as_deref());
+    }
+
+    /// GRANT/DENY on the database to one principal (compared without the grantee's name).
+    fn database_permissions(&self, d: &mut Diffs, name1: &str, name2: &str) {
+        if self.opts.has(Opt::IgnorePermissions) {
+            return;
         }
-        let roles = |p: &Principal| {
-            let mut v: Vec<String> = p.member_of.iter().map(|r| self.key(r)).collect();
+        let of = |db: &Database, name: &str| -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = db
+                .permissions
+                .iter()
+                .filter(|p| p.class == "DATABASE" && self.same_name(&p.grantee, name))
+                .map(|p| (self.key(&format!("{} {}", p.state, p.action())), p.grant_sql()))
+                .collect();
             v.sort();
             v
         };
-        if roles(a) != roles(b) {
-            d.add("Member of", Some(a.member_of.join(", ")), Some(b.member_of.join(", ")));
-        }
-        // Database-level permissions belong to their grantee.
-        if !o.has(Opt::IgnorePermissions) {
-            let of = |db: &Database, name: &str| -> Vec<String> {
-                let mut v: Vec<String> =
-                    db.permissions.iter().filter(|p| p.class == "DATABASE" && self.same_name(&p.grantee, name)).map(|p| p.grant_sql()).collect();
-                v.sort();
-                v
-            };
-            let (x, y) = (of(self.db1, &a.name), of(self.db2, &b.name));
-            for g in x.iter().filter(|g| !y.iter().any(|h| self.key(h) == self.key(g))) {
+        let (x, y) = (of(self.db1, name1), of(self.db2, name2));
+        for (k, g) in &x {
+            if !y.iter().any(|(k2, _)| k2 == k) {
                 d.add("Permission", Some(g.clone()), None);
             }
-            for g in y.iter().filter(|g| !x.iter().any(|h| self.key(h) == self.key(g))) {
+        }
+        for (k, g) in &y {
+            if !x.iter().any(|(k2, _)| k2 == k) {
                 d.add("Permission", None, Some(g.clone()));
             }
         }
-        d.out
     }
 
     /// GRANT/DENY on one securable. With IgnoreUsers only roles' permissions count.
@@ -1202,7 +1442,7 @@ impl<'a> Comparer<'a> {
                 // Compared without the securable, which may be named differently on each side.
                 .map(|p| {
                     (
-                        self.key(&format!("{} {} {}", p.state, p.action(), p.grantee)),
+                        self.key(&format!("{} {} {}", p.state, p.action(), without_domain(&p.grantee))),
                         format!("{} {} TO {}", p.state.replace('_', " "), p.action(), p.grantee),
                     )
                 })
@@ -1305,9 +1545,8 @@ impl<'a> Comparer<'a> {
         if self.opts.has(Opt::IgnoreExtendedProperties) {
             return;
         }
-        let internal = |p: &&&ExtendedProperty| {
-            self.opts.has(Opt::IgnoreInternallyUsedMicrosoftExtendedProperties) && p.name.starts_with("MS_DiagramPane")
-        };
+        // IgnoreInternallyUsedMicrosoftExtendedProperties only changes what scripts folders get.
+        let internal = |_: &&&ExtendedProperty| false;
         let label = |p: &ExtendedProperty| match &p.minor_name {
             Some(m) => format!("{} ({m})", p.name),
             None => p.name.clone(),
@@ -1338,7 +1577,13 @@ impl<'a> Comparer<'a> {
                 if self.case_sensitive { s } else { s.to_lowercase() }
             })
         };
-        if norm(&a.value) != norm(&b.value) {
+        if let (Some(x), Some(y)) = (&a.value_type, &b.value_type)
+            && !x.eq_ignore_ascii_case(y)
+        {
+            d.add("Type", Some(x.clone()), Some(y.clone()));
+        }
+        let binary = a.value_type.as_deref().is_some_and(|t| t.ends_with("binary"));
+        if if binary { a.value.as_ref().map(|v| v.to_ascii_lowercase()) != b.value.as_ref().map(|v| v.to_ascii_lowercase()) } else { norm(&a.value) != norm(&b.value) } {
             d.add("Value", a.value.clone(), b.value.clone());
         }
     }
@@ -1362,6 +1607,60 @@ fn compression(s: &Storage) -> String {
         .map(|p| if p.partition == 0 { p.compression.clone() } else { format!("{}:{}", p.partition, p.compression) })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// `DOMAIN\name` without the domain.
+fn without_domain(name: &str) -> &str {
+    name.rsplit('\\').next().unwrap_or(name)
+}
+
+/// Merge replication and sync triggers (IgnoreReplicationTriggers).
+fn is_replication_trigger(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("mssync_") || n.contains("msmerge_")
+}
+
+/// Part `i` (assembly, class, method) of `[assembly].[class].[method]`.
+fn clr_part(method: &str, i: usize) -> String {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = method.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' if !quoted => quoted = true,
+            ']' if quoted && chars.peek() == Some(&']') => {
+                chars.next();
+                cur.push(']');
+            }
+            ']' if quoted => quoted = false,
+            '.' if !quoted => parts.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    parts.push(cur);
+    parts.get(i).cloned().unwrap_or_default()
+}
+
+/// The trigger text without `WITH APPEND`.
+fn strip_with_append(text: &str) -> String {
+    use super::text::Tok;
+    let tokens = text::tokenize(text);
+    let words: Vec<usize> = (0..tokens.len()).filter(|&i| tokens[i].kind == Tok::Word).collect();
+    let Some(pair) = words.windows(2).find(|w| tokens[w[0]].text.eq_ignore_ascii_case("WITH") && tokens[w[1]].text.eq_ignore_ascii_case("APPEND")) else {
+        return text.to_string();
+    };
+    let from = if pair[0] > 0 && tokens[pair[0] - 1].kind == Tok::Space { pair[0] - 1 } else { pair[0] };
+    tokens.iter().enumerate().filter(|(i, _)| *i < from || *i > pair[1]).map(|(_, t)| t.text.as_str()).collect()
+}
+
+/// The module header says WITH ENCRYPTION (alone or among other options).
+fn has_with_encryption(text: &str) -> bool {
+    use super::text::Tok;
+    let tokens = text::tokenize(text);
+    let words: Vec<&str> = tokens.iter().filter(|t| t.kind == Tok::Word).map(|t| t.text.as_str()).collect();
+    let body = words.iter().position(|w| w.eq_ignore_ascii_case("AS")).unwrap_or(words.len());
+    words[..body].iter().any(|w| w.eq_ignore_ascii_case("ENCRYPTION"))
 }
 
 fn strip_with_encryption(text: &str) -> String {

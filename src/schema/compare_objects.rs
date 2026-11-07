@@ -63,9 +63,8 @@ impl Comparer<'_> {
         self.objects(ObjectType::XmlSchemaCollection, &db1.xml_schema_collections, &db2.xml_schema_collections, |x| (&x.schema, &x.name), Comparer::xml_schema_collection);
         self.objects(ObjectType::Default, &db1.defaults, &db2.defaults, |x| (&x.schema, &x.name), |c, a, b| c.bindable(a, b, "DEFAULT"));
         self.objects(ObjectType::Rule, &db1.rules, &db2.rules, |x| (&x.schema, &x.name), |c, a, b| c.bindable(a, b, "RULE"));
-        if !o.has(Opt::IgnoreTriggers) {
-            self.objects(ObjectType::DdlTrigger, &db1.ddl_triggers, &db2.ddl_triggers, |t| (&NO_SCHEMA, &t.name), Comparer::ddl_trigger);
-        }
+        // IgnoreTriggers is about DML triggers only.
+        self.objects(ObjectType::DdlTrigger, &db1.ddl_triggers, &db2.ddl_triggers, |t| (&NO_SCHEMA, &t.name), Comparer::ddl_trigger);
         if !o.has(Opt::IgnoreFileGroups) {
             self.objects(ObjectType::PartitionFunction, &db1.partition_functions, &db2.partition_functions, |f| (&NO_SCHEMA, &f.name), Comparer::partition_function);
             self.objects(ObjectType::PartitionScheme, &db1.partition_schemes, &db2.partition_schemes, |s| (&NO_SCHEMA, &s.name), Comparer::partition_scheme);
@@ -224,6 +223,7 @@ impl Comparer<'_> {
         for q in b.properties.iter().filter(|q| !a.properties.iter().any(|p| self.same_name(&p.name, &q.name))) {
             d.only2("Property", &q.name);
         }
+        self.permissions(&mut d, "SEARCH PROPERTY LIST", "", Some(&a.name), "", Some(&b.name));
         d.out
     }
 
@@ -372,6 +372,7 @@ impl Comparer<'_> {
 
     fn security_policy(&self, a: &SecurityPolicy, b: &SecurityPolicy) -> Vec<PropDiff> {
         let mut d = Diffs::default();
+        self.authorization(&mut d, a.owner.as_deref(), b.owner.as_deref());
         d.prop("STATE", a.enabled, b.enabled);
         d.prop("SCHEMABINDING", a.schema_bound, b.schema_bound);
         d.prop("NOT FOR REPLICATION", a.not_for_replication, b.not_for_replication);
@@ -429,6 +430,7 @@ impl Comparer<'_> {
 
     fn external_table(&self, a: &ExternalTable, b: &ExternalTable) -> Vec<PropDiff> {
         let mut d = Diffs::default();
+        self.authorization(&mut d, a.owner.as_deref(), b.owner.as_deref());
         if !self.same_name(&a.data_source, &b.data_source) {
             d.add("DATA_SOURCE", Some(a.data_source.clone()), Some(b.data_source.clone()));
         }

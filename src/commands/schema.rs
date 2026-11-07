@@ -376,8 +376,10 @@ fn side_identifier(side: &Side, db: &Database) -> String {
     }
 }
 
+/// `[schema].[name]`; objects without a schema (principals, schemas, DDL triggers…) are named
+/// bare, as SQL Compare writes them: `role-AppReaders`.
 fn full_name(n: &ObjectName) -> String {
-    if n.schema.is_empty() { format!("[{}]", n.name.replace(']', "]]")) } else { format!("[{}].[{}]", n.schema.replace(']', "]]"), n.name.replace(']', "]]")) }
+    if n.schema.is_empty() { n.name.clone() } else { format!("[{}].[{}]", n.schema.replace(']', "]]"), n.name.replace(']', "]]")) }
 }
 
 /// Text cut to `len - 1` characters when it does not fit, then padded to `len`.
