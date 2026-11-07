@@ -576,3 +576,20 @@ pub mod objects {
         w(Severity::High, t, format!("This deployment shortens the history retention period for table {t}. This may cause a loss of history data for this table."))
     }
 }
+
+/// `kind` as SQL Compare names the user kind (MicrosoftEntraUser…).
+pub fn user_type_unsupported(u: &str, kind: &str) -> Warning {
+    w(Severity::High, u, format!("The user type {kind} is not supported in the target database version."))
+}
+
+pub fn entra_login_unsupported(u: &str) -> Warning {
+    w(Severity::High, u, format!("The Microsoft Entra user {u} is mapped to a server-level login, which is not supported in the target database version."))
+}
+
+pub fn user_unsyncable(u: &str) -> Warning {
+    w(Severity::Medium, u, format!("The user {u} has properties that cannot be synchronized."))
+}
+
+pub fn history_not_null_default(column: &str, history: &str) -> Warning {
+    w(Severity::Low, history, format!("The column [{column}] on history table {history} is being marked as NOT NULL. The default value will be applied where appropriate."))
+}
