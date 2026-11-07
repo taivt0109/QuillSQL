@@ -354,7 +354,7 @@ quill data /s1:dev /db1:Shop /s2:test /db2:Shop /include:Table:^\[dbo\] /export:
 
 | | |
 |---|---|
-| Nguồn | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` hoặc `QUILL_PASSWORD1..2` (bỏ trống là Windows authentication), `/activedirectory1..2` với `QUILL_ACCESS_TOKEN1..2`, `/connection1..2` (connection string), `/encrypt1..2`, `/trustServerCertificate1..2`, `/snapshot1..2`, `/project` |
+| Nguồn | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` hoặc `QUILL_PASSWORD1..2` (bỏ trống là Windows authentication), `/activedirectory1..2` với `QUILL_ACCESS_TOKEN1..2`, `/connection1..2` (connection string), `/encrypt1..2` (mặc định tắt, như SQL Compare; kết nối không mã hóa thì không kiểm tra chứng chỉ của server), `/trustServerCertificate1..2`, `/snapshot1..2`, `/project` |
 | Chọn | `/include` và `/exclude` dạng `type[:regex]` (loại object, `Identical`, `Different`, `Missing`, `Additional`), `/options:Default,IgnoreComments,...`; dữ liệu: `/comparisonkeys`, `/includeColumns`, `/excludeColumns` |
 | Kết quả | `/scriptfile`, `/synchronize`, `/report` + `/reporttype:Html\|Xml`, `/export` (dữ liệu, CSV), `/json`, `/showWarnings`, `/abortOnWarnings:Medium\|High`, `/transactionIsolationLevel`, `/force` |
 | Mã thoát | 0 thành công · 61 dừng vì cảnh báo · 63 giống nhau · 64 sai cú pháp · 74 file đã có (dùng `/force`) · 79 `/assertidentical` mà khác · 126 lỗi database |

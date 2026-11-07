@@ -464,6 +464,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         settings.kinds = rules.kinds;
         settings.max_transaction_bytes = (max_mb > 0).then_some(max_mb * 1_048_576);
         settings.source_connection = side1.spec().cloned();
+        settings.row_messages = true;
         let mut s = sync::generate(&result, &db2, &options, &settings).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e))?;
         let live2 = match &side2 {
             Opened::Live(s) => Some(s),

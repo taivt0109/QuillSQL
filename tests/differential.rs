@@ -185,7 +185,7 @@ struct Scenario {
     oracles: Option<Vec<String>>,
 }
 
-const ORACLES: [&str; 8] = ["converge-quill", "converge-vendor", "outcome", "check", "diffset", "warnings", "exit", "names"];
+const ORACLES: [&str; 9] = ["converge-quill", "converge-vendor", "outcome", "check", "prints", "diffset", "warnings", "exit", "names"];
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("differential")
@@ -392,16 +392,14 @@ impl Env {
         let _ = self.sql("master", &sql);
     }
 
-    fn side_args(&self, n: u8, side: &Side, tool: Tool) -> Vec<String> {
+    /// The same switches for both tools: no encryption switch, as SQL Compare takes none.
+    fn side_args(&self, n: u8, side: &Side, _tool: Tool) -> Vec<String> {
         match side {
             Side::Live(database) => {
                 let mut a = vec![format!("/server{n}:{}", self.host), format!("/database{n}:{database}")];
                 if let Some(user) = &self.user {
                     a.push(format!("/username{n}:{user}"));
                     a.push(format!("/password{n}:{}", self.password));
-                }
-                if tool == Tool::Quill {
-                    a.push(format!("/trustServerCertificate{n}"));
                 }
                 a
             }
@@ -900,7 +898,15 @@ fn run_scenario(env: &Env, sc: &Scenario) -> Outcome {
         } else if ok_sync(sq.code) != ok_sync(sr.code) {
             Err(format!("deployment exit codes differ: quill {}, vendor {}", sq.code, sr.code))
         } else {
-            let j = judge(Tool::Vendor, &Side::Live(dbs["q"].clone()), &dbs["r"], &options_only(&args), "judge-q-vs-r");
+            // The two copies themselves, never through the scenario's project (it names database 1).
+            let mut a = env.side_args(1, &Side::Live(dbs["q"].clone()), Tool::Vendor);
+            a.extend(env.side_args(2, &Side::Live(dbs["r"].clone()), Tool::Vendor));
+            a.extend(options_only(&args));
+            a.push(width.clone());
+            if sc.kind == Kind::Schema {
+                a.push("/assertidentical".into());
+            }
+            let j = env.run(Tool::Vendor, sc.kind, &a, &dir, "judge-q-vs-r");
             if identical(&j) {
                 Ok(String::new())
             } else {
@@ -919,6 +925,17 @@ fn run_scenario(env: &Env, sc: &Scenario) -> Outcome {
             (q, r) => Err(format!("check.sql failed: quill's copy {:?}, vendor's copy {:?}", q.err(), r.err())),
         };
         outcome.insert("check".into(), res);
+    }
+
+    // The progress messages of the two data scripts, in order (their statements may differ in form).
+    if sc.kind == Kind::Data && !both_failed && (wants("prints") || wants("outcome")) {
+        let prints = |l: &str| -> Vec<String> {
+            let text = std::fs::read_to_string(dir.join(format!("{l}-sync.sql"))).unwrap_or_default();
+            text.lines().map(str::trim).filter(|x| x.starts_with("PRINT(")).map(str::to_string).collect()
+        };
+        let (q, r) = (prints("quill"), prints("vendor"));
+        let res = if q == r { Ok(String::new()) } else { Err(format!("quill prints [{}]; vendor prints [{}]", q.join(" "), r.join(" "))) };
+        outcome.insert("prints".into(), res);
     }
 
     // 4. Difference sets, warnings, exit codes.

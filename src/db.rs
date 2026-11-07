@@ -117,7 +117,9 @@ fn config(spec: &ConnectionSpec) -> Result<Config, String> {
     }
     config.application_name(&spec.application_name);
     config.encryption(if spec.encrypt { EncryptionLevel::Required } else { EncryptionLevel::Off });
-    if spec.trust_server_certificate {
+    // Unencrypted, only the login is protected and (as with SqlClient's Encrypt=False) the server's
+    // certificate is not validated: SQL Server's self-signed one would be refused.
+    if spec.trust_server_certificate || !spec.encrypt {
         config.trust_cert();
     }
     config.handshake_timeout(Some(spec.connect_timeout));

@@ -200,7 +200,7 @@ pub fn memory_optimized_in_transaction() -> Warning {
     w(
         Severity::High,
         "",
-        "You're attempting to deploy one or more memory-optimized objects (memory-optimized tables, natively compiled stored procedures or memory-optimized table types) in a transaction, which is not supported by SQL Server.\r\n\r\nIf you want to deploy memory-optimized objects, you need to select the 'Do not use transactions in deployment scripts' project option.".into(),
+        "You\u{2019}re attempting to deploy one or more memory-optimized objects (memory-optimized tables, natively compiled stored procedures or memory-optimized table types) in a transaction, which is not supported by SQL Server.\r\n\r\nIf you want to deploy memory-optimized objects, you need to select the 'Do not use transactions in deployment scripts' project option.".into(),
     )
 }
 

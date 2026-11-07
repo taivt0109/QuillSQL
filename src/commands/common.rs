@@ -61,7 +61,7 @@ macro_rules! source_switches {
                 aliases: &[],
                 takes_value: true,
                 repeatable: false,
-                help: "true (default) or false",
+                help: "true or false (default, as in SQL Compare)",
             },
             Switch {
                 name: concat!("trustServerCertificate", $n),
@@ -864,6 +864,8 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
         Auth::Windows
     };
     let mut spec = ConnectionSpec::new(&server, database.trim(), auth);
+    // SQL Compare's command line encrypts only when told to (`;Encrypt=True` in the server name).
+    spec.encrypt = false;
     spec.connection_string = connection.map(str::to_string);
     if let Some(e) = args.get(&key("encrypt")) {
         spec.encrypt = parse_bool(e).ok_or_else(|| ArgError::new(exit::INVALID_VALUE, format!("/encrypt{n}: '{e}' is not true or false")))?;
