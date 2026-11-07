@@ -18,6 +18,8 @@ pub enum Auth {
     Sql { user: String, password: String },
     /// A Microsoft Entra access token for `https://database.windows.net/`.
     AccessToken(String),
+    /// Microsoft Entra: the token is fetched when connecting (`crate::entra`).
+    Entra(crate::entra::Login),
 }
 
 /// One side of a comparison: where the database is and how to reach it.
@@ -122,6 +124,7 @@ fn config(spec: &ConnectionSpec) -> Result<Config, String> {
     config.authentication(match &spec.auth {
         Auth::Sql { user, password } => AuthMethod::sql_server(user, password),
         Auth::AccessToken(token) => AuthMethod::aad_token(token),
+        Auth::Entra(_) => return Err("the Microsoft Entra token was not fetched".into()),
         #[cfg(windows)]
         Auth::Windows => AuthMethod::Integrated,
         #[cfg(not(windows))]
@@ -154,6 +157,11 @@ async fn open(mut config: Config, timeout: Duration) -> Result<Connection, Strin
 
 /// Opens a connection inside an existing runtime.
 pub async fn connect_async(spec: &ConnectionSpec) -> Result<Connection, String> {
+    if let Auth::Entra(login) = &spec.auth {
+        let token = crate::entra::token(login).await?;
+        let spec = ConnectionSpec { auth: Auth::AccessToken(token), ..spec.clone() };
+        return open(config(&spec)?, spec.connect_timeout).await;
+    }
     open(config(spec)?, spec.connect_timeout).await
 }
 

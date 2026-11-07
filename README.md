@@ -365,7 +365,7 @@ quill data /s1:dev /db1:Shop /s2:test /db2:Shop /include:Table:^\[dbo\] /export:
 
 | | |
 |---|---|
-| Sources | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` or `QUILL_PASSWORD1..2` (omit for Windows authentication), `/activedirectory1..2` with `QUILL_ACCESS_TOKEN1..2`, `/connection1..2` (connection string), `/encrypt1..2`, `/trustServerCertificate1..2`, `/snapshot1..2`, `/empty2`, `/project` (`/backup`, `/scripts`, `/sca`, `/sourcecontrol` sources exit 69: not supported yet) |
+| Sources | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` or `QUILL_PASSWORD1..2` (omit for Windows authentication), `/activedirectory1..2` (Microsoft Entra: with `/username` + `/password` a password sign-in, else the account signed in to the Azure CLI; `QUILL_ACCESS_TOKEN1..2` takes a ready token), `/connection1..2` (connection string), `/encrypt1..2`, `/trustServerCertificate1..2`, `/snapshot1..2`, `/backup1..2`, `/scripts1..2`, `/sca1..2`, `/sourcecontrol1..2` with `/revision1..2` and `/scriptsfolderxml1..2`, `/empty2`, `/project` (.scp, .sdc, .qsc, .qdc; passwords saved in .scp/.sdc are used) |
 | Choose | `/include` and `/exclude` with `type[:regex]` (object types, `Identical`, `Different`, `Missing`, `Additional`), `/options:Default,IgnoreComments,...`; data: `/comparisonkeys`, `/includeColumns`, `/excludeColumns` |
 | Output | `/scriptfile`, `/synchronize`, `/report` + `/reporttype:Xml\|Html\|Classic\|Excel` (SQL Compare's XML layout; Excel as SpreadsheetML, or .xlsx when the file name ends so), `/reportAllObjectsWithDifferences` (`/rad`), `/outputProject` (.scp, .sdc or .qsc), `/export` (data, CSV), `/json`, `/showWarnings`, `/abortOnWarnings:Medium\|High`, `/transactionIsolationLevel`, `/force`, `/out`, `/outputwidth`, `/logLevel`, `/argfile`, `/quiet`, `/verbose` |
 | Exit codes | 0 success · 3 switch given twice · 8 switch needs or excludes another · 11 flag given a value · 32/33/34 value out of range / overflow / invalid · 61 stopped by warnings · 63 identical · 64 usage · 65 corrupt input · 69 not supported · 73 report or project failed · 74 file exists (use `/force`) · 77 access denied · 79 `/assertidentical` and different · 126 database error · 130 Ctrl+C · 500 unexpected error |
@@ -436,6 +436,13 @@ installed copies offer the update within a day.
   DDL; unusual syntax may get no suggestion, rewrite or warning, but it is not changed wrongly.
 - With Microsoft Entra logins, features that need metadata are unavailable; formatting, snippets,
   colors and history still work.
+- Compare's Microsoft Entra sign-in: "integrated" takes the token of the account signed in to the
+  Azure CLI (`az login`) rather than Windows' own single sign-on, and "MFA" uses the device-code
+  page (microsoft.com/devicelogin). Federated (ADFS) password sign-in is not supported. Entra
+  sign-in has not been checked against a live Azure SQL server.
+- A database linked to SQL Source Control is compared through its scripts folder (git, Subversion
+  or Mercurial) with `/sourcecontrolN`; `/databaseN` with `/revisionN` needs SQL Source Control and
+  exits 69.
 - `insertSemicolons` skips ambiguous places, for example before `THROW`.
 - Smart Rename of database objects produces a script; it does not change other objects for you.
 - Compare writes certificates and keys as comments only (their private keys can't be read), as SQL

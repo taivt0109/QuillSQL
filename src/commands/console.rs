@@ -110,13 +110,14 @@ pub fn exit_on_ctrl_c() {
     }
 }
 
-/// Starts the `/logLevel` log: `QUILL_COMPARE_LOGPATH` (a file or folder), else
+/// Starts the `/logLevel` log: `QUILL_COMPARE_LOGPATH` or SQL Compare's `RG-COMPARE-LOGPATH`
+/// (a file or folder), else
 /// `%LOCALAPPDATA%\QuillSQL\Logs`.
 pub fn start_log(level: LogLevel, product: &str) {
     if level == LogLevel::None {
         return;
     }
-    let path = match std::env::var_os("QUILL_COMPARE_LOGPATH").map(std::path::PathBuf::from) {
+    let path = match std::env::var_os("QUILL_COMPARE_LOGPATH").or_else(|| std::env::var_os("RG-COMPARE-LOGPATH")).map(std::path::PathBuf::from) {
         Some(p) if p.is_dir() => p.join("QuillCompare-CLI.log"),
         Some(p) => p,
         None => std::env::var_os("LOCALAPPDATA")

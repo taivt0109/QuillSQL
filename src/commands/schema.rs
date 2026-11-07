@@ -44,7 +44,7 @@ const ACTIONS: [Switch; 12] = [
         aliases: &["dco"],
         takes_value: true,
         repeatable: true,
-        help: "Options for deploying static data (with /include:StaticData)",
+        help: "Data compare options for the static data of /include:StaticData",
     },
     Switch {
         name: "include",
@@ -54,7 +54,7 @@ const ACTIONS: [Switch; 12] = [
         help: "type[:regex] to include; types: object types, Identical, Different, Missing, Additional",
     },
     Switch { name: "exclude", aliases: &[], takes_value: true, repeatable: true, help: "type[:regex] to exclude" },
-    Switch { name: "filter", aliases: &["ftr"], takes_value: true, repeatable: false, help: "A saved filter file (.scpf) (not supported yet)" },
+    Switch { name: "filter", aliases: &["ftr"], takes_value: true, repeatable: false, help: "A saved filter file (.scpf)" },
     Switch {
         name: "assertidentical",
         aliases: &[],
@@ -104,7 +104,7 @@ fn switches() -> Vec<Switch> {
     common::GENERAL.into_iter().chain(common::SOURCE1).chain(common::SOURCE2).chain(ACTIONS).chain(common::DEPLOY).collect()
 }
 
-const SUMMARY: &str = "Compares the schemas of two databases (live or snapshots) and deploys the differences.";
+const SUMMARY: &str = "Compares the schemas of two databases (live, snapshots, backups, scripts folders or source control) and deploys the differences.";
 
 pub fn run(argv: &[String]) -> u8 {
     let switches = switches();
@@ -286,7 +286,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let identical = !comparison.differences.iter().any(|d| d.selected && d.kind != DiffKind::Equal) && statics.as_ref().is_none_or(|s| s.identical());
 
     if let Some(path) = args.get("report") {
-        write_report(args, path, &comparison, &db1, &db2, &source1, &side2, &options, include_identical)?;
+        write_report(args, path, &comparison, &db1, &db2, &source1, &side2, &options, include_identical, &passes)?;
     }
 
     if let Some(path) = args.get("json") {
@@ -401,11 +401,23 @@ fn static_data_of(args: &Args, source1: &Source, side2: &Side, db2: &Database) -
     staticdata::compare(&folder, target, db2, &resolved.options).map(Some).map_err(failed)
 }
 
-/// `server.database`, as SQL Compare names a data source in its output.
+/// `server.database`, as SQL Compare names a data source in its output (a backup by the
+/// server it was taken on; snapshots keep no server name).
 fn identifier(source: &Source, db: &Database) -> String {
     match source {
         Source::Live(spec) => format!("{}.{}", spec.server, db.name),
-        Source::Snapshot(_) | Source::Scripts { .. } | Source::Backup(_) => db.name.clone(),
+        Source::Backup(b) => {
+            let sets = crate::sources::backup::list_sets(&b.files, &b.passwords).unwrap_or_default();
+            let set = match &b.set {
+                Some(name) => sets.iter().find(|s| &s.name == name),
+                None => sets.last(),
+            };
+            match set.map(|s| s.server.as_str()).filter(|s| !s.is_empty()) {
+                Some(server) => format!("{server}.{}", db.name),
+                None => db.name.clone(),
+            }
+        }
+        Source::Snapshot(_) | Source::Scripts { .. } => db.name.clone(),
     }
 }
 
@@ -542,8 +554,14 @@ fn report_source(side: Option<&Source>, db: &Database) -> report::DataSource {
             database: db.name.clone(),
             created: std::fs::metadata(path).and_then(|m| m.modified()).ok().map(|t| console::utc(t).report_format()),
         },
-        Some(Source::Scripts { revision, .. }) => report::DataSource {
-            kind: if revision.is_some() { "source control" } else { "folder" },
+        Some(Source::Scripts { path, revision }) => report::DataSource {
+            kind: if revision.is_some() {
+                "source control"
+            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sqlproj")) || path.is_file() {
+                "sca"
+            } else {
+                "folder"
+            },
             server: String::new(),
             database: db.name.clone(),
             created: None,
@@ -564,6 +582,7 @@ fn write_report(
     side2: &Side,
     options: &Options,
     include_identical: bool,
+    passes: &dyn Fn(&Difference) -> bool,
 ) -> Result<(), ArgError> {
     if Path::new(path).exists() && !args.has("force") {
         return Err(ArgError::new(exit::IO_ERROR, format!("Unable to write report to file '{path}' because the file already exists.")));
@@ -574,7 +593,8 @@ fn write_report(
     let mut items: Vec<Item> = comparison
         .differences
         .iter()
-        .filter(|d| report::wanted(d, all, include_identical))
+        // Only what the filter includes is reported, also with /rad and /include:Identical.
+        .filter(|d| passes(d) && report::wanted(d, all, include_identical))
         .map(|d| {
             let target = d.target_name.as_ref().unwrap_or(&d.name);
             let (one, two) = match d.kind {
@@ -616,31 +636,6 @@ fn write_report(
     std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::REPORT_FAILED, format!("Failed to create report: {e}")))
 }
 
-fn spec_of(side: Option<&Source>) -> crate::project::SourceSpec {
-    use crate::db::Auth;
-    use crate::project::{Authentication, SourceSpec};
-    match side {
-        Some(Source::Live(c)) => {
-            let (authentication, user) = match &c.auth {
-                Auth::Sql { user, .. } => (Authentication::Sql, user.clone()),
-                Auth::AccessToken(_) => (Authentication::Entra, String::new()),
-                _ => (Authentication::Windows, String::new()),
-            };
-            SourceSpec {
-                authentication,
-                user,
-                encrypt: c.encrypt,
-                trust_server_certificate: c.trust_server_certificate,
-                ..SourceSpec::database(&c.server, &c.database)
-            }
-        }
-        Some(Source::Snapshot(p)) => SourceSpec { kind: "snapshot".into(), path: p.display().to_string(), ..Default::default() },
-        Some(Source::Scripts { path, .. }) => SourceSpec { kind: "scripts".into(), path: path.display().to_string(), ..Default::default() },
-        Some(Source::Backup(b)) => SourceSpec { kind: "backup".into(), path: b.describe(), backup_set: b.set.clone().unwrap_or_default(), ..Default::default() },
-        None => SourceSpec { kind: "empty".into(), ..Default::default() },
-    }
-}
-
 /// `/outputProject`: the settings of this run, as a QuillSQL project (`.qsc`) or a SQL Compare
 /// project (any other name).
 #[allow(clippy::too_many_arguments)]
@@ -659,11 +654,15 @@ fn write_project(
     }
     console::verbose(&format!("Writing new project to file '{path}'..."));
     let mut p = project.cloned().unwrap_or_else(|| crate::project::Project::new(crate::project::ProjectKind::Schema));
-    p.source = spec_of(Some(source1));
-    p.target = spec_of(match side2 {
-        Side::Source(s) => Some(s),
-        Side::Empty => None,
-    });
+    p.source = common::spec_of(Some(source1), args, 1);
+    p.target = common::spec_of(
+        match side2 {
+            Side::Source(s) => Some(s),
+            Side::Empty => None,
+        },
+        args,
+        2,
+    );
     p.options = options.iter().map(|o| o.name().to_string()).collect();
     p.include = includes.to_vec();
     p.exclude = excludes.to_vec();

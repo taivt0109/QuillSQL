@@ -285,12 +285,15 @@ INSERT INTO dbo.T VALUES (1, N'a', 0x01, '2025-04-03T13:00:00', 1), (2, N'b', NU
     assert_eq!(call(db("QD_data_C1", "QD_data_C2"), &["/comparisonkeys:T:UX_T_V"]).0, 0);
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_quill")).args(["data", "/database1:x", "/password1:p", "/database2:y"]).output().unwrap();
     assert_eq!(out.status.code(), Some(8));
-    // Differences: summary, CSV export, assert, unknown option warning.
+    // An unknown option is an invalid value of the /options enum: 34.
+    let (code, out, err) = call(db("QD_data_C1", "QD_data_C2"), &["/options:Default,NoSuchOption"]);
+    assert_eq!(code, 34, "{err}");
+    assert!(flat(&format!("{out}{err}")).contains("Invalid value for switch /options: NoSuchOption."), "{out}{err}");
+    // Differences: summary, CSV export, assert.
     let dir = std::env::temp_dir().join(format!("QD_data_export_{}", std::process::id()));
     let dir_s = dir.to_string_lossy().to_string();
-    let (code, out, err) = call(db("QD_data_C1", "QD_data_C2"), &[&format!("/export:{dir_s}"), "/options:Default,NoSuchOption"]);
+    let (code, out, err) = call(db("QD_data_C1", "QD_data_C2"), &[&format!("/export:{dir_s}"), "/options:Default"]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(flat(&err).contains("Warning: Unrecognised SQL Data Compare option: NoSuchOption."), "{err}");
     assert!(out.replace("\r\n", "\n").contains("\nFinished\n\nSummary Information\n"), "{out}");
     assert!(out.contains("Table           [dbo].[T]                                           1  <>  <>  "), "{out}");
     assert!(out.contains("Table           [dbo].[T]                                           1      <<  "), "{out}");

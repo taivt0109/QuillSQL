@@ -7,7 +7,8 @@ use regex::{Regex, RegexBuilder};
 
 use super::common::{self, Source};
 use super::console;
-use crate::args::{ArgError, Args, Switch, exit};
+use super::enums;
+use crate::args::{ArgError, Args, Rule, Switch, exit};
 use crate::catalog::Database;
 use crate::data::compare::{self, DataComparison, TableResult};
 use crate::data::mapping::{DataMappings, TableOverride, TablePair};
@@ -28,7 +29,7 @@ const ACTIONS: [Switch; 12] = [
         name: "options",
         aliases: &["o"],
         takes_value: true,
-        repeatable: false,
+        repeatable: true,
         help: "Data compare options, comma-separated (a list without Default starts from none)",
     },
     Switch {
@@ -98,9 +99,22 @@ fn switches() -> Vec<Switch> {
 
 const SUMMARY: &str = "Compares the data of two databases table by table and deploys the differences.";
 
+/// SQLDataCompare.exe's own rules, after the shared ones.
+const RULES: [Rule; 4] = [
+    Rule { name: "options", values: enums::DATA_OPTIONS, list: true, ..Rule::NONE },
+    Rule {
+        name: "exportidenticaltables",
+        depends: &["export"],
+        deprecated: Some("/exportidenticaltables has been deprecated. Please use /include:identical instead."),
+        ..Rule::NONE
+    },
+    Rule { name: "casesensitive", deprecated: Some("/casesensitive has been deprecated. Please use /options:CaseSensitiveObjectDefinition instead."), ..Rule::NONE },
+    Rule { name: "sca2", excludes: &["synchronize"], ..Rule::NONE },
+];
+
 pub fn run(argv: &[String]) -> u8 {
     let switches = switches();
-    let rules = common::shared_rules();
+    let rules: Vec<Rule> = common::shared_rules().into_iter().chain(RULES).collect();
     let cli = common::Cli {
         command: "data",
         product: "QuillSQL Data Compare Command Line",
@@ -131,38 +145,41 @@ impl Rules {
         let mut kinds_given = false;
         for (list, is_include) in [(args.all("include"), true), (args.all("exclude"), false)] {
             for spec in list {
-                let (ty, pattern) = match spec.split_once(':') {
+                let (types, pattern) = match spec.split_once(':') {
                     Some((t, p)) => (t, Some(regex(p, case_sensitive)?)),
                     None => (spec.as_str(), None),
                 };
-                let kind = match ty.to_ascii_lowercase().as_str() {
-                    "identical" => Some(RowKind::Identical),
-                    "different" => Some(RowKind::Different),
-                    "missing" => Some(RowKind::OnlyIn1),
-                    "additional" => Some(RowKind::OnlyIn2),
-                    _ => None,
-                };
-                if let Some(k) = kind {
-                    if is_include {
-                        if k == RowKind::Identical {
-                            r.identical_allowed = true;
-                        } else if !kinds_given {
-                            r.kinds = [r.kinds[0], false, false, false];
-                            kinds_given = true;
+                // `Table,View:regex`: one rule per type.
+                for ty in types.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    let kind = match ty.to_ascii_lowercase().as_str() {
+                        "identical" => Some(RowKind::Identical),
+                        "different" => Some(RowKind::Different),
+                        "missing" => Some(RowKind::OnlyIn1),
+                        "additional" => Some(RowKind::OnlyIn2),
+                        _ => None,
+                    };
+                    if let Some(k) = kind {
+                        if is_include {
+                            if k == RowKind::Identical {
+                                r.identical_allowed = true;
+                            } else if !kinds_given {
+                                r.kinds = [r.kinds[0], false, false, false];
+                                kinds_given = true;
+                            }
+                            r.kinds[k as usize] = true;
+                        } else {
+                            r.kinds[k as usize] = false;
                         }
-                        r.kinds[k as usize] = true;
-                    } else {
-                        r.kinds[k as usize] = false;
+                        continue;
                     }
-                    continue;
+                    let view = match ty.to_ascii_lowercase().as_str() {
+                        "table" => Some(false),
+                        "view" => Some(true),
+                        "all" => None,
+                        other => return Err(ArgError::new(exit::INVALID_VALUE, format!("'{other}' is not Table, View or All"))),
+                    };
+                    if is_include { r.include.push((view, pattern.clone())) } else { r.exclude.push((view, pattern.clone())) }
                 }
-                let view = match ty.to_ascii_lowercase().as_str() {
-                    "table" => Some(false),
-                    "view" => Some(true),
-                    "all" => None,
-                    other => return Err(ArgError::new(exit::INVALID_VALUE, format!("'{other}' is not Table, View or All"))),
-                };
-                if is_include { r.include.push((view, pattern)) } else { r.exclude.push((view, pattern)) }
             }
         }
         if args.has("allowIdenticalDatabases") || (args.has("export") && args.has("exportidenticaltables")) {
@@ -266,7 +283,7 @@ fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
 
 fn execute(args: &Args) -> Result<u8, ArgError> {
     // Dependency checks first, as SQLDataCompare.exe does.
-    if !["project", "database2", "connection2", "snapshot2", "backup2", "makescripts", "scripts2", "sourcecontrol2"].iter().any(|s| args.has(s)) {
+    if !["project", "database2", "connection2", "snapshot2", "backup2", "makescripts", "scripts2", "sourcecontrol2", "sca2", "empty2"].iter().any(|s| args.has(s)) {
         return Err(ArgError::new(
             exit::USAGE,
             "You must specify one of the following argument(s): /project, /database2, /backup2, /scripts2, /makescripts, /sourcecontrol2, /sca2, /empty2",
@@ -283,7 +300,9 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let project = common::project_of(args, crate::project::ProjectKind::Data)?;
     // Without a project /options start from the defaults; with one they are added to its options.
     let base = if project.is_some() { DataOptions::none() } else { DataOptions::default_set() };
-    let resolved = DataOptions::resolve(args.get("options"), base, args.has("casesensitive"));
+    // Every /options occurrence counts, as one list.
+    let option_list = args.has("options").then(|| args.all("options").join(","));
+    let resolved = DataOptions::resolve(option_list.as_deref(), base, args.has("casesensitive"));
     for w in &resolved.warnings {
         console::warn(w);
     }
@@ -310,6 +329,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let verbose = args.has("verbose");
     let source1 = common::source(args, 1)?.ok_or_else(|| ArgError::new(exit::USAGE, "give database 1: /server1 and /database1"))?;
     let source2 = if args.has("makescripts") { None } else { common::source(args, 2)? };
+    // The sides as a project would name them, for /outputProject.
+    let project_sides = (common::spec_of(Some(&source1), args, 1), common::spec_of(source2.as_ref(), args, 2));
+    // /empty2 (or a project's EmptyDatabaseSource): database 1's tables with no rows.
+    let empty2 = args.has("empty2") || (source2.is_none() && project.as_ref().is_some_and(|p| p.target.is_empty_database()));
     // A scripts folder is read without a server, as SQL Data Compare reads it.
     let open = |s: Source, n: u8| -> Result<Opened, ArgError> {
         if let Source::Backup(b) = &s {
@@ -320,6 +343,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             eprintln!("Reading database scripts from '{}'...", path.display());
         }
         let f = crate::sources::datafolder::read(&path, revision.as_deref()).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))?;
+        // What the folder's parser skipped and QuillDatabaseInfo.xml problems, as SQL Compare prints them.
+        for w in f.folder.warnings.iter().cloned().chain(f.folder.messages.iter().map(|m| m.text())) {
+            console::warn(&w);
+        }
         Ok(Opened::Folder(Box::new(f)))
     };
     let side1 = open(source1, 1)?;
@@ -334,8 +361,11 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         let db1 = read(spec1)?;
         return make_scripts(spec1, &db1, &options, Path::new(dir), args);
     }
-    let source2 = source2.ok_or_else(|| ArgError::new(exit::USAGE, "give database 2: /server2 and /database2"))?;
-    let mut side2 = open(source2, 2)?;
+    let mut side2 = if empty2 {
+        Opened::Empty(Box::default())
+    } else {
+        open(source2.ok_or_else(|| ArgError::new(exit::USAGE, "give database 2: /server2 and /database2"))?, 2)?
+    };
     // A scripts folder is named by its folder, as SQL Data Compare does.
     let model = |side: &Opened| -> Result<(Database, String), ArgError> {
         Ok(match side {
@@ -350,10 +380,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
                 let label = db.name.clone();
                 (db, label)
             }
+            Opened::Empty(_) => (Database::default(), "Empty".to_string()),
         })
     };
     let (db1, label1) = model(&side1)?;
-    let (db2, label2) = model(&side2)?;
+    let (db2, label2) = match model(&side2)? {
+        (_, label) if empty2 => (db1.clone(), label),
+        other => other,
+    };
     // The project's mappings first; the switches then change only keys and columns.
     let mut user = project.as_ref().map(|p| p.data_mappings.clone()).unwrap_or_default();
     let (pairs, _, _) = crate::data::mapping::map_tables(&db1, &db2, &options, &user);
@@ -450,10 +484,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         return Err(ArgError::new(exit::NOT_IDENTICAL, "Exiting with code 79 as /assertidentical was specified"));
     }
     if let Some(out) = args.get("outputProject") {
-        let (Opened::Live(spec1), Opened::Live(spec2)) = (&side1, &side2) else {
-            return Err(ArgError::new(exit::USAGE, "/outputProject is not supported with scripts folders"));
-        };
-        save_project(out, project.as_ref(), spec1, spec2, &options, &user, args)?;
+        save_project(out, project.as_ref(), &project_sides, &options, &user, args)?;
     }
     if args.has("synchronize")
         && let Some(script) = &script
@@ -530,19 +561,22 @@ enum Opened {
     Folder(Box<crate::sources::datafolder::DataFolder>),
     /// A backup set, read without a server.
     Backup(Box<crate::sources::backup::Backup>),
+    /// `/empty2`: no rows.
+    Empty(Box<compare::Memory>),
 }
 
 impl Opened {
     fn spec(&self) -> Option<&ConnectionSpec> {
         match self {
             Opened::Live(s) => Some(s),
-            Opened::Folder(_) | Opened::Backup(_) => None,
+            Opened::Folder(_) | Opened::Backup(_) | Opened::Empty(_) => None,
         }
     }
 
     fn rows(&self) -> compare::RowSource<'_> {
         match self {
             Opened::Folder(f) => compare::RowSource::Memory(&f.memory),
+            Opened::Empty(m) => compare::RowSource::Memory(m),
             Opened::Backup(b) => compare::RowSource::Backup(b),
             other => compare::RowSource::Live(other.spec().unwrap()),
         }
@@ -554,45 +588,42 @@ fn describe(spec: &ConnectionSpec, db: &Database) -> String {
     format!("{}.{}", spec.server, if db.name.is_empty() { &spec.database } else { &db.name })
 }
 
-/// `/outputProject`: the settings of this run as a project.
+/// `/outputProject`: the settings of this run as a QuillSQL project (`.qdc`) or a SQL Data
+/// Compare project (any other name).
 fn save_project(
     path: &str,
     project: Option<&crate::project::Project>,
-    spec1: &ConnectionSpec,
-    spec2: &ConnectionSpec,
+    sides: &(crate::project::SourceSpec, crate::project::SourceSpec),
     options: &DataOptions,
     user: &DataMappings,
     args: &Args,
 ) -> Result<(), ArgError> {
     if Path::new(path).exists() && !args.has("force") {
-        return Err(ArgError::new(CANNOT_CREATE, format!("Unable to write project to output file '{path}' because the file already exists.")));
+        return Err(ArgError::new(CANNOT_CREATE, format!("Project file [{path}] already exists. Use /force to overwrite it.")));
     }
     let mut p = project.cloned().unwrap_or_else(|| crate::project::Project::new(crate::project::ProjectKind::Data));
-    let side = |spec: &ConnectionSpec, n: u8| {
-        let mut s = crate::project::SourceSpec::database(&spec.server, &spec.database);
-        s.encrypt = spec.encrypt;
-        s.trust_server_certificate = spec.trust_server_certificate;
-        if let crate::db::Auth::Sql { user, .. } = &spec.auth {
-            s.authentication = crate::project::Authentication::Sql;
-            s.user = user.clone();
-        }
-        let given = ["server", "database", "connection"].iter().any(|k| args.has(&format!("{k}{n}")));
-        (given, s)
-    };
-    for (n, spec) in [(1, spec1), (2, spec2)] {
-        let (given, s) = side(spec, n);
+    // A side given on the command line replaces the project's.
+    let switches = ["server", "database", "connection", "snapshot", "backup", "scripts", "sourcecontrol", "sca", "empty"];
+    for (n, s) in [(1, &sides.0), (2, &sides.1)] {
+        let given = switches.iter().any(|k| args.has(&format!("{k}{n}")));
         if given || project.is_none() {
-            if n == 1 { p.source = s } else { p.target = s }
+            if n == 1 { p.source = s.clone() } else { p.target = s.clone() }
         }
     }
     p.options = options.iter().map(|o| o.name().to_string()).collect();
     p.data_mappings = user.clone();
     p.include = args.all("include").to_vec();
     p.exclude = args.all("exclude").to_vec();
-    p.save(Path::new(path)).map_err(|e| ArgError::new(CANNOT_CREATE, format!("Error occurred writing project to file '{path}': {e}")))
+    let failed = |e: String| ArgError::new(CANNOT_CREATE, format!("Error occurred writing project to file '{path}': {e}"));
+    if path.to_ascii_lowercase().ends_with(".qdc") {
+        p.save(Path::new(path)).map_err(failed)
+    } else {
+        std::fs::write(path, crate::project::export_vendor(&p, &console::now().invariant_format())).map_err(|e| failed(e.to_string()))
+    }
 }
 
-/// `/makescripts`: every table of database 1 as INSERT statements in `<dir>\Data`.
+/// `/makescripts`: database 1 as a scripts folder (object scripts and QuillDatabaseInfo.xml)
+/// with every table's rows as INSERT statements in `<dir>\Data`.
 fn make_scripts(spec: &ConnectionSpec, db: &Database, opts: &DataOptions, dir: &Path, args: &Args) -> Result<u8, ArgError> {
     if dir.as_os_str().is_empty() {
         return Err(ArgError::new(exit::INVALID_VALUE, "Blank or empty path names are not permitted.  Syntax error in argument /makescripts."));
@@ -604,6 +635,7 @@ fn make_scripts(spec: &ConnectionSpec, db: &Database, opts: &DataOptions, dir: &
             if p.is_dir() { std::fs::remove_dir_all(&p).map_err(io)? } else { std::fs::remove_file(&p).map_err(io)? }
         }
     }
+    crate::sources::folder::write_all(db, dir, &crate::schema::Options::default_set()).map_err(|e| ArgError::new(exit::IO_ERROR, e))?;
     let data = dir.join("Data");
     std::fs::create_dir_all(&data).map_err(io)?;
     let (pairs, _, _) = crate::data::mapping::map_tables(db, db, opts, &DataMappings::default());

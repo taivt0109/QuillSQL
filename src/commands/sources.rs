@@ -32,13 +32,11 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
         let Some(revision) = revision else {
             return Err(ArgError::new(exit::UNSATISFIED_ARGUMENT, format!("/sourcecontrol{n} needs /revision{n}")));
         };
-        let xml = args.get(&key("scriptsfolderxml")).or(args.get("scriptsfolderxml")).ok_or_else(|| {
-            ArgError::new(exit::UNSATISFIED_ARGUMENT, format!("/sourcecontrol{n} needs /scriptsfolderxml{n}: a file with the scripts folder location"))
-        })?;
-        let text = std::fs::read(xml).map(|b| folder::decode(&b, "UTF8")).unwrap_or_default();
+        let xml = args.get(&key("scriptsfolderxml")).or(args.get("scriptsfolderxml")).unwrap_or_default();
+        let text = if xml.is_empty() { String::new() } else { std::fs::read(xml).map(|b| folder::decode(&b, "UTF8")).unwrap_or_default() };
         let location = scm::location_from_xml(&text).ok_or_else(|| {
             ArgError::new(
-                66,
+                exit::NO_INPUT,
                 format!("The file '{xml}' containing the script folder location XML fragment could not be parsed. Check that the file exists and that its contents are well-formed."),
             )
         })?;
