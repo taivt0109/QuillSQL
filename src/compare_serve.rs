@@ -103,6 +103,13 @@ pub fn run() -> Result<(), String> {
             let _ = writeln!(out, "{}", json!({"id": id, "progress": text}));
             let _ = out.flush();
         };
+        // Microsoft Entra device-code sign-in shows its code as a progress line of this request.
+        let prompt_id = id.clone();
+        crate::entra::set_prompt(Some(std::sync::Arc::new(move |text: &str, details: &Value| {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{}", json!({"id": prompt_id, "progress": text, "deviceCode": details}));
+            let _ = out.flush();
+        })));
         let reply = match handle(&mut state, &request, &progress) {
             Ok(result) => json!({"id": id, "result": result}),
             Err(e) => json!({"id": id, "error": e}),

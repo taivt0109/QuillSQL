@@ -103,7 +103,7 @@ macro_rules! source_switches {
                 aliases: &[concat!("scr", $n)],
                 takes_value: true,
                 repeatable: false,
-                help: "A scripts folder in place of the database (not supported yet)",
+                help: "A scripts folder in place of the database",
             },
             Switch {
                 name: concat!("sca", $n),
@@ -117,7 +117,7 @@ macro_rules! source_switches {
                 aliases: &[],
                 takes_value: false,
                 repeatable: false,
-                help: "A source-controlled scripts folder in place of the database (not supported yet)",
+                help: "A source-controlled scripts folder in place of the database (with /revision and /scriptsfolderxml)",
             },
             Switch {
                 name: concat!("revision", $n),
@@ -218,7 +218,7 @@ pub const DEPLOY: [Switch; 21] = [
         aliases: &["mkscr"],
         takes_value: true,
         repeatable: false,
-        help: "Create a scripts folder from database 1 (not supported yet)",
+        help: "Create a scripts folder from database 1",
     },
     Switch {
         name: "ignoreSourceCaseSensitivity",
@@ -553,10 +553,8 @@ pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOpt
     if let Some(n) = args.get("backupnumberofthreads").and_then(|n| n.parse().ok()) {
         o.thread_count = n;
     }
+    // Only a live database 2 is backed up; with any other side /makebackup is ignored.
     let Some(target) = target else {
-        if args.has("makebackup") {
-            return Err(ArgError::new(exit::USAGE, "/makebackup needs database 2 to be a live database."));
-        }
         return Ok(());
     };
     let caps = crate::schema::backup::capabilities(target).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
@@ -600,6 +598,7 @@ const EXIT_CODES: &[(u16, &str)] = &[
     (63, "The databases are identical (use /include:Identical to suppress)."),
     (64, "General command line usage error."),
     (65, "Data error: an input file is invalid or corrupt."),
+    (66, "An input file does not exist or cannot be read."),
     (69, "A resource or service required to run is unavailable."),
     (73, "Failed to create the report or project file."),
     (74, "I/O error, for example an output file exists and /force was not given."),
@@ -695,6 +694,28 @@ pub enum Source {
     Backup(super::backups::BackupSpec),
 }
 
+/// Side `n` of the run as a project side (for `/outputProject`): a source-control folder keeps
+/// its revision and location XML, a SQL Change Automation project its own type.
+pub fn spec_of(side: Option<&Source>, args: &Args, n: u8) -> crate::project::SourceSpec {
+    use crate::project::SourceSpec;
+    match side {
+        Some(Source::Live(c)) => SourceSpec::from_connection(c),
+        Some(Source::Snapshot(p)) => SourceSpec { kind: "snapshot".into(), path: p.display().to_string(), ..Default::default() },
+        Some(Source::Scripts { path, revision }) => {
+            let sca = path.is_file() || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("sqlproj"));
+            let mut s = SourceSpec { kind: if sca { "sca" } else { "scripts" }.into(), path: path.display().to_string(), revision: revision.clone().unwrap_or_default(), ..Default::default() };
+            if args.has(&format!("sourcecontrol{n}"))
+                && let Some(xml) = args.get(&format!("scriptsfolderxml{n}")).or(args.get("scriptsfolderxml"))
+            {
+                s.location_xml = std::fs::read(xml).map(|b| crate::sources::folder::decode(&b, "UTF8")).unwrap_or_default().trim().to_string();
+            }
+            s
+        }
+        Some(Source::Backup(b)) => SourceSpec { kind: "backup".into(), path: b.describe(), backup_set: b.set.clone().unwrap_or_default(), ..Default::default() },
+        None => SourceSpec { kind: "empty".into(), ..Default::default() },
+    }
+}
+
 /// The project named by `/project`, if any.
 pub fn project(args: &Args) -> Result<Option<crate::project::Project>, ArgError> {
     let Some(p) = args.get("project") else { return Ok(None) };
@@ -754,6 +775,14 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
     if let Some(s) = super::sources::source(args, n)? {
         return Ok(Some(s));
     }
+    // A revision of a live database means "as linked in SQL Source Control", which needs SQL
+    // Source Control itself; QuillSQL reads the linked folder with /sourcecontrolN.
+    if args.has(&key("revision")) && args.has(&key("database")) {
+        return Err(ArgError::new(
+            exit::UNAVAILABLE,
+            format!("Using source controlled databases requires SQL Source Control to be installed. Use /sourcecontrol{n} with /scriptsfolderxml{n} and /revision{n} to compare the scripts folder the database is linked to."),
+        ));
+    }
     if let Some(s) = super::backups::source(args, n)? {
         return Ok(Some(s));
     }
@@ -809,14 +838,21 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
     if password.as_ref().is_some_and(|p| p.chars().count() > 128) {
         return Err(ArgError::new(exit::EXECUTION_FAILED, "Password cannot be more than 128 characters long."));
     }
+    // Microsoft Entra: a token in QUILL_ACCESS_TOKENn, else password with /usernameN, else
+    // the signed-in account (SQL Compare's MicrosoftEntraPassword / MicrosoftEntraIntegrated).
     let auth = if args.has(&key("activedirectory")) {
-        let token = std::env::var(format!("QUILL_ACCESS_TOKEN{n}")).map_err(|_| {
-            ArgError::new(
-                exit::UNSATISFIED_ARGUMENT,
-                format!("/activedirectory{n} needs an access token in QUILL_ACCESS_TOKEN{n} (az account get-access-token --resource https://database.windows.net/)"),
-            )
-        })?;
-        Auth::AccessToken(token)
+        if let Ok(token) = std::env::var(format!("QUILL_ACCESS_TOKEN{n}")) {
+            Auth::AccessToken(token)
+        } else if let Some(user) = user {
+            let password = password.or_else(|| std::env::var(format!("QUILL_PASSWORD{n}")).ok()).ok_or_else(|| {
+                ArgError::new(exit::UNSATISFIED_ARGUMENT, format!("give /password{n} or set QUILL_PASSWORD{n} for /username{n}"))
+            })?;
+            let tenant = std::env::var("QUILL_ENTRA_TENANT").unwrap_or_default();
+            Auth::Entra(crate::entra::Login { method: crate::entra::Method::Password, user: user.to_string(), password, tenant })
+        } else {
+            let tenant = std::env::var("QUILL_ENTRA_TENANT").unwrap_or_default();
+            Auth::Entra(crate::entra::Login { method: crate::entra::Method::Integrated, user: String::new(), password: String::new(), tenant })
+        }
     } else if let Some(user) = user {
         let password = password
             .or_else(|| std::env::var(format!("QUILL_PASSWORD{n}")).ok())
@@ -940,6 +976,10 @@ pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
     } else {
         crate::sources::snp_write::write(db)
     };
+    // The folder is created when missing.
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", dir.display())))?;
+    }
     std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::IO_ERROR, format!("Error creating snapshot: {}: {e}", path.display())))
 }
 
@@ -948,7 +988,12 @@ pub fn load_snapshot(path: &Path) -> Result<Database, ArgError> {
         ArgError::new(exit::IO_ERROR, format!("The specified snapshot file '{}' does not exist.  Reported error: {e}", path.display()))
     })?;
     if crate::sources::snp::is_snp(&bytes) {
-        return crate::sources::snp::read(&bytes).map_err(|e| ArgError::new(exit::DATA_ERROR, format!("{}: {e}", path.display())));
+        return crate::sources::snp::read(&bytes).map_err(|e| {
+            ArgError::new(
+                exit::DATA_ERROR,
+                format!("Snapshot could not be loaded from file '{}'.  Either the file has been corrupted, is not a valid snapshot file, or cannot be accessed.  Reported error: {e}", path.display()),
+            )
+        });
     }
     let db: Database = serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| {
         ArgError::new(

@@ -94,6 +94,10 @@ pub struct SourceSpec {
     /// Microsoft Entra tenant (id or domain); empty for the user's domain or `organizations`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tenant: String,
+    /// `type = scripts` from SQL Source Control: the scripts folder location XML it was linked
+    /// with (written back as a SourceControlDataSource).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub location_xml: String,
     /// `type = scripts`: SQL Server major version (e.g. `16`) used when the folder has no
     /// QuillDatabaseInfo.xml.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -113,13 +117,38 @@ impl SourceSpec {
         SourceSpec { kind: "database".into(), server: server.into(), database: database.into(), encrypt: true, ..Default::default() }
     }
 
+    /// The project side of a live connection; passwords and tokens are left out.
+    pub fn from_connection(c: &ConnectionSpec) -> SourceSpec {
+        let (authentication, user, tenant) = match &c.auth {
+            Auth::Sql { user, .. } => (Authentication::Sql, user.clone(), String::new()),
+            Auth::AccessToken(_) => (Authentication::Entra, String::new(), String::new()),
+            Auth::Entra(l) => (
+                match l.method {
+                    crate::entra::Method::Password => Authentication::EntraPassword,
+                    crate::entra::Method::Integrated => Authentication::EntraIntegrated,
+                    crate::entra::Method::Interactive => Authentication::EntraInteractive,
+                },
+                l.user.clone(),
+                l.tenant.clone(),
+            ),
+            Auth::Windows => (Authentication::Windows, String::new(), String::new()),
+        };
+        SourceSpec { authentication, user, tenant, encrypt: c.encrypt, trust_server_certificate: c.trust_server_certificate, ..SourceSpec::database(&c.server, &c.database) }
+    }
+
     pub fn is_snapshot(&self) -> bool {
         self.kind == "snapshot"
     }
 
-    /// A scripts folder (SQL Compare `FolderDataSource`), at `path`.
+    /// A scripts folder (SQL Compare `FolderDataSource`), at `path`; also a SQL Change
+    /// Automation project (`type = sca`, `path` its project file), read the same way.
     pub fn is_scripts(&self) -> bool {
-        self.kind == "scripts"
+        self.kind == "scripts" || self.is_sca()
+    }
+
+    /// A SQL Change Automation project (SQL Compare `ScaDataSource`).
+    pub fn is_sca(&self) -> bool {
+        self.kind == "sca"
     }
 
     /// Backup files (SQL Compare `BackupDatabaseSource`), listed in `path`.
@@ -453,6 +482,24 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
         if ty.eq_ignore_ascii_case("FolderDataSource") {
             return SourceSpec { kind: "scripts".into(), path: text_of(n, "Path"), ..Default::default() };
         }
+        if ty.eq_ignore_ascii_case("ScaDataSource") {
+            return SourceSpec { kind: "sca".into(), path: text_of(n, "ProjectFilePath"), ..Default::default() };
+        }
+        // A database linked to SQL Source Control: its scripts folder at a revision.
+        if ty.eq_ignore_ascii_case("SourceControlDataSource") {
+            let location_xml = text_of(n, "ScriptFolderLocation");
+            let path = crate::sources::scm::location_from_xml(&location_xml).unwrap_or_default();
+            let latest = match text_of(n, "VersionType").as_str() {
+                "" => text_of(n, "UseNewestRevision").eq_ignore_ascii_case("true") || text_of(n, "VersionToUse") == "0",
+                v => !v.eq_ignore_ascii_case("Specific"),
+            };
+            let specific = match text_of(n, "SpecificVersion") {
+                v if v.is_empty() => text_of(n, "Revision"),
+                v => v,
+            };
+            let revision = if latest || specific.is_empty() { "HEAD".to_string() } else { specific };
+            return SourceSpec { kind: "scripts".into(), path, revision, location_xml, ..Default::default() };
+        }
         if ty.eq_ignore_ascii_case("EmptyDatabaseSource") {
             return SourceSpec { kind: "empty".into(), ..Default::default() };
         }
@@ -515,6 +562,10 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
                 if let Some(v) = value {
                     opts.extend(table.iter().filter(|(bit, _)| v & bit != 0).map(|(_, o)| o.name().to_string()));
                 }
+            }
+            // ExcludeNewTablesByDefault: only the tables the project selects are compared.
+            if int("MappingOptions").is_some_and(|m| m & 0x100 != 0) {
+                p.include_new_tables = false;
             }
             if let Some(bits) = int("SessionSettings") {
                 p.row_kinds = [0x1, 0x2, 0x4, 0x8].map(|b| bits & b != 0);
@@ -680,7 +731,7 @@ pub fn import_vendor(bytes: &[u8], kind: ProjectKind) -> Result<Project, String>
         for token in tokens {
             let Some(schema) = crate::project_codec::schema_from_token(&token, version) else { continue };
             let Some(bytes) = crate::project_codec::base64_decode(&text_of(sel, &token).replace('_', "=")) else { continue };
-            for e in bytes.chunks_exact(19) {
+            for e in bytes.as_chunks::<19>().0 {
                 out.entries.push(SelectionEntry { schema: schema.clone(), hash: hex(&e[..16]), object_type: e[16], difference: e[17], selected: e[18] > 0 });
             }
         }
@@ -833,6 +884,25 @@ pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
             x.value("Incomplete", "False");
             x.close("BackupSet");
             x.close(element);
+        } else if side.is_sca() {
+            x.open(element, " version=\"1\" type=\"ScaDataSource\"");
+            x.value("ProjectFilePath", &side.path);
+            let name = std::path::Path::new(&side.path).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            x.value("DatabaseName", &name);
+            x.value("ServerName", "");
+            x.close(element);
+        } else if side.is_scripts() && !side.location_xml.is_empty() {
+            x.open(element, " version=\"4\" type=\"SourceControlDataSource\"");
+            let latest = side.revision.is_empty() || side.revision.eq_ignore_ascii_case("HEAD") || side.revision.eq_ignore_ascii_case("LATEST");
+            x.value("VersionType", if latest { "Latest" } else { "Specific" });
+            x.value("SpecificVersion", if latest { "" } else { &side.revision });
+            x.value("ServerName", "");
+            let name = std::path::Path::new(&side.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            x.value("DatabaseName", &name);
+            x.value("ScriptFolderLocation", &side.location_xml);
+            x.value("MigrationsFolderLocation", "");
+            x.value("ScriptFolderDescription", "");
+            x.close(element);
         } else if side.is_scripts() {
             x.open(element, " version=\"2\" type=\"FolderDataSource\"");
             x.value("Path", &side.path);
@@ -882,7 +952,8 @@ pub fn export_vendor(p: &Project, last_compared: &str) -> Vec<u8> {
         table.iter().filter(|(_, o)| p.options.iter().any(|n| n.eq_ignore_ascii_case(o.name()))).map(|(b, _)| b).sum::<u64>().to_string()
     };
     x.value("SQLOptions", &bits(SQL_BITS, 0xA));
-    x.value("MappingOptions", &bits(MAPPING_BITS, 0x52));
+    let mapping = bits(MAPPING_BITS, 0x52).parse::<u64>().unwrap_or(0x52) | if p.kind == ProjectKind::Data && !p.include_new_tables { 0x100 } else { 0 };
+    x.value("MappingOptions", &mapping.to_string());
     x.value("ComparisonOptions", &bits(COMPARISON_BITS, 0));
 
     let mut actions: Vec<Vec<(&str, String)>> = Vec::new();

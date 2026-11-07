@@ -24,6 +24,8 @@ pub mod exit {
     pub const IDENTICAL: u8 = 63;
     pub const USAGE: u8 = 64;
     pub const DATA_ERROR: u8 = 65;
+    /// An input file (a scripts folder location XML) is missing or cannot be read.
+    pub const NO_INPUT: u8 = 66;
     /// A resource or feature the run needs is unavailable.
     pub const UNAVAILABLE: u8 = 69;
     pub const REPORT_FAILED: u8 = 73;

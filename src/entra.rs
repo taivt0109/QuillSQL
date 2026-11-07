@@ -67,7 +67,10 @@ fn client_id() -> String {
 pub type Prompt = Arc<dyn Fn(&str, &Value) + Send + Sync>;
 
 static PROMPT: LazyLock<Mutex<Option<Prompt>>> = LazyLock::new(|| Mutex::new(None));
-static CACHE: LazyLock<Mutex<HashMap<(Method, String, String), (String, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Tokens by (method, tenant, user), with the time they stop being used.
+type Cache = HashMap<(Method, String, String), (String, Instant)>;
+
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Where the device-code message goes; stderr when none is set.
 pub fn set_prompt(prompt: Option<Prompt>) {
