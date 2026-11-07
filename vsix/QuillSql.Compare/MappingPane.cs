@@ -159,7 +159,7 @@ namespace QuillSql.Compare
             var reply = await _load();
             if (reply == null)
             {
-                _status.Text = "Could not read the data sources.";
+                _status.Text = "Choose both data sources, then Refresh.";
                 return;
             }
             var section = reply.Obj(_tables ? "tables" : "owners") ?? new JsonObject();

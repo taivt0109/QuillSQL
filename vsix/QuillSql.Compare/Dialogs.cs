@@ -484,7 +484,7 @@ namespace QuillSql.Compare
             };
             filter.TextChanged += (s, e) => view.Refresh();
             var status = Ui.Text("", brush: CompareTheme.Muted);
-            string side(JsonObject s) => s == null ? "" : s.Str("type") == "snapshot" || s.Str("type") == "scripts" ? System.IO.Path.GetFileName(s.Str("path")) : s.Str("type") == "empty" ? "Empty database" : s.Str("server") + " / " + s.Str("database");
+            string side(JsonObject s) => s == null ? "" : s.Str("type") == "snapshot" || s.Str("type") == "scripts" || s.Str("type") == "backup" ? System.IO.Path.GetFileName((s.Str("path") ?? "").Split(';')[0]) : s.Str("type") == "empty" ? "Empty database" : s.Str("server") + " / " + s.Str("database");
             async Task load()
             {
                 rows.Clear();

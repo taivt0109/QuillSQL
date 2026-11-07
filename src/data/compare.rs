@@ -66,11 +66,11 @@ pub const LARGE: i64 = 1 << 20;
 
 /// What the server can do, from its version.
 #[derive(Clone, Copy)]
-struct Server {
+pub(super) struct Server {
     /// TRANSLATE (SQL Server 2017).
-    translate: bool,
+    pub(super) translate: bool,
     /// HASHBYTES over more than 8000 bytes (SQL Server 2016).
-    hash: bool,
+    pub(super) hash: bool,
 }
 
 impl Server {
@@ -96,13 +96,23 @@ pub type Memory = std::collections::HashMap<ObjectName, MemoryTable>;
 pub enum RowSource<'a> {
     Live(&'a ConnectionSpec),
     Memory(&'a Memory),
+    /// A backup set, read without a server.
+    Backup(&'a crate::sources::backup::Backup),
 }
 
 impl<'a> RowSource<'a> {
+    /// The backup when there is one, else the live database.
+    pub fn of(backup: &'a Option<crate::sources::backup::Backup>, spec: &'a ConnectionSpec) -> RowSource<'a> {
+        match backup {
+            Some(b) => RowSource::Backup(b),
+            None => RowSource::Live(spec),
+        }
+    }
+
     fn live(self) -> Option<&'a ConnectionSpec> {
         match self {
             RowSource::Live(s) => Some(s),
-            RowSource::Memory(_) => None,
+            RowSource::Memory(_) | RowSource::Backup(_) => None,
         }
     }
 }
@@ -246,7 +256,7 @@ async fn ident_current(spec: &ConnectionSpec, table: &ObjectName) -> Option<i128
     }
 }
 
-fn family(t: &DataType) -> &'static str {
+pub(super) fn family(t: &DataType) -> &'static str {
     match t.name.as_str() {
         "char" | "varchar" | "nchar" | "nvarchar" | "sysname" | "text" | "ntext" => "string",
         "tinyint" | "smallint" | "int" | "bigint" => "int",
@@ -265,7 +275,7 @@ fn is_lob(t: &DataType) -> bool {
 }
 
 /// The string folding a key column gets on both servers.
-fn key_fold(c: &ColumnPair, opts: &DataOptions) -> Fold {
+pub(super) fn key_fold(c: &ColumnPair, opts: &DataOptions) -> Fold {
     if opts.has(DataOpt::ForceBinaryCollation) {
         return Fold::default();
     }
@@ -308,7 +318,7 @@ fn sort_expr(column: &str, this: &DataType, other: &DataType, fold: Fold, server
 
 /// How a column's value is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shape {
+pub(super) enum Shape {
     /// One value.
     Plain,
     /// sql_variant: base type, precision, scale, max length, collation, text.
@@ -331,7 +341,7 @@ impl Shape {
 }
 
 /// The select-list expressions for a value, and how to read them back.
-fn value_exprs(column: &str, t: &DataType, hash: bool) -> (Vec<String>, Shape) {
+pub(super) fn value_exprs(column: &str, t: &DataType, hash: bool) -> (Vec<String>, Shape) {
     let c = quote(column);
     let plain = match t.name.as_str() {
         "money" => format!("CAST({c} AS decimal(19, 4))"),
@@ -513,6 +523,22 @@ async fn produce(spec: &ConnectionSpec, sql: String, keys: usize, shapes: Vec<Sh
     }
 }
 
+/// Sends a side's rows from a backup, read and put in key order up front.
+async fn produce_backup(backup: &crate::sources::backup::Backup, pair: &TablePair, side: u8, opts: &DataOptions, server: Server, keys: usize, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
+    match super::backup_rows::sorted(backup, pair, side, opts, server, keys) {
+        Ok(rows) => {
+            for chunk in rows.chunks(CHUNK) {
+                if tx.send(Ok(chunk.to_vec())).await.is_err() {
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+        }
+    }
+}
+
 /// Sends a side's rows from memory in the order and form the live SELECT would give: key
 /// expressions first (strings trimmed, folded and compared by code point), then the values.
 async fn produce_memory(memory: &Memory, pair: &TablePair, side: u8, opts: &DataOptions, server: Server, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
@@ -608,7 +634,7 @@ impl Rows {
     }
 }
 
-fn cmp_keys(a: &[Value], b: &[Value], n: usize) -> Ordering {
+pub(super) fn cmp_keys(a: &[Value], b: &[Value], n: usize) -> Ordering {
     (0..n).map(|i| cmp_key(&a[i], &b[i])).find(|o| o.is_ne()).unwrap_or(Ordering::Equal)
 }
 
@@ -652,12 +678,14 @@ async fn run(side1: RowSource<'_>, side2: RowSource<'_>, opts: &DataOptions, ser
         match side1 {
             RowSource::Live(spec) => produce(spec, sql1, keys, shapes1, tx1).await,
             RowSource::Memory(m) => produce_memory(m, pair, 1, opts, server, tx1).await,
+            RowSource::Backup(b) => produce_backup(b, pair, 1, opts, server, keys, tx1).await,
         }
     };
     let p2 = async {
         match side2 {
             RowSource::Live(spec) => produce(spec, sql2, keys, shapes2, tx2).await,
             RowSource::Memory(m) => produce_memory(m, pair, 2, opts, server, tx2).await,
+            RowSource::Backup(b) => produce_backup(b, pair, 2, opts, server, keys, tx2).await,
         }
     };
     let mut writer = TableWriter::create(&result.path, opts.has(DataOpt::CompressTemporaryFiles)).map_err(|e| e.to_string())?;

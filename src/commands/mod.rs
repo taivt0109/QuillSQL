@@ -1,5 +1,6 @@
 //! The `quill schema` and `quill data` command lines.
 
+pub mod backups;
 pub mod common;
 pub mod console;
 pub mod enums;

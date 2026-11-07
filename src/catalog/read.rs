@@ -1401,7 +1401,7 @@ fn is_lob(c: &Column) -> bool {
 }
 
 /// A system type from catalog values; nchar/nvarchar lengths are stored in bytes.
-pub(super) fn system_type(name: &str, max_length: i32, precision: i32, scale: i32) -> DataType {
+pub fn system_type(name: &str, max_length: i32, precision: i32, scale: i32) -> DataType {
     let mut t = DataType { name: name.to_string(), ..Default::default() };
     match name {
         "char" | "varchar" | "binary" | "varbinary" => t.length = Some(max_length),
@@ -1418,7 +1418,7 @@ pub(super) fn system_type(name: &str, max_length: i32, precision: i32, scale: i3
 }
 
 /// The local object a synonym points at, when it is in this database.
-fn parse_synonym_target(base: &str, database: &str) -> Option<ObjectName> {
+pub fn parse_synonym_target(base: &str, database: &str) -> Option<ObjectName> {
     let parts = split_multipart(base);
     match parts.as_slice() {
         [schema, name] => Some(ObjectName::new(schema, name)),
