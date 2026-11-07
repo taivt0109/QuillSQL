@@ -425,7 +425,7 @@ Workflow Release sẽ chạy test, build và đăng `QuillSQL.vsix`, `quill.exe`
 - Với đăng nhập Microsoft Entra, các tính năng cần metadata không dùng được. Format, snippet, tô màu và lịch sử vẫn hoạt động.
 - `insertSemicolons` bỏ qua những chỗ không chắc chắn, ví dụ trước `THROW`.
 - Smart Rename với object trong database chỉ tạo script; nó không tự sửa các object khác.
-- Compare chưa script được: bật/tắt system versioning, đổi user-defined type đang được cột dùng, CLR assembly, full-text index, partition function/scheme, quyền theo cột, và dữ liệu `sql_variant`. Có cảnh báo ở những chỗ ảnh hưởng.
+- Compare chỉ ghi certificate và key dưới dạng comment (không đọc được private key), giống SQL Compare. Object full-text, PolyBase và file của SQL Backup (`.sqb`) mới được kiểm tra bằng unit test, chưa chạy trên server thật hay file SQL Backup thật.
 - Cửa sổ Compare hiện chỉ có tiếng Anh.
 - Tô màu tab phụ thuộc vào cấu trúc tab tài liệu của SSMS 21; một phiên bản SSMS sau này có thể cần cập nhật lại.
 
