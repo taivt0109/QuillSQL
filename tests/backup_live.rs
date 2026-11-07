@@ -101,6 +101,21 @@ impl Drop for Server {
     }
 }
 
+/// Drops the database and removes its backup files from the container, also when a test fails.
+struct Cleanup<'a> {
+    server: &'a Server,
+    db: String,
+    files: Vec<String>,
+}
+
+impl Drop for Cleanup<'_> {
+    fn drop(&mut self) {
+        let files: Vec<&str> = self.files.iter().map(String::as_str).collect();
+        self.server.remove(&files);
+        self.server.drop(&self.db);
+    }
+}
+
 const SHOP: &str = include_str!("fixtures/compare/shop.sql");
 const SHOP_DATA: &str = include_str!("fixtures/compare/shop_data.sql");
 const KEYS: &str = include_str!("fixtures/compare/keys.sql");
@@ -132,7 +147,7 @@ fn backups_read_like_the_database() {
     server.create(&db, &format!("{SHOP}\nGO\n{SHOP_DATA}\nGO\n{KEYS}\nGO\n{BINDINGS}"));
     let p = |f: &str| format!("{db}_{f}.bak");
     let (plain, compressed, s1, s2, s3) = (p("plain"), p("compressed"), p("s1"), p("s2"), p("s3"));
-    let all = [plain.as_str(), compressed.as_str(), s1.as_str(), s2.as_str(), s3.as_str()];
+    let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![plain.clone(), compressed.clone(), s1.clone(), s2.clone(), s3.clone()] };
 
     let files = server.backup(&db, &[&plain], "INIT, FORMAT, NAME = N'first'");
     assert_identical(&server, &db, &files, None);
@@ -163,9 +178,6 @@ fn backups_read_like_the_database() {
     let r = compare_sides(Side::Backup(&full), Side::Live(&spec), &old, &live, &DataOptions::default_set(), &DataMappings::default(), |_| true, 4, |_, _| {}).unwrap();
     let customer = r.tables.iter().find(|t| t.pair.source.name == "Customer").unwrap();
     assert_eq!((customer.count(RowKind::Different), customer.count(RowKind::OnlyIn2)), (3, 1), "{:?}", customer.error);
-
-    server.remove(&all);
-    server.drop(&db);
 }
 
 #[test]
@@ -189,8 +201,7 @@ fn compressed_rows_of_every_type() {
            ALTER INDEX ALL ON dbo.RowPage REBUILD;";
     server.create(&db, &script);
     let f = format!("{db}.bak");
+    let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![f.clone()] };
     let files = server.backup(&db, &[&f], "INIT, FORMAT, COMPRESSION");
     assert_identical(&server, &db, &files, None);
-    server.remove(&[&f]);
-    server.drop(&db);
 }
