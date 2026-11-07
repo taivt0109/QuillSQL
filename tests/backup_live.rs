@@ -230,7 +230,11 @@ fn backups_of_every_object_kind() {
     let Some(server) = server("objects") else { return };
     let db = name("Objects");
     let xml: String = XML_SPATIAL.split("\nGO\n").filter(|b| !b.contains("SELECTIVE") && !b.contains("SSX_Doc2")).collect::<Vec<_>>().join("\nGO\n");
-    let script = format!("{}\nGO\n{xml}\nGO\n{SPARSE_TYPED_XML}", OBJECTS.replace("{CLR}", &format!("0x{}", CLR.trim())));
+    let keys = "CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'Qu1ll!MasterKey';
+CREATE CERTIFICATE QuillCert WITH SUBJECT = 'Quill test', EXPIRY_DATE = '2030-01-01';
+CREATE ASYMMETRIC KEY QuillAsym WITH ALGORITHM = RSA_2048;
+CREATE SYMMETRIC KEY QuillSym WITH ALGORITHM = AES_256 ENCRYPTION BY CERTIFICATE QuillCert;";
+    let script = format!("{}\nGO\n{xml}\nGO\n{SPARSE_TYPED_XML}\nGO\n{keys}",OBJECTS.replace("{CLR}", &format!("0x{}", CLR.trim())));
     server.create(&db, &script);
     let f = format!("{db}.bak");
     let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![f.clone()] };
