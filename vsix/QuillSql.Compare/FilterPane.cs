@@ -171,20 +171,51 @@ namespace QuillSql.Compare
             Raise();
         }
 
-        private async System.Threading.Tasks.Task OpenFile()
+        private System.Threading.Tasks.Task OpenFile()
         {
-            var d = new OpenFileDialog { Filter = "Filter files (*.scpf)|*.scpf|All files (*.*)|*.*" };
+            // Recently used filters first, as a menu; then the file dialog.
+            var settings = CompareSettings.Load();
+            var recent = settings.RecentFilters.Where(System.IO.File.Exists).ToList();
+            if (recent.Count == 0 || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("QUILL_TEST_DIALOGS"))) return Browse();
+            var menu = new ContextMenu();
+            CompareTheme.Attach(menu);
+            foreach (var path in recent)
+            {
+                var item = Ui.MenuItem(System.IO.Path.GetFileName(path).Replace("_", "__"), async () => await Load(path), Glyph.Filter);
+                item.ToolTip = path;
+                menu.Items.Add(item);
+            }
+            menu.Items.Add(new Separator());
+            menu.Items.Add(Ui.MenuItem("Browse…", async () => await Browse(), Glyph.Open));
+            menu.IsOpen = true;
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
+
+        private async System.Threading.Tasks.Task Browse()
+        {
+            var folder = CompareSettings.Load().FilterFolder;
+            var d = new OpenFileDialog { Filter = "Filter files (*.scpf)|*.scpf|All files (*.*)|*.*", InitialDirectory = System.IO.Directory.Exists(folder) ? folder : null };
             if (Dialogs.Show(d, _session.Host.Owner) != true) return;
-            var reply = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("filter_load", new JsonObject { ["path"] = d.FileName }));
+            await Load(d.FileName);
+        }
+
+        private async System.Threading.Tasks.Task Load(string path)
+        {
+            var reply = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("filter_load", new JsonObject { ["path"] = path }));
             if (reply == null) return;
+            var settings = CompareSettings.Load();
+            settings.AddRecent(settings.RecentFilters, path);
             SetFilter(reply.Obj("filter"));
             Raise();
         }
 
         private async System.Threading.Tasks.Task SaveFile()
         {
-            var d = new SaveFileDialog { Filter = "Filter files (*.scpf)|*.scpf|All files (*.*)|*.*", DefaultExt = "scpf", FileName = string.IsNullOrEmpty(_filterName) ? "" : _filterName + ".scpf" };
+            var folder = CompareSettings.Load().FilterFolder;
+            var d = new SaveFileDialog { Filter = "Filter files (*.scpf)|*.scpf|All files (*.*)|*.*", DefaultExt = "scpf", FileName = string.IsNullOrEmpty(_filterName) ? "" : _filterName + ".scpf", InitialDirectory = System.IO.Directory.Exists(folder) ? folder : null };
             if (Dialogs.Show(d, _session.Host.Owner) != true) return;
+            var settings = CompareSettings.Load();
+            settings.AddRecent(settings.RecentFilters, d.FileName);
             _filterName = System.IO.Path.GetFileNameWithoutExtension(d.FileName);
             var filter = Filter() ?? new JsonObject { ["rules"] = new List<object>() };
             filter["name"] = _filterName;

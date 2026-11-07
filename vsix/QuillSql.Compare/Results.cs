@@ -30,6 +30,10 @@ namespace QuillSql.Compare
             public string Kind { get; set; }
             public string Tip { get; set; }
             public JsonObject Data { get; set; }
+            public string Owner { get; set; }
+            /// <summary>When the object last changed in the source and in the target, "yyyy-MM-dd HH:mm".</summary>
+            public string Modified1 { get; set; }
+            public string Modified2 { get; set; }
 
             public bool Selected
             {
@@ -94,6 +98,9 @@ namespace QuillSql.Compare
                     Status = kind == "Equal" ? "identical" : kind == "Different" ? "in both, but different" : kind == "OnlyIn1" ? "only in " + _sourceName : "only in " + _targetName,
                     Selected = d.Bool("selected"),
                     Data = d,
+                    Owner = d.Str("schema"),
+                    Modified1 = Minutes(d.Str("modified1")),
+                    Modified2 = Minutes(d.Str("modified2")),
                 };
                 var action = kind == "OnlyIn1" ? "created in" : kind == "OnlyIn2" ? "dropped from" : "modified in";
                 row.Tip = kind == "Equal" ? row.Name + " is identical in both databases."
@@ -126,7 +133,10 @@ namespace QuillSql.Compare
             _grid.Columns.Add(deployColumn);
             _grid.Columns.Add(new DataGridTemplateColumn { Header = "", Width = 40, CellTemplate = MarkerTemplate() });
             _grid.Columns.Add(new DataGridTextColumn { Header = "Object", Binding = new Binding("Name"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+            _grid.Columns.Add(new DataGridTextColumn { Header = "Owner", Binding = new Binding("Owner"), IsReadOnly = true, Width = 90 });
             _grid.Columns.Add(new DataGridTextColumn { Header = "Type", Binding = new Binding("Type"), IsReadOnly = true, Width = 150 });
+            _grid.Columns.Add(new DataGridTextColumn { Header = "Last modified (source)", Binding = new Binding("Modified1"), IsReadOnly = true, Width = 140 });
+            _grid.Columns.Add(new DataGridTextColumn { Header = "Last modified (target)", Binding = new Binding("Modified2"), IsReadOnly = true, Width = 140 });
             var rowStyle = new Style(typeof(DataGridRow), CompareTheme.Style(typeof(DataGridRow)));
             rowStyle.Setters.Add(new Setter(ToolTipProperty, new Binding("Tip")));
             _grid.RowStyle = rowStyle;
@@ -214,10 +224,16 @@ namespace QuillSql.Compare
             nav.Margin = new Thickness(0, 2, 8, 0);
             nav.HorizontalAlignment = HorizontalAlignment.Right;
             var leftHead = new DockPanel();
+            var findLeft = FindBox(_left, "Find in source");
+            var findRight = FindBox(_right, "Find in target");
+            DockPanel.SetDock(findLeft, Dock.Right);
+            leftHead.Children.Add(findLeft);
             leftHead.Children.Add(_leftTitle);
             var rightHead = new DockPanel();
             DockPanel.SetDock(nav, Dock.Right);
+            DockPanel.SetDock(findRight, Dock.Right);
             rightHead.Children.Add(nav);
+            rightHead.Children.Add(findRight);
             rightHead.Children.Add(_rightTitle);
             Grid.SetColumn(rightHead, 1);
             Grid.SetRow(_left, 1);
@@ -230,9 +246,30 @@ namespace QuillSql.Compare
             sides.Children.Add(_right);
             SyncScroll(_left, _right);
 
-            var bottomTabs = new TabControl();
+            // The same, after both sides went through the QuillSQL formatter with the user's style.
+            var formattedSides = new Grid();
+            formattedSides.ColumnDefinitions.Add(new ColumnDefinition());
+            formattedSides.ColumnDefinitions.Add(new ColumnDefinition());
+            formattedSides.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            formattedSides.RowDefinitions.Add(new RowDefinition());
+            var fl = Ui.Text("Source, formatted", bold: true);
+            var fr = Ui.Text("Target, formatted", bold: true);
+            fl.Margin = fr.Margin = new Thickness(16, 10, 16, 4);
+            Grid.SetColumn(fr, 1);
+            Grid.SetRow(_formattedLeft, 1);
+            Grid.SetRow(_formattedRight, 1);
+            Grid.SetColumn(_formattedRight, 1);
+            formattedSides.Children.Add(fl);
+            formattedSides.Children.Add(fr);
+            formattedSides.Children.Add(_formattedLeft);
+            formattedSides.Children.Add(_formattedRight);
+            SyncScroll(_formattedLeft, _formattedRight);
+            var bottomTabs = _bottomTabs = new TabControl();
             bottomTabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.Code, "SQL side by side"), Content = sides });
             bottomTabs.Items.Add(new TabItem { Header = Ui.IconText(Glyph.List, "Property differences"), Content = _properties });
+            _formattedTab = new TabItem { Header = Ui.IconText(Glyph.Code, "Formatted SQL"), Content = formattedSides, ToolTip = "The differences after formatting both sides with your QuillSQL style" };
+            bottomTabs.Items.Add(_formattedTab);
+            bottomTabs.SelectionChanged += async (s, e) => { if (e.Source == bottomTabs && bottomTabs.SelectedItem == _formattedTab) await ShowFormatted(); };
 
             var split = new Grid { Margin = new Thickness(16, 0, 16, 16) };
             split.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -286,6 +323,95 @@ namespace QuillSql.Compare
         private readonly StackPanel _empty;
         private readonly TextBlock _emptyText;
         private readonly int _identical;
+        private readonly RichTextBox _formattedLeft = SideBox(), _formattedRight = SideBox();
+        private readonly TabControl _bottomTabs;
+        private readonly TabItem _formattedTab;
+        private JsonObject _shownSql;
+        private bool _formattedShown;
+
+        /// <summary>"2024-05-01 10:22:33.123" as "2024-05-01 10:22".</summary>
+        private static string Minutes(string time) => string.IsNullOrEmpty(time) ? "" : time.Length > 16 ? time.Substring(0, 16) : time;
+
+        /// <summary>Lines are matched as the comparison matches text: case and white space as its options say.</summary>
+        private bool CaseSensitive => _session.Project.Strings("options").Contains("CaseSensitiveObjectDefinition");
+        private bool IgnoreWhiteSpace => _session.Project.Strings("options").Contains("IgnoreWhiteSpace");
+
+        public void ToggleFilterPane() => _filterPane.Visibility = _filterPane.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+
+        public void FocusFind()
+        {
+            _find.Focus();
+            _find.SelectAll();
+        }
+
+        /// <summary>A find box over one side of the SQL view: Enter finds the next match, Shift+Enter the previous one.</summary>
+        private static StackPanel FindBox(RichTextBox box, string hint)
+        {
+            var find = Ui.SearchBox(hint, 150);
+            System.Windows.Automation.AutomationProperties.SetName(find, hint);
+            find.ToolTip = hint + " (Enter: next, Shift+Enter: previous)";
+            void go(bool forward)
+            {
+                if (find.Text.Length == 0) return;
+                var doc = new TextRange(box.Document.ContentStart, box.Document.ContentEnd).Text;
+                var caret = new TextRange(box.Document.ContentStart, box.Selection.End).Text.Length;
+                var start = new TextRange(box.Document.ContentStart, box.Selection.Start).Text.Length;
+                var at = forward ? doc.IndexOf(find.Text, Math.Min(caret, doc.Length), StringComparison.OrdinalIgnoreCase) : start == 0 ? -1 : doc.LastIndexOf(find.Text, start - 1, StringComparison.OrdinalIgnoreCase);
+                if (at < 0) at = forward ? doc.IndexOf(find.Text, StringComparison.OrdinalIgnoreCase) : doc.LastIndexOf(find.Text, StringComparison.OrdinalIgnoreCase);
+                if (at < 0)
+                {
+                    find.Background = CompareTheme.Removed;
+                    return;
+                }
+                find.ClearValue(Control.BackgroundProperty);
+                var from = Offset(box.Document.ContentStart, at);
+                var to = Offset(box.Document.ContentStart, at + find.Text.Length);
+                if (from == null || to == null) return;
+                box.Focus();
+                box.Selection.Select(from, to);
+                var rect = from.GetCharacterRect(LogicalDirection.Forward);
+                box.ScrollToVerticalOffset(Math.Max(0, box.VerticalOffset + rect.Top - box.ActualHeight / 3));
+            }
+            find.KeyDown += (s, e) => { if (e.Key == System.Windows.Input.Key.Enter) go((System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Shift) == 0); };
+            var row = Ui.Row(find, Ui.IconButton(Glyph.Down, hint + ": next", () => go(true)));
+            row.Margin = new Thickness(0, 2, 8, 0);
+            return row;
+        }
+
+        /// <summary>The text position `chars` characters into a document (counting as TextRange.Text does).</summary>
+        private static TextPointer Offset(TextPointer start, int chars)
+        {
+            var p = start;
+            var seen = 0;
+            while (p != null)
+            {
+                if (p.GetPointerContext(LogicalDirection.Forward) == TextPointerContext.Text)
+                {
+                    var run = p.GetTextInRun(LogicalDirection.Forward);
+                    if (seen + run.Length >= chars) return p.GetPositionAtOffset(chars - seen);
+                    seen += run.Length;
+                }
+                else if (p.GetPointerContext(LogicalDirection.Forward) == TextPointerContext.ElementEnd && p.Parent is Paragraph)
+                {
+                    seen += 2;
+                }
+                p = p.GetNextContextPosition(LogicalDirection.Forward);
+            }
+            return null;
+        }
+
+        /// <summary>Formats both sides with the user's style (engine `format_sql`) and shows them line against line.</summary>
+        private async System.Threading.Tasks.Task ShowFormatted()
+        {
+            if (_shownSql == null || _formattedShown) return;
+            var sql = _shownSql;
+            var f = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("format_sql", new JsonObject { ["source"] = sql.Str("source"), ["target"] = sql.Str("target") }));
+            if (f == null || sql != _shownSql) return;
+            var lines = LineDiff.Align(f.Str("source"), f.Str("target"), CaseSensitive, IgnoreWhiteSpace);
+            Fill(_formattedLeft, lines, true);
+            Fill(_formattedRight, lines, false);
+            _formattedShown = true;
+        }
 
         /// <summary>Include or exclude the selected objects, or show the script of one.</summary>
         private ContextMenu RowMenu()
@@ -297,8 +423,22 @@ namespace QuillSql.Compare
                 foreach (var r in _grid.SelectedItems.OfType<Row>().Where(r => r.Kind != "Equal")) r.Selected = on;
                 UpdateHeaderCheck();
             }
+            void group(bool on)
+            {
+                if (!(_grid.SelectedItem is Row current)) return;
+                foreach (var r in Shown().Where(r => r.Kind != "Equal" && r.Group == current.Group && _view.Contains(r))) r.Selected = on;
+                UpdateHeaderCheck();
+            }
             menu.Items.Add(Ui.MenuItem("Include selected objects", () => tick(true), Glyph.Check));
             menu.Items.Add(Ui.MenuItem("Exclude selected objects", () => tick(false)));
+            menu.Items.Add(new Separator());
+            menu.Items.Add(Ui.MenuItem("Include all objects in this group", () => group(true)));
+            menu.Items.Add(Ui.MenuItem("Exclude all objects in this group", () => group(false)));
+            menu.Items.Add(Ui.MenuItem("Include all objects", () => SelectAll(true), hint: "Ctrl+I"));
+            menu.Items.Add(Ui.MenuItem("Exclude all objects", () => SelectAll(false), hint: "Ctrl+Shift+I"));
+            menu.Items.Add(new Separator());
+            menu.Items.Add(Ui.MenuItem("Expand all", () => ExpandGroups(true)));
+            menu.Items.Add(Ui.MenuItem("Collapse all", () => ExpandGroups(false)));
             menu.Items.Add(new Separator());
             menu.Items.Add(Ui.MenuItem("View object deployment script", async () => await ObjectScript(), Glyph.Code));
             Dialogs.RegisterMenu(menu);
@@ -316,7 +456,51 @@ namespace QuillSql.Compare
                 ["project"] = _session.Project,
                 ["isolationLevel"] = CompareSettings.Load().IsolationLevel,
             }));
-            if (script != null) Dialogs.ShowScript(_session.Host, "Deployment script for " + row.Name, script.Str("sql"));
+            if (script != null) Dialogs.ShowScript(_session.Host, "Deployment script for " + row.Name, script.Str("sql"), _session.LiveTarget());
+        }
+
+        /// <summary>The SQL of one difference on both sides, line against line (for dependencies in the deployment wizard).</summary>
+        public async System.Threading.Tasks.Task ShowDifference(int index)
+        {
+            var row = _rows.FirstOrDefault(r => r.Index == index);
+            var sql = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("schema_object_sql", new JsonObject { ["session"] = Session, ["index"] = index }));
+            if (sql == null) return;
+            var left = SideBox();
+            var right = SideBox();
+            var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"), CaseSensitive, IgnoreWhiteSpace);
+            Fill(left, lines, true);
+            Fill(right, lines, false);
+            SyncScroll(left, right);
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition());
+            grid.ColumnDefinitions.Add(new ColumnDefinition());
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition());
+            var lt = Ui.Text("Source: " + _sourceName, bold: true);
+            var rt = Ui.Text("Target: " + _targetName, bold: true);
+            lt.Margin = rt.Margin = new Thickness(16, 10, 16, 4);
+            Grid.SetColumn(rt, 1);
+            Grid.SetRow(left, 1);
+            Grid.SetRow(right, 1);
+            Grid.SetColumn(right, 1);
+            grid.Children.Add(lt);
+            grid.Children.Add(rt);
+            grid.Children.Add(left);
+            grid.Children.Add(right);
+            var title = row != null ? row.Name + " (" + row.Type + ", " + row.Status + ")" : "Differences";
+            var w = Ui.Dialog(_session.Host.Owner, "Object differences", null, 1100, 640);
+            var heading = Ui.Title(title, 16);
+            heading.Margin = new Thickness(0, 0, 0, 10);
+            var body = new DockPanel { Margin = new Thickness(24, 20, 24, 16) };
+            DockPanel.SetDock(heading, Dock.Top);
+            body.Children.Add(heading);
+            body.Children.Add(Ui.Card(grid, 0));
+            var close = Ui.Button("Close", () => w.Close(), primary: true);
+            close.IsCancel = true;
+            var buttons = Ui.Row(close);
+            buttons.HorizontalAlignment = HorizontalAlignment.Right;
+            w.Content = Ui.WithFooter(body, buttons);
+            w.ShowDialog();
         }
 
         /// <summary>The parser warnings, one per line, to read and copy.</summary>
@@ -394,6 +578,26 @@ namespace QuillSql.Compare
 
         // ---- Group headers: a bold count, then what the group holds ----
 
+        private readonly HashSet<string> _collapsed = new HashSet<string>();
+
+        /// <summary>Opens or closes every group of the list.</summary>
+        private void ExpandGroups(bool open)
+        {
+            _collapsed.Clear();
+            if (!open) foreach (var r in _rows) if (r.Group != null) _collapsed.Add(r.Group);
+            foreach (var e in Descendants<Expander>(_grid)) e.IsExpanded = open;
+        }
+
+        private static IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject
+        {
+            for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            {
+                var child = VisualTreeHelper.GetChild(root, i);
+                if (child is T t) yield return t;
+                foreach (var d in Descendants<T>(child)) yield return d;
+            }
+        }
+
         private GroupStyle GroupHeader()
         {
             var groupStyle = new GroupStyle();
@@ -410,6 +614,22 @@ namespace QuillSql.Compare
             header.AppendChild(groupCount);
             header.AppendChild(groupName);
             groupStyle.HeaderTemplate = new DataTemplate { VisualTree = header };
+            // Each group can be collapsed: an expander with the header and the rows.
+            var expander = new FrameworkElementFactory(typeof(Expander));
+            expander.SetValue(Expander.IsExpandedProperty, true);
+            expander.SetBinding(HeaderedContentControl.HeaderProperty, new Binding());
+            expander.SetValue(HeaderedContentControl.HeaderTemplateProperty, groupStyle.HeaderTemplate);
+            expander.AppendChild(new FrameworkElementFactory(typeof(ItemsPresenter)));
+            expander.AddHandler(Expander.LoadedEvent, new RoutedEventHandler((s, e) =>
+            {
+                var x = (Expander)s;
+                if (x.DataContext is CollectionViewGroup g && _collapsed.Contains(g.Name as string ?? "")) x.IsExpanded = false;
+            }));
+            expander.AddHandler(Expander.CollapsedEvent, new RoutedEventHandler((s, e) => { if (((Expander)s).DataContext is CollectionViewGroup g) _collapsed.Add(g.Name as string ?? ""); }));
+            expander.AddHandler(Expander.ExpandedEvent, new RoutedEventHandler((s, e) => { if (((Expander)s).DataContext is CollectionViewGroup g) _collapsed.Remove(g.Name as string ?? ""); }));
+            var container = new Style(typeof(GroupItem));
+            container.Setters.Add(new Setter(Control.TemplateProperty, new ControlTemplate(typeof(GroupItem)) { VisualTree = expander }));
+            groupStyle.ContainerStyle = container;
             return groupStyle;
         }
 
@@ -499,7 +719,6 @@ namespace QuillSql.Compare
         /// <summary>Raised when the filter changes (the project changed).</summary>
         public event Action FilterChanged;
 
-        private void ToggleFilterPane() => _filterPane.Visibility = _filterPane.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
         // ---- SQL side by side ----
 
         /// <summary>A rounded square with +, −, ~ or =, colored by what deployment does.</summary>
@@ -560,7 +779,10 @@ namespace QuillSql.Compare
             ShowProperties(row.Data);
             var sql = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("schema_object_sql", new JsonObject { ["session"] = Session, ["index"] = row.Index }));
             if (sql == null || !ReferenceEquals(_grid.SelectedItem, row)) return;
-            var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"));
+            _shownSql = sql;
+            _formattedShown = false;
+            if (_bottomTabs.SelectedItem == _formattedTab) await ShowFormatted();
+            var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"), CaseSensitive, IgnoreWhiteSpace);
             Fill(_left, lines, true);
             Fill(_right, lines, false);
             // The first line of each run of differing lines, for the up and down buttons.
@@ -605,18 +827,55 @@ namespace QuillSql.Compare
                         p.Inlines.Add(new Run("\n") { Background = CompareTheme.Changed });
                         continue;
                     case LineDiff.Kind.OnlyLeft:
-                        p.Inlines.Add(new Run((text ?? "") + "\n") { Background = left ? CompareTheme.Added : missing });
+                        Colour(p, (text ?? "") + "\n", left ? CompareTheme.Added : missing);
                         continue;
                     case LineDiff.Kind.OnlyRight:
-                        p.Inlines.Add(new Run((text ?? "") + "\n") { Background = left ? missing : CompareTheme.Removed });
+                        Colour(p, (text ?? "") + "\n", left ? missing : CompareTheme.Removed);
                         continue;
                     default:
-                        p.Inlines.Add(new Run((text ?? "") + "\n"));
+                        Colour(p, (text ?? "") + "\n", null);
                         continue;
                 }
             }
             doc.Blocks.Add(p);
             box.Document = doc;
+        }
+
+        private static readonly HashSet<string> Keywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ADD", "AFTER", "ALL", "ALTER", "AND", "AS", "ASC", "AUTHORIZATION", "BEGIN", "BETWEEN", "BY", "CASCADE", "CASE", "CHECK", "CLUSTERED", "COLLATE", "COLUMN",
+            "COMMIT", "CONSTRAINT", "CREATE", "CROSS", "DECLARE", "DEFAULT", "DELETE", "DESC", "DISTINCT", "DROP", "ELSE", "END", "EXEC", "EXECUTE", "EXISTS", "FOR",
+            "FOREIGN", "FROM", "FUNCTION", "GO", "GRANT", "GROUP", "HAVING", "IDENTITY", "IF", "IN", "INCLUDE", "INDEX", "INNER", "INSERT", "INSTEAD", "INTO", "IS", "JOIN",
+            "KEY", "LEFT", "LIKE", "NOCHECK", "NONCLUSTERED", "NOT", "NULL", "OF", "ON", "OR", "ORDER", "OUTER", "PRIMARY", "PROC", "PROCEDURE", "REFERENCES", "RETURN",
+            "RETURNS", "RIGHT", "ROLE", "ROLLBACK", "SCHEMA", "SELECT", "SET", "TABLE", "THEN", "TO", "TOP", "TRAN", "TRANSACTION", "TRIGGER", "TYPE", "UNION", "UNIQUE",
+            "UPDATE", "USER", "VALUES", "VIEW", "WHEN", "WHERE", "WITH",
+        };
+
+        private static readonly System.Text.RegularExpressions.Regex Tokens = new System.Text.RegularExpressions.Regex(@"--.*|'(?:[^']|'')*'?|\b[A-Za-z_]+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>Adds a line with keywords, comments and strings coloured, on a background (or none).</summary>
+        private static void Colour(Paragraph p, string text, Brush background)
+        {
+            var at = 0;
+            void add(string piece, Brush ink)
+            {
+                if (piece.Length == 0) return;
+                var run = new Run(piece);
+                if (background != null) run.Background = background;
+                if (ink != null) run.Foreground = ink;
+                p.Inlines.Add(run);
+            }
+            foreach (System.Text.RegularExpressions.Match m in Tokens.Matches(text))
+            {
+                var ink = m.Value.StartsWith("--", StringComparison.Ordinal) ? CompareTheme.Success
+                    : m.Value.StartsWith("'", StringComparison.Ordinal) ? CompareTheme.High
+                    : Keywords.Contains(m.Value) ? CompareTheme.Accent : null;
+                if (ink == null) continue;
+                add(text.Substring(at, m.Index - at), null);
+                add(m.Value, ink);
+                at = m.Index + m.Length;
+            }
+            add(text.Substring(at), null);
         }
 
         private void ShowProperties(JsonObject d)

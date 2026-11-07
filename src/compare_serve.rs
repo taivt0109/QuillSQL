@@ -288,12 +288,14 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 opts = Options::parse("SsdtCompatibleOptions")?.iter().fold(opts, |o, x| o.with(x));
             }
             let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
-            let (db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
+            let (mut db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
+            folder_defaults(request, "source", &mut db1);
             // An empty database (`/empty2`): every object is created; only a script can be made.
             let db2 = if project.target.is_empty_database() {
                 Database { name: "Empty".into(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }
             } else {
-                let (db2, w2) = load_side_with_warnings(&project.target, 2, decrypt, progress)?;
+                let (mut db2, w2) = load_side_with_warnings(&project.target, 2, decrypt, progress)?;
+                folder_defaults(request, "target", &mut db2);
                 warnings.extend(w2);
                 db2
             };
@@ -304,6 +306,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let s = SchemaSession { db1, db2, comparison, project, script: None, selected: Vec::new() };
             let mut reply = schema_reply(id, &s);
             reply["warnings"] = json!(warnings);
+            add_modified(&mut reply, &s);
             state.schema.insert(id, s);
             Ok(reply)
         }
@@ -438,7 +441,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 }
             }
             backup_into(request, &s.project.target, &mut script)?;
-            let reply = script_json(&script);
+            let mut reply = script_json(&script);
+            reply["actions"] = json!(script_actions(&script.batches));
             s.script = Some(script);
             s.selected = selected;
             Ok(reply)
@@ -542,6 +546,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             };
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
+            let only = only_selected(request);
             let result = crate::data::compare::compare_sources(
                 rows(0),
                 rows(1),
@@ -549,7 +554,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 &db2,
                 &opts,
                 &project.data_mappings,
-                |p| !deselected.contains(&p.source),
+                |p| !deselected.contains(&p.source) && only.as_ref().is_none_or(|o| o.contains(&p.source)),
                 4,
                 |p, _| progress(&progress_text(p, opts.has(DataOpt::UseChecksumComparison))),
             )?;
@@ -786,6 +791,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             state.data.remove(&id);
             Ok(json!(true))
         }
+        _ if UI_OPS.contains(&op) => ui_op(state, op, request, progress),
         other => Err(format!("unknown op '{other}'")),
     }
 }
@@ -1274,6 +1280,7 @@ fn option_definitions() -> Value {
                 "default": o.is_default(),
                 "negated": o.presented_as_negation(),
                 "requires": o.requires().iter().map(|r| r.name()).collect::<Vec<_>>(),
+                "description": help::schema(o.name()),
             })
         })
         .collect();
@@ -1281,10 +1288,257 @@ fn option_definitions() -> Value {
     let data: Vec<Value> = crate::data::options::ALL
         .iter()
         .filter(|o| **o != DataOpt::MissingFrom2AsInclude)
-        .map(|o| json!({"name": o.name(), "label": o.label(), "group": format!("{:?}", o.group()), "default": o.is_default()}))
+        .map(|o| json!({"name": o.name(), "label": o.label(), "group": format!("{:?}", o.group()), "default": o.is_default(), "description": help::data(o.name())}))
         .collect();
     let _ = (Opt::IgnoreWhiteSpace, DataOpt::IgnoreSpaces);
     json!({"schema": schema, "data": data})
+}
+
+// ---- Operations only the Compare windows use ----
+
+#[path = "compare_help.rs"]
+mod help;
+
+const UI_OPS: &[&str] = &["format_sql", "collations", "revisions", "folder_preview"];
+
+/// - `format_sql` {source, target, style?} formats both texts with the user's QuillSQL style
+///   (`style` path, else `%USERPROFILE%\.quillsql.json`, else the defaults), for the formatted
+///   difference view; a text that cannot be formatted comes back as it was.
+/// - `collations` {source} → {collations, default, dataPath, logPath}, for New database.
+/// - `revisions` {path} → the latest revisions of a scripts folder in git, Mercurial or
+///   Subversion: [{id, author, date, message}].
+/// - `folder_preview` {session} → {written, deleted}: the files that deploying the last script
+///   to a scripts folder would change.
+fn ui_op(state: &mut State, op: &str, request: &Value, progress: &dyn Fn(&str)) -> Result<Value, String> {
+    match op {
+        "format_sql" => {
+            let style = request
+                .get("style")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::var_os("USERPROFILE").map(|h| std::path::Path::new(&h).join(".quillsql.json")));
+            let opts = style
+                .filter(|p| p.is_file())
+                .and_then(|p| std::fs::read(&p).ok())
+                .and_then(|b| serde_json::from_str::<Value>(&crate::project::decode_text(&b)).ok())
+                .and_then(|v| crate::style::options_from_value(&v).ok())
+                .map(|(o, _)| o)
+                .unwrap_or_default();
+            let format = |key: &str| request.get(key).and_then(Value::as_str).map(|t| crate::format(t, &opts).unwrap_or_else(|_| t.to_string()));
+            Ok(json!({"source": format("source"), "target": format("target")}))
+        }
+        "collations" => {
+            let side: SourceSpec = field(request, "source")?;
+            let mut spec = side.connection(1)?;
+            spec.database = "master".into();
+            let rt = crate::db::runtime()?;
+            rt.block_on(async {
+                let mut c = crate::db::connect_async(&spec).await?;
+                let names = crate::db::query(&mut c, "SELECT name FROM sys.fn_helpcollations() ORDER BY name").await?;
+                let info = crate::db::query(
+                    &mut c,
+                    "SELECT CAST(SERVERPROPERTY('Collation') AS nvarchar(128)), CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(260)), CAST(SERVERPROPERTY('InstanceDefaultLogPath') AS nvarchar(260))",
+                )
+                .await?;
+                let r = info.first().ok_or("no reply")?;
+                Ok(json!({
+                    "collations": names.iter().filter_map(|r| r.get::<&str, _>(0).map(str::to_string)).collect::<Vec<_>>(),
+                    "default": r.get::<&str, _>(0), "dataPath": r.get::<&str, _>(1), "logPath": r.get::<&str, _>(2),
+                }))
+            })
+        }
+        "revisions" => {
+            let path: String = field(request, "path")?;
+            progress("Reading the history");
+            Ok(json!(revisions(std::path::Path::new(&path))?))
+        }
+        "folder_preview" => {
+            let s = state.schema.get(&session(request)?).ok_or("the comparison is no longer open")?;
+            if !s.project.target.is_scripts() || s.script.is_none() {
+                return Ok(json!({"written": [], "deleted": []}));
+            }
+            let opts = schema_options(&s.project)?;
+            let mut comparison = s.comparison.clone();
+            for (i, d) in comparison.differences.iter_mut().enumerate() {
+                d.selected = s.selected.contains(&i);
+            }
+            let target = crate::sources::folder::read(std::path::Path::new(&s.project.target.path))?;
+            let changes = crate::sources::folder::preview(&s.db1, &target, &comparison.differences, &opts)?;
+            let list = |v: &[std::path::PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+            Ok(json!({"written": list(&changes.written), "deleted": list(&changes.deleted)}))
+        }
+        _ => Err(format!("unknown op '{op}'")),
+    }
+}
+
+/// Data projects with "Include new tables" off (`includeNewTables: false`): only the tables
+/// named in `selected` are compared.
+fn only_selected(request: &Value) -> Option<Vec<ObjectName>> {
+    let p = request.get("project")?;
+    if p.get("includeNewTables").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let list = p.get("selected").and_then(Value::as_array).cloned().unwrap_or_default();
+    Some(list.iter().map(|t| ObjectName::new(t["schema"].as_str().unwrap_or("dbo"), t["name"].as_str().unwrap_or_default())).collect())
+}
+
+/// A scripts folder without database information is read as the side's `sqlVersion` and
+/// `defaultCollation` (what SQL Compare asks for such a folder).
+fn folder_defaults(request: &Value, key: &str, db: &mut Database) {
+    let Some(side) = request.get("project").and_then(|p| p.get(key)) else { return };
+    if side["type"] != "scripts" || side.get("revision").and_then(Value::as_str).is_some_and(|r| !r.is_empty()) {
+        return;
+    }
+    let path = side["path"].as_str().unwrap_or_default();
+    if crate::sources::folder::FolderInfo::read(std::path::Path::new(path)).0.file.is_some() {
+        return;
+    }
+    if let Some(v) = side.get("sqlVersion").and_then(Value::as_str).and_then(|v| v.parse::<u32>().ok()).filter(|v| (10..=17).contains(v)) {
+        db.server.major_version = v;
+        db.compatibility_level = v * 10;
+    }
+    if let Some(c) = side.get("defaultCollation").and_then(Value::as_str).filter(|c| !c.is_empty()) {
+        db.collation = c.to_string();
+    }
+}
+
+/// `modified1` / `modified2` of each difference: when the object last changed on each side.
+fn add_modified(reply: &mut Value, s: &SchemaSession) {
+    fn modified(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<String> {
+        let same = |schema: &str, n: &str| schema == name.schema && n == name.name;
+        match ty {
+            ObjectType::Table => db.tables.iter().find(|t| same(&t.schema, &t.name)).and_then(|t| t.modified.clone()),
+            ObjectType::View => db.views.iter().find(|v| same(&v.schema, &v.name)).and_then(|v| v.modified.clone()),
+            ObjectType::Function | ObjectType::StoredProcedure => db.routines.iter().find(|r| same(&r.schema, &r.name)).and_then(|r| r.modified.clone()),
+            _ => None,
+        }
+    }
+    let Some(list) = reply.get_mut("differences").and_then(Value::as_array_mut) else { return };
+    for (v, d) in list.iter_mut().zip(&s.comparison.differences) {
+        let target = d.target_name.as_ref().unwrap_or(&d.name);
+        v["modified1"] = json!(modified(&s.db1, d.object_type, &d.name));
+        v["modified2"] = json!(modified(&s.db2, d.object_type, target));
+    }
+}
+
+/// What the statements of a deployment script do, in the order they run: {action, object,
+/// detail}, for the deployment summary. Statements that only steer the script (SET, PRINT,
+/// transactions, error handling, existence checks) are left out.
+fn script_actions(batches: &[String]) -> Vec<Value> {
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
+    const KINDS: &str = r"VIEW|PROCEDURE|PROC|FUNCTION|TRIGGER|SCHEMA|TYPE|SEQUENCE|SYNONYM|ROLE|USER|ASSEMBLY|DEFAULT|RULE|XML\s+SCHEMA\s+COLLECTION|PARTITION\s+FUNCTION|PARTITION\s+SCHEME|FULLTEXT\s+CATALOG|FULLTEXT\s+INDEX\s+ON|STATISTICS|QUEUE|SERVICE|CONTRACT|MESSAGE\s+TYPE|CERTIFICATE|SYMMETRIC\s+KEY|ASYMMETRIC\s+KEY|SECURITY\s+POLICY|EVENT\s+NOTIFICATION|SEARCH\s+PROPERTY\s+LIST|EXTERNAL\s+\w+";
+    let patterns = PATTERNS.get_or_init(|| {
+        let n = r"((?:\[(?:[^\]]|\]\])+\]|[\w@#$]+)(?:\.(?:\[(?:[^\]]|\]\])+\]|[\w@#$]+))*)";
+        let check = r"(?:WITH\s+(?:NO)?CHECK\s+)?";
+        [
+            (format!(r"(?i)^CREATE\s+TABLE\s+{n}"), "create table"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+{check}ADD\s+CONSTRAINT\s+{n}\s+PRIMARY\s+KEY"), "add primary key"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+{check}ADD\s+CONSTRAINT\s+{n}\s+FOREIGN\s+KEY"), "add foreign key"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+{check}ADD\s+CONSTRAINT\s+{n}\s+UNIQUE"), "add unique constraint"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+{check}ADD\s+CONSTRAINT\s+{n}\s+CHECK"), "add check constraint"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+ADD\s+CONSTRAINT\s+{n}\s+DEFAULT"), "add default"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+DROP\s+CONSTRAINT\s+{n}"), "drop constraint"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+ALTER\s+COLUMN\s+{n}"), "alter column"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+DROP\s+COLUMN\s+{n}"), "drop column"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+(?:NO)?CHECK\s+CONSTRAINT"), "check constraints"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+(?:ENABLE|DISABLE)\s+TRIGGER"), "enable or disable triggers"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}\s+ADD\b"), "add columns"),
+            (format!(r"(?i)^ALTER\s+TABLE\s+{n}"), "alter table"),
+            (format!(r"(?i)^CREATE\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?(?:COLUMNSTORE\s+|XML\s+|SPATIAL\s+|PRIMARY\s+XML\s+)?INDEX\s+{n}\s+ON\s+{n}"), "create index"),
+            (format!(r"(?i)^DROP\s+INDEX\s+(?:IF\s+EXISTS\s+)?{n}\s+ON\s+{n}"), "drop index"),
+            (format!(r"(?i)^ALTER\s+INDEX\s+{n}\s+ON\s+{n}"), "alter index"),
+            (format!(r"(?i)^(?:CREATE\s+OR\s+ALTER|CREATE)\s+({KINDS})\s+{n}"), "create"),
+            (format!(r"(?i)^ALTER\s+({KINDS}|AUTHORIZATION\s+ON)\s+{n}"), "alter"),
+            (format!(r"(?i)^DROP\s+(TABLE|{KINDS})\s+(?:IF\s+EXISTS\s+)?{n}"), "drop"),
+            (r"(?i)^EXEC(?:UTE)?\s+(?:sys\.)?sp_rename\s+N?'((?:[^']|'')+)'\s*,\s*N?'((?:[^']|'')+)'".to_string(), "rename"),
+            (r"(?i)^EXEC(?:UTE)?\s+(?:sys\.)?sp_(?:add|update|drop)extendedproperty\b".to_string(), "extended properties"),
+            (r"(?i)^EXEC(?:UTE)?\s+(?:sys\.)?sp_(?:add|drop)rolemember\s+N?'([^']+)'\s*,\s*N?'([^']+)'".to_string(), "role membership"),
+            (r"(?i)^(GRANT|DENY|REVOKE)\s+(.*?)\s+ON\s+((?:\w+::)?(?:\[[^\]]+\]|[\w@#$]+)(?:\.(?:\[[^\]]+\]|[\w@#$]+))*)".to_string(), "permissions"),
+            (r"(?i)^(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+((?:\[[^\]]+\]|[\w@#$]+)(?:\.(?:\[[^\]]+\]|[\w@#$]+))*)".to_string(), "data"),
+            (r"(?i)^BACKUP\s+DATABASE\s+(\[[^\]]+\]|\w+)".to_string(), "back up database"),
+        ]
+        .into_iter()
+        .map(|(p, a)| (regex::Regex::new(&p).expect("valid pattern"), a))
+        .collect()
+    });
+    let mut out: Vec<Value> = Vec::new();
+    for batch in batches {
+        for line in batch.lines() {
+            let text = line.trim();
+            // Existence checks (IF ...), comments and the script's own plumbing are not actions.
+            if text.is_empty() || text.starts_with("--") || text.len() < 4 {
+                continue;
+            }
+            let Some((re, action)) = patterns.iter().find(|(re, _)| re.is_match(text)) else { continue };
+            let c = re.captures(text).expect("matched");
+            let g = |i: usize| c.get(i).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let (action, object, detail) = match *action {
+                "create" | "alter" | "drop" => {
+                    let kind = g(1).split_whitespace().map(str::to_ascii_lowercase).collect::<Vec<_>>().join(" ");
+                    let kind = match kind.as_str() {
+                        "proc" => "procedure".to_string(),
+                        "fulltext index on" => "full-text index".to_string(),
+                        "authorization on" => "owner".to_string(),
+                        _ => kind,
+                    };
+                    (format!("{action} {kind}"), g(2), String::new())
+                }
+                "create table" if g(1).contains("RG_Recovery_") => ("rebuild table".to_string(), g(1).replace("RG_Recovery_", ""), String::new()),
+                "create index" | "drop index" | "alter index" => (action.to_string(), g(2), g(1)),
+                "rename" | "role membership" => (action.to_string(), g(1), g(2)),
+                "permissions" => (format!("{} permissions", g(1).to_ascii_lowercase()), g(3), g(2)),
+                "data" => (format!("{} rows", g(1).split_whitespace().next().unwrap_or_default().to_ascii_lowercase()), g(2), String::new()),
+                "extended properties" => (action.to_string(), String::new(), String::new()),
+                "back up database" => (action.to_string(), g(1), String::new()),
+                _ => (action.to_string(), g(1), g(2)),
+            };
+            // Several statements of one kind on one object (rows, columns) are one action.
+            let same = out.last().is_some_and(|l| l["action"] == action && l["object"] == object && l["detail"] == detail);
+            if !same {
+                out.push(json!({"action": action, "object": object, "detail": detail}));
+            }
+        }
+    }
+    out
+}
+
+/// The latest revisions of the folder `path` in git, Mercurial or Subversion.
+fn revisions(path: &std::path::Path) -> Result<Vec<Value>, String> {
+    use std::process::Command;
+    let run = |c: &mut Command| c.output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let row = |id: &str, author: &str, date: &str, message: &str| json!({"id": id, "author": author, "date": date, "message": message});
+    let fields = |text: &str, cut: bool| -> Vec<Value> {
+        text.lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\u{1f}').collect();
+                (f.len() == 4).then(|| row(f[0], f[1], if cut { f[2].get(..16).unwrap_or(f[2]) } else { f[2] }, f[3]))
+            })
+            .collect()
+    };
+    if let Some(text) = run(Command::new("git").arg("-C").arg(path).args(["log", "-n", "100", "--format=%h%x1f%an%x1f%ad%x1f%s", "--date=format:%Y-%m-%d %H:%M", "--", "."])) {
+        let mut list = fields(&text, false);
+        if let Some(tags) = run(Command::new("git").arg("-C").arg(path).args(["tag", "--sort=-creatordate"])) {
+            list.extend(tags.lines().take(20).map(|t| row(t, "", "", "tag")));
+        }
+        return Ok(list);
+    }
+    if let Some(text) = run(Command::new("hg").arg("--cwd").arg(path).args(["log", "-l", "100", "--template", "{rev}\x1f{author|person}\x1f{date|isodate}\x1f{desc|firstline}\n", "."])) {
+        return Ok(fields(&text, true));
+    }
+    if let Some(xml) = run(Command::new("svn").args(["log", "--xml", "-l", "100"]).arg(path)) {
+        let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
+        let text = |n: roxmltree::Node, tag: &str| n.children().find(|c| c.has_tag_name(tag)).and_then(|c| c.text()).unwrap_or_default().to_string();
+        return Ok(doc
+            .descendants()
+            .filter(|n| n.has_tag_name("logentry"))
+            .map(|n| {
+                let date = text(n, "date").replace('T', " ");
+                row(n.attribute("revision").unwrap_or_default(), &text(n, "author"), date.get(..16).unwrap_or(&date), text(n, "msg").lines().next().unwrap_or_default())
+            })
+            .collect());
+    }
+    Err(format!("{} is not in a git, Mercurial or Subversion working copy", path.display()))
 }
 
 #[cfg(test)]
@@ -1518,6 +1772,101 @@ mod tests {
             let id = c["session"].as_u64().unwrap();
             handle(&mut state, &json!({"op": "schema_script", "session": id, "selected": [0, 1, 2]}), &none).unwrap();
             assert!(handle(&mut state, &json!({"op": "deploy", "session": id}), &none).is_err());
+        }
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn every_shown_option_has_a_description() {
+        let o = option_definitions();
+        for d in o["schema"].as_array().unwrap().iter().filter(|d| d["group"] != "Hidden").chain(o["data"].as_array().unwrap()) {
+            assert!(!d["description"].as_str().unwrap().is_empty(), "{d}");
+        }
+    }
+
+    #[test]
+    fn script_actions_in_order() {
+        let batches = [
+            "SET NUMERIC_ROUNDABORT OFF".to_string(),
+            "PRINT N'Dropping foreign keys from [dbo].[Orders]'".to_string(),
+            "ALTER TABLE [dbo].[Orders] DROP CONSTRAINT [FK_Orders_Customer]".to_string(),
+            "IF @@ERROR <> 0 SET NOEXEC ON".to_string(),
+            "CREATE TABLE [dbo].[RG_Recovery_1_Customer]\n(\n[Id] [int] NOT NULL\n)".to_string(),
+            "INSERT INTO [dbo].[RG_Recovery_1_Customer]([Id]) SELECT [Id] FROM [dbo].[Customer]".to_string(),
+            "EXEC sp_rename N'[dbo].[RG_Recovery_1_Customer]', N'Customer', N'OBJECT'".to_string(),
+            "CREATE NONCLUSTERED INDEX [IX_A] ON [dbo].[Customer] ([Id])".to_string(),
+            "ALTER TABLE [dbo].[Orders] WITH NOCHECK ADD CONSTRAINT [FK_Orders_Customer] FOREIGN KEY ([C]) REFERENCES [dbo].[Customer] ([Id])".to_string(),
+            "CREATE PROCEDURE [dbo].[Report] AS SELECT 1".to_string(),
+            "ALTER VIEW dbo.V AS SELECT 1 AS a".to_string(),
+            "IF OBJECT_ID(N'[dbo].[Old]', 'P') IS NOT NULL\nDROP PROCEDURE [dbo].[Old]".to_string(),
+            "GRANT EXECUTE ON  [dbo].[Report] TO [app]".to_string(),
+        ];
+        let actions: Vec<(String, String)> = script_actions(&batches).iter().map(|a| (a["action"].as_str().unwrap().to_string(), a["object"].as_str().unwrap().to_string())).collect();
+        let expected = [
+            ("drop constraint", "[dbo].[Orders]"),
+            ("rebuild table", "[dbo].[1_Customer]"),
+            ("insert rows", "[dbo].[RG_Recovery_1_Customer]"),
+            ("rename", "[dbo].[RG_Recovery_1_Customer]"),
+            ("create index", "[dbo].[Customer]"),
+            ("add foreign key", "[dbo].[Orders]"),
+            ("create procedure", "[dbo].[Report]"),
+            ("alter view", "dbo.V"),
+            ("drop procedure", "[dbo].[Old]"),
+            ("grant permissions", "[dbo].[Report]"),
+        ];
+        assert_eq!(actions, expected.map(|(a, o)| (a.to_string(), o.to_string())));
+    }
+
+    #[test]
+    fn ui_ops() {
+        let mut state = State::default();
+        let none = |_: &str| {};
+        let f = handle(&mut state, &json!({"op": "format_sql", "source": "select a,b from t", "target": null, "style": "none"}), &none).unwrap();
+        assert_eq!(f["source"], "select a,
+       b
+from t", "{f}");
+        assert!(f["target"].is_null());
+        assert!(handle(&mut state, &json!({"op": "folder_preview", "session": 99}), &none).is_err());
+
+        let request = json!({"project": {"includeNewTables": false, "selected": [{"type": "Table", "schema": "dbo", "name": "A"}]}});
+        assert_eq!(only_selected(&request), Some(vec![ObjectName::new("dbo", "A")]));
+        assert_eq!(only_selected(&json!({"project": {"selected": []}})), None);
+
+        // A folder without database information read as SQL Server 2019 with a chosen collation.
+        let base = std::env::temp_dir().join(format!("quill-serve-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("a").join("Tables")).unwrap();
+        std::fs::write(base.join("a").join("Tables").join("dbo.T.sql"), "CREATE TABLE [dbo].[T]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\n").unwrap();
+        let path = base.join("a").to_string_lossy().to_string();
+        let mut db = Database::default();
+        folder_defaults(&json!({"project": {"source": {"type": "scripts", "path": path, "sqlVersion": "15", "defaultCollation": "Latin1_General_BIN"}}}), "source", &mut db);
+        assert_eq!((db.server.major_version, db.collation.as_str()), (15, "Latin1_General_BIN"));
+
+        // Deploying to a scripts folder: the files are listed first, and only then written.
+        std::fs::create_dir_all(base.join("b")).unwrap();
+        let mut project = Project::new(crate::project::ProjectKind::Schema);
+        project.source = SourceSpec { kind: "scripts".into(), path, ..Default::default() };
+        project.target = SourceSpec { kind: "scripts".into(), path: base.join("b").to_string_lossy().to_string(), ..Default::default() };
+        let c = handle(&mut state, &json!({"op": "schema_compare", "project": project}), &none).unwrap();
+        let id = c["session"].as_u64().unwrap();
+        assert!(c["differences"][0].get("modified1").is_some());
+        let script = handle(&mut state, &json!({"op": "schema_script", "session": id, "selected": [0]}), &none).unwrap();
+        assert_eq!(script["actions"][0]["action"], "create table", "{script}");
+        let p = handle(&mut state, &json!({"op": "folder_preview", "session": id}), &none).unwrap();
+        assert_eq!(p["written"].as_array().unwrap().len(), 1, "{p}");
+        assert!(!base.join("b").join("Tables").exists(), "a preview writes nothing");
+
+        // Revisions of a folder in git.
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&base).args(args).output().is_ok_and(|o| o.status.success());
+        if git(&["init", "-q"]) {
+            git(&["config", "user.email", "t@example.com"]);
+            git(&["config", "user.name", "t"]);
+            git(&["add", "a"]);
+            git(&["commit", "-q", "-m", "first"]);
+            git(&["tag", "v1"]);
+            let r = handle(&mut state, &json!({"op": "revisions", "path": base.join("a")}), &none).unwrap();
+            assert_eq!(r[0]["message"], "first", "{r}");
+            assert!(r.as_array().unwrap().iter().any(|x| x["id"] == "v1"));
         }
         std::fs::remove_dir_all(base).ok();
     }

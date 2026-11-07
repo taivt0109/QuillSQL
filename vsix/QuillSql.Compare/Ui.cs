@@ -18,6 +18,13 @@ namespace QuillSql.Compare
         Window Owner { get; }
     }
 
+    /// <summary>A host that can open a script in a query window connected to the target.</summary>
+    public interface IConnectedScriptHost
+    {
+        /// <param name="target">The target side, with its password when it has one; null when it is not a live database.</param>
+        void OpenScript(string sql, string title, JsonObject target);
+    }
+
     /// <summary>Segoe Fluent Icons code points.</summary>
     internal static class Glyph
     {
@@ -351,10 +358,17 @@ namespace QuillSql.Compare
             public Kind Kind;
         }
 
-        private static string Key(string s) => System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"\s+", " ");
-
-        public static List<Line> Align(string left, string right)
+        /// <summary>
+        /// Aligns the lines of two texts. Lines are equal as the comparison sees them: ignoring
+        /// case unless it is case-sensitive, and ignoring white space only when it is ignored.
+        /// </summary>
+        public static List<Line> Align(string left, string right, bool caseSensitive = true, bool ignoreWhiteSpace = true)
         {
+            string Key(string s)
+            {
+                var k = ignoreWhiteSpace ? System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"\s+", " ") : s.TrimEnd('\r');
+                return caseSensitive ? k : k.ToUpperInvariant();
+            }
             var a = (left ?? "").Replace("\r\n", "\n").Split('\n');
             var b = (right ?? "").Replace("\r\n", "\n").Split('\n');
             if (left == null) a = new string[0];
