@@ -1,0 +1,4 @@
+kind = "schema"
+about = "Explicit owners (ALTER AUTHORIZATION) of a table, a view and a procedure only in db1"
+finding = "schema-model M1"
+oracles = ["diffset", "names", "exit"]

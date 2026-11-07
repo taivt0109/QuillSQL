@@ -278,6 +278,7 @@ fn permissions(out: &mut Out, db: &Database, class: &str, schema: &str, object: 
     }
     let on = match class {
         "OBJECT" => format!(" ON  {}", qname(schema, object.unwrap_or_default())),
+        "TYPE" => format!(" ON TYPE:: {}", qname(schema, object.unwrap_or_default())),
         _ => format!(" ON SCHEMA:: {}", quote(schema)),
     };
     let mut list: Vec<&Permission> = db
@@ -670,6 +671,7 @@ pub fn user_type(db: &Database, t: &UserType, o: &Options) -> String {
             out.batch(&s);
         }
     }
+    permissions(&mut out, db, "TYPE", &t.schema, Some(&t.name), o);
     xprops(&mut out, db, "TYPE", &t.schema, Some(&t.name), o);
     out.s
 }

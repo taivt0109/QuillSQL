@@ -1,0 +1,1 @@
+CREATE TABLE dbo.T (Id int NOT NULL)
