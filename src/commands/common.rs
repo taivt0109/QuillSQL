@@ -110,7 +110,7 @@ macro_rules! source_switches {
                 aliases: &[],
                 takes_value: true,
                 repeatable: false,
-                help: "A SQL Change Automation project in place of the database (not supported yet)",
+                help: "A SQL Change Automation project (.sqlproj) in place of the database: its programmable objects and offline schema model",
             },
             Switch {
                 name: concat!("sourcecontrol", $n),
@@ -577,7 +577,7 @@ pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOpt
 }
 pub fn unsupported(command: &str, args: &Args) -> Result<(), ArgError> {
     let _ = command;
-    for name in ["backup1", "backup2", "sca1", "sca2"] {
+    for name in ["backup1", "backup2"] {
         if args.has(name) {
             return Err(ArgError::new(exit::UNAVAILABLE, format!("/{name} is not supported by QuillSQL yet.")));
         }
