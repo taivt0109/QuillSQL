@@ -954,6 +954,7 @@ impl Builder<'_> {
                 not_for_replication: o.flag(st::NOT_FOR_REPLICATION),
                 events,
                 order,
+                settings: ModuleSettings { ansi_nulls: o.flag(st::ANSI_NULLS), quoted_identifier: o.flag(st::QUOTED_IDENTIFIER) },
                 clr_method: None,
                 execute_as: self.execute_as(o.id),
             };
@@ -988,6 +989,7 @@ impl Builder<'_> {
                 cycle: o.flag(st::SEQ_CYCLE),
                 cached: o.flag(st::SEQ_CACHED),
                 cache_size: if o.flag(st::SEQ_CACHED) && o.intprop != 0 { Some(o.intprop) } else { None },
+                ..Default::default()
             });
         }
     }
@@ -995,7 +997,7 @@ impl Builder<'_> {
     fn synonyms(&mut self) {
         for o in self.sorted_objects(&["SN"]) {
             let base = self.value(vc::SYNONYM_BASE, o.id as i64, 0, 0).and_then(|r| text_of(r.get("value"))).unwrap_or_default();
-            self.db.synonyms.push(Synonym { schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(), name: o.name.clone(), base_object: base });
+            self.db.synonyms.push(Synonym { schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(), name: o.name.clone(), base_object: base, ..Default::default() });
         }
     }
 
@@ -1129,6 +1131,7 @@ impl Builder<'_> {
                 schema_bound: o.flag(st::POLICY_SCHEMA_BOUND),
                 not_for_replication: o.flag(st::NOT_FOR_REPLICATION),
                 predicates,
+                ..Default::default()
             });
         }
     }

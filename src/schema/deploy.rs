@@ -3101,7 +3101,7 @@ mod tests {
     #[test]
     fn synonym_dependencies_can_be_ignored() {
         let mut src = db(vec![]);
-        src.synonyms.push(Synonym { schema: "dbo".into(), name: "S".into(), base_object: "[dbo].[T]".into() });
+        src.synonyms.push(Synonym { schema: "dbo".into(), name: "S".into(), base_object: "[dbo].[T]".into(), ..Default::default() });
         src.dependencies.push(Dependency { from: ObjectName::new("dbo", "S"), to: ObjectName::new("dbo", "T"), strong: true });
         let settings = ScriptSettings {
             transaction_isolation_level: "SERIALIZABLE".into(),

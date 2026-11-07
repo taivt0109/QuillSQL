@@ -895,6 +895,7 @@ impl Reader {
                 not_for_replication: flag(&r, 5),
                 events,
                 order,
+                settings: ModuleSettings::default(),
                 clr_method,
                 execute_as,
             };
@@ -968,6 +969,7 @@ impl Reader {
                 cycle: flag(&r, 10),
                 cached: flag(&r, 11),
                 cache_size: if flag(&r, 11) { int(&r, 12) } else { None },
+                ..Default::default()
             });
         }
         Ok(())
@@ -981,7 +983,7 @@ impl Reader {
         )
         .await?;
         for r in rows {
-            self.db.synonyms.push(Synonym { schema: s(&r, 0), name: s(&r, 1), base_object: s(&r, 2) });
+            self.db.synonyms.push(Synonym { schema: s(&r, 0), name: s(&r, 1), base_object: s(&r, 2), ..Default::default() });
         }
         Ok(())
     }

@@ -1993,7 +1993,7 @@ impl Builder {
         };
         self.db.synonyms.retain(|x| !(x.schema.eq_ignore_ascii_case(&name.schema) && x.name.eq_ignore_ascii_case(&name.name)));
         self.origin(ObjectType::Synonym, &name.schema, &name.name);
-        self.db.synonyms.push(Synonym { schema: name.schema, name: name.name, base_object: base });
+        self.db.synonyms.push(Synonym { schema: name.schema, name: name.name, base_object: base, ..Default::default() });
         Ok(())
     }
 
