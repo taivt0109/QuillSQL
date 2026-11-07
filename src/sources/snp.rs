@@ -108,7 +108,7 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     }
     s.more.assemblies = c.member(Cur::assembly_full)?;
     if !c.null_member() {
-        c.dependencies()?;
+        s.more.assembly_references = c.dependencies()?;
     }
     s.synonyms = c.member(Cur::synonym)?;
     s.more.xml_collections = c.member(Cur::xml_collection_full)?;
@@ -218,6 +218,7 @@ struct RawField {
 struct RawTable {
     name: String,
     schema: String,
+    modified: Option<String>,
     perms: Vec<RawPerm>,
     indexes: Vec<Index>,
     foreign_keys: Vec<ForeignKey>,
@@ -1149,7 +1150,7 @@ impl Cur<'_> {
             self.sss(3)?;
         }
         if v >= 12.0 {
-            self.i64()?;
+            t.modified = modified(self.i64()?);
         }
         if v >= 12.2 {
             t.temporal_type = self.u8()?;
@@ -1289,7 +1290,7 @@ impl Cur<'_> {
             self.sss(2)?;
         }
         if v >= 12.0 {
-            self.i64()?;
+            r.modified = modified(self.i64()?);
         }
         if v >= 13.7916 {
             self.references()?;
@@ -1360,7 +1361,7 @@ impl Cur<'_> {
             self.sss(2)?;
         }
         if v >= 12.0 {
-            self.i64()?;
+            r.modified = modified(self.i64()?);
         }
         if v >= 13.77 {
             self.references()?;
@@ -1419,7 +1420,7 @@ impl Cur<'_> {
             self.sss(2)?;
         }
         if v >= 12.0 {
-            self.i64()?;
+            view.modified = modified(self.i64()?);
         }
         Ok(RawView { view, text_id, perms, triggers })
     }
@@ -1670,6 +1671,7 @@ impl Snap {
                 text_filegroup: t.text_filegroup.filter(|_| columns.iter().any(is_lob)),
                 schema: t.schema,
                 name: t.name,
+                modified: t.modified,
                 columns,
                 indexes: t.indexes,
                 foreign_keys: t.foreign_keys,
@@ -2077,6 +2079,11 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         bound_rule: f.bound_rule.as_deref().map(requote),
         sensitivity: f.sensitivity.clone(),
     }
+}
+
+/// A module's or table's last-modified time (a .NET `DateTime` binary); None when not recorded.
+fn modified(ticks: i64) -> Option<String> {
+    (ticks != 0).then(|| objects::ticks_text_ms(ticks & 0x3FFF_FFFF_FFFF_FFFF))
 }
 
 fn is_user_schema(schema: &str) -> bool {

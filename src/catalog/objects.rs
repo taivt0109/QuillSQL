@@ -365,6 +365,9 @@ pub struct Certificate {
     pub private_key: String,
     #[serde(skip_serializing_if = "is_false")]
     pub active_for_dialog: bool,
+    /// sys.certificates.cert_serial_number (space-separated hex bytes); not compared.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub serial_number: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -98,6 +98,8 @@ pub(super) struct Reader {
     pub(super) schema_names: HashMap<i32, String>,
     /// object_id → parent_object_id, for constraints and triggers.
     pub(super) parents: HashMap<i32, i32>,
+    /// Modification times of schema-scoped objects.
+    pub(super) modified: HashMap<ObjectName, String>,
     /// object_id → definition text from sys.sql_modules.
     pub(super) modules: HashMap<i32, Module>,
 }
@@ -204,12 +206,14 @@ impl Reader {
     async fn objects(&mut self, conn: &mut Connection) -> Result<(), String> {
         let rows = db::query(
             conn,
-            "SELECT o.object_id, RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name, o.parent_object_id FROM sys.objects AS o
-             WHERE o.type NOT IN ('S', 'IT')",
+            "SELECT o.object_id, RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name, o.parent_object_id,
+                    CONVERT(nvarchar(23), o.modify_date, 121)
+             FROM sys.objects AS o WHERE o.type NOT IN ('S', 'IT')",
         )
         .await?;
         for r in &rows {
             self.objects.insert(i(r, 0), (s(r, 1), ObjectName::new(&s(r, 2), &s(r, 3))));
+            self.modified.insert(ObjectName::new(&s(r, 2), &s(r, 3)), s(r, 5));
             if i(r, 4) != 0 {
                 self.parents.insert(i(r, 0), i(r, 4));
             }
@@ -1283,6 +1287,16 @@ impl Reader {
 
     fn finish(mut self) -> Database {
         let db = &mut self.db;
+        let modified = |schema: &str, name: &str| self.modified.get(&ObjectName::new(schema, name)).cloned();
+        for t in &mut db.tables {
+            t.modified = modified(&t.schema, &t.name);
+        }
+        for v in &mut db.views {
+            v.modified = modified(&v.schema, &v.name);
+        }
+        for r in &mut db.routines {
+            r.modified = modified(&r.schema, &r.name);
+        }
         for t in &mut db.tables {
             if t.graph.is_some() {
                 graph_indexes(t);
