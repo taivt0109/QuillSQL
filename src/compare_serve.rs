@@ -57,8 +57,6 @@ struct DataSession {
     script: Option<DeploymentScript>,
     /// Row orders built for the All rows tab and for sorting, by (table, kind, sort).
     views: Views,
-    /// Scripts-folder sides loaded into temporary databases, for the life of the session.
-    staged: [Option<crate::sources::staging::Staging>; 2],
     /// Scripts-folder sides read without a server.
     folders: [Option<crate::sources::datafolder::DataFolder>; 2],
     /// The row kinds of the last script, for deploying to a scripts folder.
@@ -66,12 +64,9 @@ struct DataSession {
 }
 
 impl DataSession {
-    /// The database holding side `n` (1 or 2): a live database or a staged scripts folder.
+    /// The database holding side `n` (1 or 2).
     fn spec(&self, n: u8) -> Result<crate::db::ConnectionSpec, String> {
-        match &self.staged[usize::from(n - 1)] {
-            Some(s) => Ok(s.spec.clone()),
-            None => if n == 1 { &self.project.source } else { &self.project.target }.connection(n),
-        }
+        if n == 1 { &self.project.source } else { &self.project.target }.connection(n)
     }
 }
 
@@ -456,23 +451,13 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         "data_compare" => {
             let project: Project = field(request, "project")?;
             let opts = data_options(&project)?;
-            // A scripts folder is read without a server; when its data needs one, it is loaded
-            // into a temporary database on the other side's server.
-            let host = [(&project.source, 1), (&project.target, 2)].into_iter().find(|(s, _)| !s.is_scripts() && !s.is_snapshot()).map(|(s, n)| s.connection(n)).transpose()?;
-            let mut staged: [Option<crate::sources::staging::Staging>; 2] = [None, None];
+            // A scripts folder is read without a server, as SQL Data Compare reads it.
             let mut folders: [Option<crate::sources::datafolder::DataFolder>; 2] = [None, None];
             for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
                 if side.is_scripts() {
                     progress(&format!("Reading the data scripts of '{}'", side.path));
                     let revision = (!side.revision.is_empty()).then_some(side.revision.as_str());
-                    match crate::sources::datafolder::read(std::path::Path::new(&side.path), revision)? {
-                        Ok(f) => folders[k] = Some(f),
-                        Err(reason) => {
-                            let host = host.as_ref().ok_or_else(|| format!("{reason}; reading the folder needs the other side to be a live database"))?;
-                            progress(&format!("Loading '{}' into a temporary database", side.path));
-                            staged[k] = Some(crate::sources::staging::stage(std::path::Path::new(&side.path), revision, host)?);
-                        }
-                    }
+                    folders[k] = Some(crate::sources::datafolder::read(std::path::Path::new(&side.path), revision)?);
                 }
             }
             let mut dbs = Vec::new();
@@ -484,15 +469,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                     specs.push(None);
                     continue;
                 }
-                let spec = match &staged[k] {
-                    Some(s) => s.spec.clone(),
-                    None => side.connection(k as u8 + 1)?,
-                };
-                let mut db = catalog::read_database_with(&spec, false)?;
-                if let Some(s) = &staged[k] {
-                    db.name = s.folder.database.name.clone();
-                }
-                dbs.push(db);
+                let spec = side.connection(k as u8 + 1)?;
+                dbs.push(catalog::read_database_with(&spec, false)?);
                 specs.push(Some(spec));
             }
             let db2 = dbs.pop().unwrap_or_default();
@@ -518,7 +496,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             state.next += 1;
             let id = state.next;
             let reply = data_session_json(id, &db1.name, &db2.name, &result);
-            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), staged, folders, kinds: [false, true, true, true] });
+            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), folders, kinds: [false, true, true, true] });
             Ok(reply)
         }
         // `kind` 0–3 is a row kind (`RowKind::ALL` order), 4 every stored row in comparison order;
@@ -662,7 +640,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let id = state.next;
             let mut reply = data_session_json(id, &source_name, &db2.name, &result);
             reply["project"] = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), staged: [None, None], folders: [None, None], kinds: [false, true, true, true] });
+            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), folders: [None, None], kinds: [false, true, true, true] });
             Ok(reply)
         }
         "deploy" => {
@@ -698,15 +676,6 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 }
                 let files = f.write_back(&s.result, s.kinds)?;
                 return Ok(json!({"batches": 0, "written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()}));
-            }
-            if let Some(s) = state.data.get(&id)
-                && let Some(staged) = &s.staged[1]
-            {
-                let script = s.script.as_ref().ok_or("create the deployment script first")?;
-                let ran = deploy::execute(&staged.spec, script, |i, n| progress(&format!("Running batch {} of {n}", i + 1)))?;
-                let changed: Vec<ObjectName> = s.result.tables.iter().filter(|t| t.error.is_none() && !t.identical()).map(|t| t.pair.target.clone()).collect();
-                let files = staged.write_back(&s.db2, &changed)?;
-                return Ok(json!({"batches": ran, "written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()}));
             }
             let (script, target) = if let Some(s) = state.schema.get(&id) {
                 (s.script.clone(), s.project.target.clone())

@@ -413,3 +413,38 @@ fn assemblies_written_as_dlls_read_back() {
     assert!(left.is_empty(), "{left:#?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The values that once needed a server (computed columns, hierarchyid, spatial, sql_variant,
+/// values over 1 MB) are read from the data scripts as SQL Data Compare reads them.
+#[test]
+fn data_scripts_need_no_server_for_any_type() {
+    let Some(server) = server() else { return };
+    let _serial = DATA.lock().unwrap_or_else(|e| e.into_inner());
+    let schema = "CREATE TABLE dbo.Odd (Id int NOT NULL PRIMARY KEY, Node hierarchyid NULL, Place geography NULL, V sql_variant NULL,
+        Big nvarchar(max) NULL, Twice AS (Id * 2), Stamp datetime NOT NULL DEFAULT ('2000-01-01'));
+        GO
+        INSERT dbo.Odd (Id, Node, Place, V, Big) VALUES (1, '/1/2/', geography::Point(47.6, -122.3, 4326), CAST(5 AS int), REPLICATE(CAST(N'x' AS nvarchar(max)), 600000));
+        INSERT dbo.Odd (Id, Node, V, Big) VALUES (2, '/1/', CAST(N'hi' AS nvarchar(10)), N'small');
+        INSERT dbo.Odd (Id, V) VALUES (3, CAST(1.5 AS float));
+        INSERT dbo.Odd (Id, Node, V) VALUES (4, '/', CAST('2020-01-02 03:04:05.123' AS datetime));
+        INSERT dbo.Odd (Id, V) VALUES (5, CAST(12.50 AS decimal(5, 2)));
+        INSERT dbo.Odd (Id, V) VALUES (6, CAST(0x0A0B AS varbinary(4)));";
+    server.create("QD_sources_Odd", schema);
+    let dir = temp("odd");
+    let path = dir.to_string_lossy().to_string();
+    folder::write_all(&server.read("QD_sources_Odd"), &dir, &Options::default_set()).unwrap();
+    let (code, out) = quill(&server, "data", &[1], &[format!("/database1:{}", unique("QD_sources_Odd")), format!("/makescripts:{path}")]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Odd")), "/verbose".to_string()]);
+    assert_eq!(code, 63, "{out}");
+    let rt = db::runtime().unwrap();
+    rt.block_on(async {
+        let mut c = db::connect_async(&server.spec("QD_sources_Odd")).await.unwrap();
+        db::execute(&mut c, "UPDATE dbo.Odd SET Node = '/2/' WHERE Id = 2;").await.unwrap();
+    });
+    let (code, out) = quill(&server, "data", &[2], &[format!("/scripts1:{path}"), format!("/database2:{}", unique("QD_sources_Odd"))]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("[dbo].[Odd]"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+    server.drop("QD_sources_Odd");
+}

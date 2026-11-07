@@ -123,6 +123,41 @@ pub fn compare(
     compare_sources(RowSource::Live(spec1), RowSource::Live(spec2), db1, db2, opts, user, include, parallel, progress)
 }
 
+/// With a scripts folder on either side, computed columns are left out of the comparison, as
+/// SQL Data Compare does (their values in the scripts are not read).
+fn exclude_computed(p: &mut TablePair, db1: &Database, db2: &Database) {
+    let computed = |db: &Database, t: &ObjectName, c: &str| {
+        db.tables.iter().find(|x| x.schema.eq_ignore_ascii_case(&t.schema) && x.name.eq_ignore_ascii_case(&t.name)).is_some_and(|x| {
+            x.columns.iter().any(|col| col.name.eq_ignore_ascii_case(c) && col.computed.is_some())
+        })
+    };
+    let fq = |t: &ObjectName, c: &str| format!("{}.{}", t.quoted(), quote(c));
+    let mut keep = Vec::new();
+    for (i, c) in p.columns.iter().enumerate() {
+        if computed(db1, &p.source, &c.source) || computed(db2, &p.target, &c.target) {
+            p.notes.push(mapping::Note {
+                code: "computed".into(),
+                severity: crate::schema::deploy::Severity::High,
+                text: format!(
+                    "One of the fields {} and {} are computed - computed columns cannot be compared when one of the data sources is a scripts folder.",
+                    fq(&p.source, &c.source),
+                    fq(&p.target, &c.target)
+                ),
+            });
+            if p.key.contains(&i) && p.problem.is_none() {
+                p.problem = Some(format!("The comparison key of {} uses a computed column, which cannot be compared with a scripts folder.", p.source));
+            }
+        } else {
+            keep.push(i);
+        }
+    }
+    if keep.len() == p.columns.len() {
+        return;
+    }
+    p.key = p.key.iter().filter_map(|k| keep.iter().position(|x| x == k)).collect();
+    p.columns = keep.iter().map(|&i| p.columns[i].clone()).collect();
+}
+
 /// `compare` with either side's rows from a live database or from memory.
 #[allow(clippy::too_many_arguments)]
 pub fn compare_sources(
@@ -137,10 +172,17 @@ pub fn compare_sources(
     progress: impl Fn(&TablePair, &TableResult),
 ) -> Result<DataComparison, String> {
     let (pairs, only_in_1, only_in_2) = mapping::map_tables(db1, db2, opts, user);
-    let pairs: Vec<TablePair> = pairs.into_iter().filter(|p| include(p)).collect();
+    let folder = matches!(side1, RowSource::Memory(_)) || matches!(side2, RowSource::Memory(_));
+    let mut pairs: Vec<TablePair> = pairs.into_iter().filter(|p| include(p)).collect();
+    if folder {
+        for p in &mut pairs {
+            exclude_computed(p, db1, db2);
+        }
+    }
     let session = Session::create().map_err(|e| format!("cannot create the results folder: {e}"))?;
     let (s1, s2) = (Server::of(db1), Server::of(db2));
-    let server = Server { translate: s1.translate && s2.translate, hash: s1.hash && s2.hash };
+    // Rows read from a scripts folder hold whole values, so nothing is compared by hash.
+    let server = Server { translate: s1.translate && s2.translate, hash: s1.hash && s2.hash && !folder };
     let rt = db::runtime()?;
     let (tables, ddl_triggers) = rt.block_on(async {
         let jobs = pairs.into_iter().enumerate().map(|(i, pair)| {
