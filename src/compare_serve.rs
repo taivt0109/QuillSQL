@@ -65,6 +65,9 @@ struct DataSession {
     folders: [Option<crate::sources::datafolder::DataFolder>; 2],
     /// The row kinds of the last script, for deploying to a scripts folder.
     kinds: [bool; 4],
+    /// The tables (`None` = all) and row choices of the last script, for the same.
+    tables: Option<Vec<ObjectName>>,
+    selections: HashMap<ObjectName, [RowSelection; 4]>,
 }
 
 impl DataSession {
@@ -442,7 +445,15 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             }
             let db1 = load_side(&project.source, 1, false, progress)?;
             let db2 = load_side(&project.target, 2, false, progress)?;
-            let (pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
+            let (mut pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
+            // What the comparison will leave out with these sources.
+            let kinds = [&project.source, &project.target].map(side_kind);
+            for p in &mut pairs {
+                if p.excluded.is_none() {
+                    p.excluded = crate::data::compare::unsupported(p, kinds, &db1, &db2);
+                }
+            }
+            let mapping_warnings = crate::data::mapping::user_mapping_warnings(&db1, &db2, &opts, &project.data_mappings);
             let tables: Vec<Value> = pairs
                 .iter()
                 .map(|p| {
@@ -456,7 +467,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                         "key": p.key.iter().map(|&k| p.columns[k].source.clone()).collect::<Vec<_>>(),
                         "columns": p.columns.iter().map(|c| json!({"source": c.source, "target": c.target, "type": c.source_type.sql(), "targetType": c.target_type.sql()})).collect::<Vec<_>>(),
                         "where1": p.where1, "where2": p.where2, "keyCandidates": candidates,
-                        "notes": notes_json(p),
+                        "notes": notes_json(p), "excluded": p.excluded,
                     })
                 })
                 .collect();
@@ -466,6 +477,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 db2.tables.iter().map(|t| (t.object_name().to_string(), t.columns.iter().map(|c| c.name.clone()).collect())).collect();
             Ok(json!({
                 "tables": tables,
+                "mappingWarnings": mapping_warnings,
                 "onlyIn1": only1.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "onlyIn2": only2.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "sourceColumns": all_columns,
@@ -537,7 +549,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             state.next += 1;
             let id = state.next;
             let reply = data_session_json(id, &db1.name, &db2.name, &result);
-            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), folders, kinds: [false, true, true, true] });
+            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), folders, kinds: [false, true, true, true], tables: None, selections: HashMap::new() });
             Ok(reply)
         }
         // `kind` 0–3 is a row kind (`RowKind::ALL` order), 4 every stored row in comparison order;
@@ -603,7 +615,14 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let t = s.result.tables.get(table).ok_or("no such table")?;
             let offset = *t.offsets.get(kind).and_then(|o| o.get(row)).ok_or("no such row")?;
             let r = store::read_page(&t.path, &[offset], 0, 1).map_err(|e| e.to_string())?.pop().ok_or("no such row")?;
-            let side = if (target && !r.target.is_empty()) || r.source.is_empty() { &r.target } else { &r.source };
+            let on_target = (target && !r.target.is_empty()) || r.source.is_empty();
+            let side = if on_target { &r.target } else { &r.source };
+            // A value compared by hash is read again from its database.
+            if let Some(crate::data::value::Value::Large(..)) = side.get(column) {
+                let n = if on_target { 2 } else { 1 };
+                let full = crate::data::compare::fetch_side_value(&s.spec(n)?, &t.pair, n, column, side)?;
+                return Ok(json!(full.display()));
+            }
             Ok(json!(side.get(column).map(|v| v.display())))
         }
         // CSV files as `quill data /export` writes them: {folder, kinds, tables}.
@@ -618,7 +637,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let (picked, rest): (Vec<_>, Vec<_>) = all.into_iter().enumerate().partition(|(i, _)| chosen.as_ref().is_none_or(|c| c.contains(i)));
             let (picked_ix, picked): (Vec<usize>, Vec<_>) = picked.into_iter().unzip();
             s.result.tables = picked;
-            let written = crate::commands::data::export_csv(&s.result, kinds, std::path::Path::new(&folder), &db1, &db2);
+            let live = |n: u8| (s.folders[n as usize - 1].is_none()).then(|| s.spec(n).ok()).flatten();
+            let (spec1, spec2) = (live(1), live(2));
+            let written = crate::commands::data::export_csv(&s.result, kinds, std::path::Path::new(&folder), &db1, &db2, [spec1.as_ref(), spec2.as_ref()]);
             let mut back: Vec<(usize, _)> = picked_ix.into_iter().zip(std::mem::take(&mut s.result.tables)).chain(rest).collect();
             back.sort_by_key(|(i, _)| *i);
             s.result.tables = back.into_iter().map(|(_, t)| t).collect();
@@ -655,6 +676,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             s.kinds = kinds;
             settings.tables = tables.map(|ix| ix.iter().filter_map(|&i| s.result.tables.get(i)).map(|t| t.pair.source.clone()).collect());
             settings.selections = selections(request, &s.result)?;
+            s.tables = settings.tables.clone();
+            s.selections = settings.selections.clone();
             settings.max_transaction_bytes = request.get("maxTransactionSizeMB").and_then(Value::as_u64).filter(|&m| m > 0).map(|m| m * 1_048_576);
             settings.source_connection = s.spec(1).ok();
             let mut script = crate::data::sync::generate(&s.result, &s.db2, &opts, &settings)?;
@@ -681,7 +704,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let id = state.next;
             let mut reply = data_session_json(id, &source_name, &db2.name, &result);
             reply["project"] = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), folders: [None, None], kinds: [false, true, true, true] });
+            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), folders: [None, None], kinds: [false, true, true, true], tables: None, selections: HashMap::new() });
             Ok(reply)
         }
         "deploy" => {
@@ -715,7 +738,12 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 if s.script.is_none() {
                     return Err("create the deployment script first".into());
                 }
-                let files = f.write_back(&s.result, s.kinds)?;
+                // Only the tables and rows the script deploys.
+                let (kinds, tables, chosen) = (s.kinds, &s.tables, &s.selections);
+                let select = |p: &crate::data::mapping::TablePair, k: RowKind, i: u64| {
+                    kinds[k as usize] && tables.as_ref().is_none_or(|t| t.contains(&p.source)) && chosen.get(&p.source).is_none_or(|r| r[k as usize].selected(i))
+                };
+                let files = f.write_back(&s.result, &select)?;
                 return Ok(json!({"batches": 0, "written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()}));
             }
             let (script, target) = if let Some(s) = state.schema.get(&id) {
@@ -919,6 +947,18 @@ fn row_view<'a>(views: &'a mut Views, tables: &[crate::data::compare::TableResul
     Ok(&views[&key])
 }
 
+/// What a project side is, for the data engine's source rules.
+fn side_kind(s: &SourceSpec) -> crate::data::compare::SideKind {
+    use crate::data::compare::SideKind;
+    if s.is_scripts() {
+        SideKind::Folder
+    } else if s.is_backup() || s.is_snapshot() {
+        SideKind::Backup
+    } else {
+        SideKind::Live
+    }
+}
+
 fn notes_json(p: &crate::data::mapping::TablePair) -> Vec<Value> {
     p.notes.iter().map(|n| json!({"code": n.code, "severity": format!("{:?}", n.severity), "text": n.text, "notCompared": n.not_compared()})).collect()
 }
@@ -955,6 +995,7 @@ fn data_session_json(id: u64, source: &str, target: &str, result: &DataCompariso
         "tables": tables,
         "onlyIn1": result.only_in_1.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "onlyIn2": result.only_in_2.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "excluded": result.excluded.iter().map(|p| json!({"source": p.source.to_string(), "target": p.target.to_string(), "isView": p.is_view, "reason": p.excluded})).collect::<Vec<_>>(),
     })
 }
 
@@ -1229,8 +1270,10 @@ fn option_definitions() -> Value {
             })
         })
         .collect();
+    // MissingFrom2AsInclude is a command-line and project flag, not a check box.
     let data: Vec<Value> = crate::data::options::ALL
         .iter()
+        .filter(|o| **o != DataOpt::MissingFrom2AsInclude)
         .map(|o| json!({"name": o.name(), "label": o.label(), "group": format!("{:?}", o.group()), "default": o.is_default()}))
         .collect();
     let _ = (Opt::IgnoreWhiteSpace, DataOpt::IgnoreSpaces);

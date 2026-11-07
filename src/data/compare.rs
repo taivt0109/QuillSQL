@@ -53,6 +53,23 @@ pub struct DataComparison {
     pub only_in_2: Vec<ObjectName>,
     /// Enabled database DDL triggers of database 2 (read for "Disable DDL triggers").
     pub ddl_triggers: Vec<String>,
+    /// Pairs left out of the comparison, each with `excluded` saying why.
+    pub excluded: Vec<TablePair>,
+    /// What each side is.
+    pub kinds: [SideKind; 2],
+    /// Database 1 is live and its login lacks UNMASK, so masked columns read masked values.
+    pub masked_reads: bool,
+    /// A live side runs SQL Server 2008 or 2008 R2.
+    pub old_server: bool,
+}
+
+/// Where a side's rows come from, for the rules that depend on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum SideKind {
+    #[default]
+    Live,
+    Folder,
+    Backup,
 }
 
 impl DataComparison {
@@ -115,6 +132,65 @@ impl<'a> RowSource<'a> {
             RowSource::Memory(_) | RowSource::Backup(_) => None,
         }
     }
+
+    pub fn kind(self) -> SideKind {
+        match self {
+            RowSource::Live(_) => SideKind::Live,
+            RowSource::Memory(_) => SideKind::Folder,
+            RowSource::Backup(_) => SideKind::Backup,
+        }
+    }
+}
+
+/// Why SQL Data Compare leaves a pair out with these sources: memory-optimised tables from a
+/// backup, views when either side is not live, a WHERE clause on a side that is not live.
+pub fn unsupported(p: &TablePair, kinds: [SideKind; 2], db1: &Database, db2: &Database) -> Option<String> {
+    let backup = kinds.contains(&SideKind::Backup);
+    let live = kinds == [SideKind::Live; 2];
+    if backup {
+        let mut names: Vec<String> = Vec::new();
+        for (db, n) in [(db1, &p.source), (db2, &p.target)] {
+            let mot = db.tables.iter().any(|t| t.memory_optimized && t.schema.eq_ignore_ascii_case(&n.schema) && t.name.eq_ignore_ascii_case(&n.name));
+            if mot && !names.contains(&n.to_string()) {
+                names.push(n.to_string());
+            }
+        }
+        if !names.is_empty() {
+            return Some(format!("Excluded {} because data from memory optimized tables is not supported in backups", names.join(",")));
+        }
+    }
+    if !live && p.is_view {
+        return Some(format!("Excluded {} because Views from non-live comparisons are ignored.", p.source));
+    }
+    let given = |w: &Option<String>| w.as_deref().is_some_and(|w| !w.trim().is_empty());
+    if (given(&p.where1) && kinds[0] != SideKind::Live) || (given(&p.where2) && kinds[1] != SideKind::Live) {
+        return Some("Unable to use where clause for table mapping. Where clauses cannot be used when comparing a backup.".into());
+    }
+    None
+}
+
+/// A backup cannot give non-persisted computed columns: they are left out on such a side, as
+/// SQL Data Compare does.
+fn exclude_backup_computed(p: &mut TablePair, kinds: [SideKind; 2], db1: &Database, db2: &Database) {
+    let unreadable = |db: &Database, t: &ObjectName, c: &str| {
+        db.tables.iter().find(|x| x.schema.eq_ignore_ascii_case(&t.schema) && x.name.eq_ignore_ascii_case(&t.name)).is_some_and(|x| {
+            x.columns.iter().any(|col| col.name.eq_ignore_ascii_case(c) && (col.computed.as_ref().is_some_and(|k| !k.persisted) || col.column_set))
+        })
+    };
+    let keep: Vec<usize> = (0..p.columns.len())
+        .filter(|&i| {
+            let c = &p.columns[i];
+            !((kinds[0] == SideKind::Backup && unreadable(db1, &p.source, &c.source)) || (kinds[1] == SideKind::Backup && unreadable(db2, &p.target, &c.target)))
+        })
+        .collect();
+    if keep.len() == p.columns.len() {
+        return;
+    }
+    if p.key.iter().any(|k| !keep.contains(k)) && p.problem.is_none() {
+        p.problem = Some(format!("The comparison key of {} uses a computed column, which a backup does not hold.", p.source));
+    }
+    p.key = p.key.iter().filter_map(|k| keep.iter().position(|x| x == k)).collect();
+    p.columns = keep.iter().map(|&i| p.columns[i].clone()).collect();
 }
 
 /// Which pairs to compare; `include` decides by pair.
@@ -181,19 +257,60 @@ pub fn compare_sources(
     parallel: usize,
     progress: impl Fn(&TablePair, &TableResult),
 ) -> Result<DataComparison, String> {
-    let (pairs, only_in_1, only_in_2) = mapping::map_tables(db1, db2, opts, user);
-    let folder = matches!(side1, RowSource::Memory(_)) || matches!(side2, RowSource::Memory(_));
-    let mut pairs: Vec<TablePair> = pairs.into_iter().filter(|p| include(p)).collect();
-    if folder {
-        for p in &mut pairs {
+    let (mut pairs, mut only_in_1, only_in_2) = mapping::map_tables(db1, db2, opts, user);
+    // MissingFrom2AsInclude: a table only in database 1 is compared with an empty one.
+    if opts.has(DataOpt::MissingFrom2AsInclude) {
+        let mut shape = db1.clone();
+        shape.tables.retain(|t| only_in_1.contains(&t.object_name()));
+        shape.views.clear();
+        let (more, _, _) = mapping::map_tables(&shape, &shape, &opts.clone().without(DataOpt::IncludeViews), user);
+        for mut p in more {
+            only_in_1.retain(|n| *n != p.source);
+            p.target_missing = true;
+            pairs.push(p);
+        }
+        pairs.sort_by(|a, b| a.source.cmp(&b.source));
+    }
+    let kinds = [side1.kind(), side2.kind()];
+    let folder = kinds.contains(&SideKind::Folder);
+    let mut excluded = Vec::new();
+    let mut kept = Vec::new();
+    for mut p in pairs.into_iter().filter(|p| include(p)) {
+        if p.excluded.is_none() {
+            p.excluded = unsupported(&p, kinds, db1, db2);
+        }
+        match &p.excluded {
+            Some(why) => {
+                p.notes.push(mapping::Note { code: "exclude".into(), severity: crate::schema::deploy::Severity::High, text: why.clone() });
+                excluded.push(p);
+            }
+            None => kept.push(p),
+        }
+    }
+    let mut pairs = kept;
+    for p in &mut pairs {
+        if folder {
             exclude_computed(p, db1, db2);
         }
+        exclude_backup_computed(p, kinds, db1, db2);
     }
     let session = Session::create().map_err(|e| format!("cannot create the results folder: {e}"))?;
     let (s1, s2) = (Server::of(db1), Server::of(db2));
-    // Rows read from a scripts folder hold whole values, so nothing is compared by hash.
-    let server = Server { translate: s1.translate && s2.translate, hash: s1.hash && s2.hash && !folder };
+    // Rows read from a scripts folder or a backup hold whole values (nothing to fetch from them
+    // later), so large values are compared by hash only between live databases.
+    let server = Server { translate: s1.translate && s2.translate, hash: s1.hash && s2.hash && kinds == [SideKind::Live; 2] };
+    let old_server = [(kinds[0], db1), (kinds[1], db2)].iter().any(|(k, db)| *k == SideKind::Live && db.server.major_version == 10);
+    let masked = db1.tables.iter().any(|t| t.columns.iter().any(|c| c.masking_function.is_some()));
     let rt = db::runtime()?;
+    let masked_reads = match side1.live() {
+        Some(spec) if masked => rt.block_on(async {
+            let mut c = db::connect_async(spec).await.ok()?;
+            let rows = db::query(&mut c, "SELECT CAST(ISNULL(HAS_PERMS_BY_NAME(NULL, 'database', 'UNMASK'), 1) AS int)").await.ok()?;
+            Some(matches!(Value::read(rows.first()?, 0), Value::Int(0)))
+        }),
+        _ => None,
+    }
+    .unwrap_or(false);
     let (tables, ddl_triggers) = rt.block_on(async {
         let jobs = pairs.into_iter().enumerate().map(|(i, pair)| {
             let path = session.table_path(i);
@@ -214,7 +331,7 @@ pub fn compare_sources(
         }
         Ok::<_, String>((done, triggers))
     })?;
-    Ok(DataComparison { session, tables, only_in_1, only_in_2, ddl_triggers })
+    Ok(DataComparison { session, tables, only_in_1, only_in_2, ddl_triggers, excluded, kinds, masked_reads, old_server })
 }
 
 async fn compare_table(side1: RowSource<'_>, side2: RowSource<'_>, pair: TablePair, opts: &DataOptions, server: Server, path: PathBuf) -> TableResult {
@@ -370,12 +487,7 @@ pub(super) fn value_exprs(column: &str, t: &DataType, hash: bool) -> (Vec<String
         return (vec![format!("CAST({c} AS varbinary(max))"), format!("{c}.ToString()")], Shape::Clr);
     }
     if is_lob(t) && hash {
-        let bytes = match t.name.as_str() {
-            "xml" => format!("CAST(CONVERT(nvarchar(max), {c}, 1) AS varbinary(max))"),
-            "text" => format!("CAST(CAST({c} AS varchar(max)) AS varbinary(max))"),
-            "ntext" => format!("CAST(CAST({c} AS nvarchar(max)) AS varbinary(max))"),
-            _ => format!("CAST({c} AS varbinary(max))"),
-        };
+        let bytes = lob_bytes(&c, t);
         let len = format!("CAST(DATALENGTH({c}) AS bigint)");
         return (
             vec![
@@ -387,6 +499,16 @@ pub(super) fn value_exprs(column: &str, t: &DataType, hash: bool) -> (Vec<String
         );
     }
     (vec![plain], Shape::Plain)
+}
+
+/// The bytes a large value is hashed over.
+fn lob_bytes(c: &str, t: &DataType) -> String {
+    match t.name.as_str() {
+        "xml" => format!("CAST(CONVERT(nvarchar(max), {c}, 1) AS varbinary(max))"),
+        "text" => format!("CAST(CAST({c} AS varchar(max)) AS varbinary(max))"),
+        "ntext" => format!("CAST(CAST({c} AS nvarchar(max)) AS varbinary(max))"),
+        _ => format!("CAST({c} AS varbinary(max))"),
+    }
 }
 
 /// ` WHERE <filter>` from a user filter written with or without the WHERE keyword.
@@ -413,7 +535,14 @@ fn select_sql(pair: &TablePair, side: u8, opts: &DataOptions, server: Server) ->
         shapes.push(shape);
     }
     let filter = where_clause(if side == 1 { &pair.where1 } else { &pair.where2 });
-    let order: Vec<String> = (1..=pair.key.len()).map(|i| i.to_string()).collect();
+    // Binary keys equal but for trailing zeros are told apart by length, as the merge does.
+    let mut order: Vec<String> = Vec::new();
+    for (i, &k) in pair.key.iter().enumerate() {
+        order.push((i + 1).to_string());
+        if matches!(ty(k).name.as_str(), "binary" | "varbinary") && ty(k).schema.is_none() && family(other(k)) != "string" {
+            order.push(format!("DATALENGTH({})", quote(name(k))));
+        }
+    }
     (format!("SELECT {} FROM {table} WITH (NOLOCK){filter} ORDER BY {}", list.join(", "), order.join(", ")), shapes)
 }
 
@@ -643,6 +772,7 @@ fn equality(c: &ColumnPair, opts: &DataOptions) -> Equality {
     Equality {
         binary: opts.has(DataOpt::ForceBinaryCollation),
         fold: Fold::of(c.collation()),
+        locale: super::collation::locale(c.collation()),
         trim_trailing_spaces: opts.has(DataOpt::TrimTrailingSpaces),
         empty_is_null: opts.has(DataOpt::TreatEmptyStringAsNull) && char_type(&c.target_type),
         full_precision: opts.has(DataOpt::UseFullPrecisionForComparison),
@@ -681,6 +811,8 @@ async fn run(side1: RowSource<'_>, side2: RowSource<'_>, opts: &DataOptions, ser
             RowSource::Backup(b) => produce_backup(b, pair, 1, opts, server, keys, tx1).await,
         }
     };
+    let nothing = Memory::new();
+    let side2 = if pair.target_missing { RowSource::Memory(&nothing) } else { side2 };
     let p2 = async {
         match side2 {
             RowSource::Live(spec) => produce(spec, sql2, keys, shapes2, tx2).await,
@@ -774,28 +906,41 @@ async fn run(side1: RowSource<'_>, side2: RowSource<'_>, opts: &DataOptions, ser
 /// Reads the full value of column `column` of a database 1 row whose stored values are
 /// `values` (for a value that was compared by hash).
 pub fn fetch_value(spec: &ConnectionSpec, pair: &TablePair, column: usize, values: &[Value]) -> Result<Value, String> {
+    fetch_side_value(spec, pair, 1, column, values)
+}
+
+/// `fetch_value` for either side. The row is found by its key, the side's filter and the large
+/// value's length and hash, so a repeated key cannot give another row's value.
+pub fn fetch_side_value(spec: &ConnectionSpec, pair: &TablePair, side: u8, column: usize, values: &[Value]) -> Result<Value, String> {
+    let name = |c: &ColumnPair| if side == 1 { c.source.clone() } else { c.target.clone() };
+    let ty = |c: &ColumnPair| if side == 1 { c.source_type.clone() } else { c.target_type.clone() };
+    let collation = |c: &ColumnPair| if side == 1 { c.source_collation.clone() } else { c.target_collation.clone() };
     let c = &pair.columns[column];
-    let (exprs, _) = value_exprs(&c.source, &c.source_type, false);
-    let wheres: Vec<String> = pair
+    let (exprs, _) = value_exprs(&name(c), &ty(c), false);
+    let mut wheres: Vec<String> = pair
         .key
         .iter()
         .map(|&k| {
             let kc = &pair.columns[k];
-            let lit = super::value::Literal {
-                source: &kc.source_type,
-                target: &kc.source_type,
-                source_collation: kc.source_collation.as_deref(),
-                target_collation: kc.source_collation.as_deref(),
-                clr_as_text: false,
-                graph_table: None,
-            };
+            let (t, coll) = (ty(kc), collation(kc));
+            let lit = super::value::Literal { source: &t, target: &t, source_collation: coll.as_deref(), target_collation: coll.as_deref(), clr_as_text: false, graph_table: None };
             match &values[k] {
-                Value::Null => format!("{} IS NULL", quote(&kc.source)),
-                v => format!("{} = {}", quote(&kc.source), v.sql(&lit)),
+                Value::Null => format!("{} IS NULL", quote(&name(kc))),
+                v => format!("{} = {}", quote(&name(kc)), v.sql(&lit)),
             }
         })
         .collect();
-    let sql = format!("SELECT TOP (1) {} FROM {} WHERE {}", exprs[0], pair.source.quoted(), wheres.join(" AND "));
+    if let Value::Large(n, hash) = &values[column] {
+        let col = quote(&name(c));
+        let hex: String = hash.iter().map(|b| format!("{b:02X}")).collect();
+        wheres.push(format!("DATALENGTH({col}) = {n} AND HASHBYTES('SHA2_256', {}) = 0x{hex}", lob_bytes(&col, &ty(c))));
+    }
+    let filter = where_clause(if side == 1 { &pair.where1 } else { &pair.where2 });
+    if let Some(f) = filter.strip_prefix(" WHERE ") {
+        wheres.push(format!("({f})"));
+    }
+    let table = if side == 1 { &pair.source } else { &pair.target };
+    let sql = format!("SELECT TOP (1) {} FROM {} WHERE {}", exprs[0], table.quoted(), wheres.join(" AND "));
     let rt = db::runtime()?;
     rt.block_on(async {
         let mut conn = db::connect_async(spec).await?;
@@ -865,6 +1010,7 @@ mod tests {
             target_collation: None,
             source_identity: false,
             graph: None,
+            masked: false,
         }
     }
 
@@ -882,6 +1028,8 @@ mod tests {
             problem: None,
             is_view: false,
             notes: Vec::new(),
+            excluded: None,
+            target_missing: false,
         };
         let old = Server { translate: false, hash: false };
         let (sql, shapes) = select_sql(&pair, 1, &DataOptions::default_set(), old);
@@ -896,8 +1044,43 @@ mod tests {
         let mixed = DataType { name: "nvarchar".into(), length: Some(10), ..Default::default() };
         assert_eq!(sort_expr("K", &DataType { name: "int".into(), ..Default::default() }, &mixed, Fold::default(), old), "RTRIM(CAST([K] AS nvarchar(4000))) COLLATE Latin1_General_100_BIN2");
         assert_eq!(sort_expr("K", &DataType { name: "date".into(), ..Default::default() }, &DataType { name: "datetime".into(), ..Default::default() }, Fold::default(), old), "CAST([K] AS datetime2(7))");
+        // Binary keys equal but for trailing zeros are told apart by length.
+        let bin = TablePair { columns: vec![col("K", "varbinary", false)], key: vec![0], where1: None, ..pair.clone() };
+        assert!(select_sql(&bin, 1, &DataOptions::default_set(), old).0.ends_with(" ORDER BY 1, DATALENGTH([K])"));
         let (lob, shape) = value_exprs("B", &DataType { name: "varbinary".into(), length: Some(-1), ..Default::default() }, true);
         assert_eq!(shape, Shape::Lob);
         assert_eq!(lob[2], "CASE WHEN CAST(DATALENGTH([B]) AS bigint) > 1048576 THEN HASHBYTES('SHA2_256', CAST([B] AS varbinary(max))) END");
+    }
+
+    #[test]
+    fn unsupported_sources() {
+        use crate::catalog::Table;
+        let pair = |name: &str, view: bool| TablePair {
+            source: ObjectName::new("dbo", name),
+            target: ObjectName::new("dbo", name),
+            columns: vec![col("Id", "int", false)],
+            key: vec![0],
+            key_name: None,
+            target_key_name: None,
+            where1: None,
+            where2: None,
+            problem: None,
+            is_view: view,
+            notes: Vec::new(),
+            excluded: None,
+            target_missing: false,
+        };
+        let db = Database { tables: vec![Table { schema: "dbo".into(), name: "Hot".into(), memory_optimized: true, ..Default::default() }], ..Default::default() };
+        let (live, folder, backup) = (SideKind::Live, SideKind::Folder, SideKind::Backup);
+        assert_eq!(unsupported(&pair("Hot", false), [backup, live], &db, &db).as_deref(), Some("Excluded [dbo].[Hot] because data from memory optimized tables is not supported in backups"));
+        assert!(unsupported(&pair("Hot", false), [folder, live], &db, &db).is_none());
+        assert_eq!(unsupported(&pair("V", true), [live, folder], &db, &db).as_deref(), Some("Excluded [dbo].[V] because Views from non-live comparisons are ignored."));
+        assert!(unsupported(&pair("V", true), [live, live], &db, &db).is_none());
+        let filtered = TablePair { where2: Some("Id > 1".into()), ..pair("T", false) };
+        assert_eq!(
+            unsupported(&filtered, [live, folder], &db, &db).as_deref(),
+            Some("Unable to use where clause for table mapping. Where clauses cannot be used when comparing a backup.")
+        );
+        assert!(unsupported(&filtered, [folder, live], &db, &db).is_none(), "the filter is on the live side");
     }
 }

@@ -465,6 +465,7 @@ const MAPPING_BITS: &[(u64, DataOpt)] = &[
     (0x1, DataOpt::CaseSensitiveObjectDefinition),
     (0x2, DataOpt::IgnoreSpaces),
     (0x4, DataOpt::IgnoreUnderscores),
+    (0x8, DataOpt::MissingFrom2AsInclude),
     (0x10, DataOpt::IncludeTimestamps),
     (0x20, DataOpt::IncludeViews),
     (0x40, DataOpt::IncludeIdentities),
