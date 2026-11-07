@@ -496,10 +496,12 @@ fn read_files(dir: &Path, info: FolderInfo, warnings: Vec<String>, project: Opti
         let bytes = std::fs::read(&file).map_err(|e| format!("An error occurred while reading from the scripts folder '{}': {e}", dir.display()))?;
         if file.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll")) {
             // An assembly written as its image (WriteAssembliesAsDlls): named after the file,
-            // owned by dbo, SAFE, as SQL Compare reads it.
+            // owned by dbo, with the permission set a database project gives it (else SAFE),
+            // as SQL Compare reads it.
             let name = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
-            reader.add_file(&file, &format!("CREATE ASSEMBLY {}\r\nAUTHORIZATION [dbo]\r\nFROM 0x{hex}\r\nWITH PERMISSION_SET=SAFE\r\nGO\r\n", crate::db::quote(&name)));
+            let set = super::sqlproj::assembly_permission_set(&file).unwrap_or_else(|| "SAFE".into());
+            reader.add_file(&file, &format!("CREATE ASSEMBLY {}\r\nAUTHORIZATION [dbo]\r\nFROM 0x{hex}\r\nWITH PERMISSION_SET={set}\r\nGO\r\n", crate::db::quote(&name)));
             continue;
         }
         reader.add_file(&file, &decode(&bytes, &info.encoding));
@@ -920,7 +922,14 @@ pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &
     if let Some(p) = &target.project {
         let had: Vec<&PathBuf> = origins.values().collect();
         let added: Vec<PathBuf> = changes.written.iter().filter(|w| !had.contains(w)).cloned().collect();
-        p.update(&added, &changes.deleted)?;
+        // Assemblies written as images are project references with their CLR metadata.
+        let assemblies: Vec<(PathBuf, &Assembly)> = after
+            .assemblies
+            .iter()
+            .filter_map(|a| paths.get(&(FileKind::Object(ObjectType::Assembly), String::new(), a.name.clone())).map(|r| (r.clone(), a)))
+            .filter(|(r, _)| r.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll")))
+            .collect();
+        p.update(&added, &changes.deleted, &assemblies)?;
     }
     Ok(changes)
 }
