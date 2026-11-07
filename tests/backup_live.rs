@@ -199,6 +199,72 @@ fn backups_read_like_the_database() {
     assert_eq!((customer.count(RowKind::Different), customer.count(RowKind::OnlyIn2)), (3, 1), "{:?}", customer.error);
 }
 
+/// A SQL Backup file holding `stripes` as its devices, uncompressed and unencrypted, with a
+/// section before the extents and a padding block (specs/gaps/backup.md, section 6).
+fn to_sqb(stripes: &[PathBuf], out: &std::path::Path) {
+    let images: Vec<Vec<u8>> = stripes.iter().map(|f| std::fs::read(f).unwrap()).collect();
+    let mut h = vec![0u8; 1024];
+    let pascal = |h: &mut Vec<u8>, at: usize, s: &[u8]| {
+        h[at] = s.len() as u8;
+        h[at + 1..at + 1 + s.len()].copy_from_slice(s);
+    };
+    pascal(&mut h, 0, b"SSBE");
+    h[5] = 4;
+    let size: usize = images.iter().map(Vec::len).sum();
+    h[9..17].copy_from_slice(&(size as i64).to_le_bytes());
+    pascal(&mut h, 507, b"SSBE");
+    pascal(&mut h, 512, b"SQB4");
+    h[981] = 70;
+    h[1016] = 1;
+    h[1017] = images.len() as u8;
+    pascal(&mut h, 1019, b"SQB4");
+    let mut f = h;
+    f.extend_from_slice(&2i32.to_le_bytes());
+    f.extend_from_slice(&24i64.to_le_bytes());
+    f.extend_from_slice(&[0; 12]);
+    f.extend_from_slice(&1i32.to_le_bytes());
+    f.extend_from_slice(&[0; 16]);
+    let chunk = 256 * 1024;
+    for i in 0.. {
+        let mut any = false;
+        for (d, image) in images.iter().enumerate() {
+            let Some(piece) = image.get(i * chunk..((i + 1) * chunk).min(image.len())) else { continue };
+            any = true;
+            if i == 1 && d == 0 {
+                f.push(0xff);
+                f.extend_from_slice(&3i32.to_le_bytes());
+                f.extend_from_slice(b"pad");
+            }
+            f.push(d as u8);
+            f.extend_from_slice(&(piece.len() as i32).to_le_bytes());
+            f.extend_from_slice(piece);
+        }
+        if !any {
+            break;
+        }
+    }
+    for d in 0..images.len() {
+        f.push(d as u8);
+        f.extend_from_slice(&0i32.to_le_bytes());
+    }
+    std::fs::write(out, f).unwrap();
+}
+
+#[test]
+fn sql_backup_files_read_like_the_database() {
+    let Some(server) = server("sqb") else { return };
+    let db = name("Sqb");
+    server.create(&db, &format!("{SHOP}\nGO\n{SHOP_DATA}"));
+    let (s1, s2) = (format!("{db}_1.bak"), format!("{db}_2.bak"));
+    let _cleanup = Cleanup { server: &server, db: db.clone(), files: vec![s1.clone(), s2.clone()] };
+    let striped = server.backup(&db, &[&s1, &s2], "INIT, FORMAT, NAME = N'sqb'");
+    let sqb = server.dir.join(format!("{db}.sqb"));
+    to_sqb(&striped, &sqb);
+    let sets = backup::list_sets(std::slice::from_ref(&sqb), &[]).unwrap();
+    assert_eq!((sets.len(), sets[0].name.as_str(), sets[0].database.as_str()), (1, "sqb", db.as_str()));
+    assert_identical(&server, &db, &[sqb], None);
+}
+
 #[test]
 fn compressed_rows_of_every_type() {
     let Some(server) = server("types") else { return };

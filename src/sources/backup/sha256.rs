@@ -1,4 +1,5 @@
-//! SHA-256, for comparing large values by hash as the server's HASHBYTES does.
+//! SHA-256, for comparing large values by hash as the server's HASHBYTES does, and the
+//! HMAC-SHA256 based PBKDF2 that derives SQL Backup encryption keys.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -47,8 +48,54 @@ pub fn digest(data: &[u8]) -> [u8; 32] {
     out
 }
 
+pub fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let pad = |x: u8| k.iter().map(|b| b ^ x).collect::<Vec<u8>>();
+    let inner = digest(&[pad(0x36), data.to_vec()].concat());
+    digest(&[pad(0x5c), inner.to_vec()].concat())
+}
+
+/// PBKDF2 (RFC 8018) with HMAC-SHA256: `len` bytes from `iterations` rounds.
+pub fn pbkdf2(password: &[u8], salt: &[u8], iterations: u32, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len + 32);
+    for block in 1u32.. {
+        if out.len() >= len {
+            break;
+        }
+        let mut u = hmac(password, &[salt, &block.to_be_bytes()].concat());
+        let mut t = u;
+        for _ in 1..iterations {
+            u = hmac(password, &u);
+            for (a, b) in t.iter_mut().zip(u) {
+                *a ^= b;
+            }
+        }
+        out.extend_from_slice(&t);
+    }
+    out.truncate(len);
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn hmac_and_pbkdf2() {
+        assert_eq!(hex(&super::hmac(b"key", b"The quick brown fox jumps over the lazy dog")), "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
+        let salt: Vec<u8> = (0..16).collect();
+        assert_eq!(hex(&super::pbkdf2(b"secret", &salt, 1000, 32)), "4efb2bbb6d2eb58ea8deaed54417ae2fd87fd50a8a8568709363da60d4560606");
+        // A key longer than the block, and more than one output block.
+        assert_eq!(hex(&super::pbkdf2(&[b'x'; 70], b"salt", 2, 48)), "ef06b903da29fd9f8d7e9efc69e619eabc5af88dfa032962110aa355fe5caa615fef9bb170f5ac5b8f840cd0c96798e3");
+    }
+
     #[test]
     fn known_digest() {
         let d = super::digest(b"abc");
