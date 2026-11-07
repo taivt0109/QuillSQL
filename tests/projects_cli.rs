@@ -72,7 +72,9 @@ fn data_empty2_and_sdc_output_projects() {
     let p = quillsql::project::Project::load(&sdc).unwrap();
     assert!(p.source.is_scripts() && p.target.is_scripts() && p.target.path == s(&b), "{p:?}");
     let (code, out) = quill("data", &[&s1, &format!("/scripts2:{}", s(&b)), &format!("/outputProject:{}", s(&sdc))]);
-    assert!(code == 73 && out.contains("already exists. Use /force to overwrite it."), "{code} {out}");
+    // The console wraps at 80 columns, so where the line breaks depends on the project's path.
+    let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(code == 73 && flat.contains("already exists. Use /force to overwrite it."), "{code} {out}");
     // The project runs again.
     let (code, out) = quill("data", &[&format!("/project:{}", s(&sdc))]);
     assert_eq!(code, 0, "{out}");

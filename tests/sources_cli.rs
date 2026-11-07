@@ -123,7 +123,9 @@ fn reports_scripts_folder_problems() {
     let bad = folder("bad", &[("Tables/x.sql", "CREATE TABLE [dbo].[X] ( [a] int NOT NULL,, )\r\nGO\r\n"), ("Tables/y.sql", AUDIT)]);
     let (code, out) = quill(&[&format!("/scripts1:{}", s(&bad)), &format!("/scripts2:{}", s(&bad))]);
     assert_eq!(code, 63, "{out}");
-    assert!(out.contains("Warning: Invalid syntax found in file") && out.contains("at line 1"), "{out}");
+    // The console wraps at 80 columns, so where the line breaks depends on the folder's path.
+    let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("Warning: Invalid syntax found in file") && flat.contains("at line 1"), "{out}");
     let (code, out) = quill(&[&format!("/scripts1:{}", s(&bad)), &format!("/scripts2:{}", s(&bad)), "/options:Default,ThrowOnFileParseFailed"]);
     assert_eq!(code, 62, "{out}");
     assert!(out.contains("Errors occurred whilst parsing file"), "{out}");
