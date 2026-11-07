@@ -71,7 +71,7 @@ const ACTIONS: [Switch; 12] = [
     },
 ];
 
-const RULES: [Rule; 11] = [
+const RULES: [Rule; 12] = [
     Rule { name: "assertidentical", excludes: &["synchronize", "makesnapshot", "makescripts", "outputProject"], ..Rule::NONE },
     Rule { name: "reportAllObjectsWithDifferences", depends: &["report"], ..Rule::NONE },
     Rule { name: "includeIdentical", deprecated: Some("/includeIdentical has been deprecated. Please use /include:Identical instead."), ..Rule::NONE },
@@ -91,6 +91,8 @@ const RULES: [Rule; 11] = [
         excludes: &["backup2", "database2", "revision2", "server2", "username2", "password2", "scripts2", "sourcecontrol2", "makesnapshot", "makescripts", "synchronize"],
         ..Rule::NONE
     },
+    // A SQL Change Automation project is not written to.
+    Rule { name: "sca2", excludes: &["synchronize"], ..Rule::NONE },
     Rule { name: "report", excludes: &["makesnapshot", "makescripts"], path: true, ..Rule::NONE },
     Rule { name: "reporttype", depends: &["report"], values: enums::REPORT_TYPES, ..Rule::NONE },
     Rule { name: "filter", excludes: &["exclude"], path: true, ..Rule::NONE },

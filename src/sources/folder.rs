@@ -427,6 +427,9 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// Reads a scripts folder. The error is the message for a missing folder.
 pub fn read(dir: &Path) -> Result<Folder, String> {
+    if !dir.is_dir() && dir.extension().is_some_and(|x| x.eq_ignore_ascii_case("sqlproj")) {
+        return read_sca(dir);
+    }
     if !dir.is_dir() {
         return Err(format!("The scripts folder '{}' could not be found.", dir.display()));
     }
@@ -442,6 +445,52 @@ pub fn read(dir: &Path) -> Result<Folder, String> {
             info.is_azure = p.azure;
         }
     }
+    read_files(dir, info, warnings, project, files)
+}
+
+/// A SQL Change Automation project, as SQL Compare reads it: the `.sql` files of its
+/// programmable objects folder (`DeployChangesSubFolder`, default `Programmable Objects`) and of
+/// its offline schema model (`SchemaModelSubFolder`, default `Schema-Model`), with the collation
+/// of `SqlCompareCollation` and the server version of the project's schema provider. Migration
+/// scripts are not read.
+fn read_sca(project: &Path) -> Result<Folder, String> {
+    let fail = || format!("Could not read the SCA project file at {}", project.display());
+    let text = decode(&std::fs::read(project).map_err(|_| fail())?, "UTF8");
+    let doc = roxmltree::Document::parse(&text).map_err(|_| fail())?;
+    let element = |tag: &str| doc.descendants().find(|n| n.is_element() && n.tag_name().name() == tag).map(|n| n.text().unwrap_or_default().trim().to_string());
+    if element("IsReadyRollProject").is_none() && element("IsSqlChangeAutomationProject").is_none() {
+        return Err(fail());
+    }
+    let dir = project.parent().unwrap_or(Path::new("."));
+    let mut info = FolderInfo::default();
+    if let Some(c) = element("SqlCompareCollation").filter(|c| !c.is_empty()) {
+        info.collation = c;
+    }
+    if let Some(v) = element("DSP").as_deref().and_then(super::sqlproj::dsp_version) {
+        info.database_version = v;
+    }
+    let mut files = Vec::new();
+    for (tag, default) in [("DeployChangesSubFolder", "Programmable Objects"), ("SchemaModelSubFolder", "Schema-Model")] {
+        let sub = dir.join(element(tag).unwrap_or_else(|| default.to_string()));
+        let mut found = Vec::new();
+        let mut stack = vec![sub];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            for p in entries.flatten().map(|e| e.path()) {
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sql")) {
+                    found.push(p);
+                }
+            }
+        }
+        found.sort();
+        files.extend(found);
+    }
+    read_files(dir, info, Vec::new(), None, files)
+}
+
+fn read_files(dir: &Path, info: FolderInfo, warnings: Vec<String>, project: Option<super::sqlproj::SqlProj>, files: Vec<PathBuf>) -> Result<Folder, String> {
     let mut reader = parse::Reader::new(info.defaults());
     for file in files {
         let bytes = std::fs::read(&file).map_err(|e| format!("An error occurred while reading from the scripts folder '{}': {e}", dir.display()))?;

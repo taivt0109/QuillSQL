@@ -39,6 +39,14 @@ fn child_text(doc: &roxmltree::Document, name: &str) -> Option<String> {
     doc.descendants().find(|n| n.is_element() && n.tag_name().name() == name).and_then(|n| n.text()).map(|t| t.trim().to_string())
 }
 
+/// The SQL Server major version of a schema provider (`…Sql160DatabaseSchemaProvider` → 16).
+pub fn dsp_version(dsp: &str) -> Option<u32> {
+    dsp.strip_prefix("Microsoft.Data.Tools.Schema.Sql.Sql")
+        .and_then(|r| r.strip_suffix("DatabaseSchemaProvider"))
+        .and_then(|v| v.strip_suffix('0'))
+        .and_then(|v| v.parse::<u32>().ok())
+}
+
 /// The single `.sqlproj` in `dir`, if there is one.
 pub fn find(dir: &Path) -> Option<SqlProj> {
     let mut found = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sqlproj")));
@@ -59,11 +67,7 @@ pub fn find(dir: &Path) -> Option<SqlProj> {
         _ => Structure::Flat,
     };
     let dsp = child_text(&doc, "DSP").unwrap_or_default();
-    let version = dsp
-        .strip_prefix("Microsoft.Data.Tools.Schema.Sql.Sql")
-        .and_then(|r| r.strip_suffix("DatabaseSchemaProvider"))
-        .and_then(|v| v.strip_suffix('0'))
-        .and_then(|v| v.parse::<u32>().ok());
+    let version = dsp_version(&dsp);
     Some(SqlProj {
         path,
         items: items_of("Build", "Include"),

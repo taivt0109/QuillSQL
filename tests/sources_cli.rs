@@ -132,3 +132,47 @@ fn reports_scripts_folder_problems() {
     assert!(!out.contains("Invalid syntax"), "{out}");
     let _ = std::fs::remove_dir_all(bad);
 }
+
+/// A SQL Change Automation project: the programmable objects and the offline schema model are
+/// read, the migration scripts are not.
+fn sca_project(name: &str, extra: &str, subfolder: Option<&str>) -> PathBuf {
+    let model = subfolder.unwrap_or("Schema-Model");
+    let sub = subfolder.map(|s| format!("<SchemaModelSubFolder>{s}</SchemaModelSubFolder>")).unwrap_or_default();
+    let proj = format!(
+        "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\"><PropertyGroup>\
+<DSP>Microsoft.Data.Tools.Schema.Sql.Sql150DatabaseSchemaProvider</DSP><IsSqlChangeAutomationProject>True</IsSqlChangeAutomationProject>\
+<SqlCompareCollation>Latin1_General_CS_AS</SqlCompareCollation>{sub}</PropertyGroup></Project>"
+    );
+    let table = format!("{CUSTOMER}{extra}");
+    let dir = folder(
+        name,
+        &[
+            ("Proj.sqlproj", proj.as_str()),
+            (&format!("{model}/Tables/dbo.Customer.sql"), table.as_str()),
+            ("Programmable Objects/dbo/Stored Procedures/dbo.P.sql", "CREATE PROCEDURE [dbo].[P] AS SELECT 1\r\nGO\r\n"),
+            ("Migrations/0001_Junk.sql", "CREATE TABLE [dbo].[Junk] ([a] [int] NULL)\r\nGO\r\n"),
+        ],
+    );
+    dir.join("Proj.sqlproj")
+}
+
+#[test]
+fn sql_change_automation_projects() {
+    let a = sca_project("sca-a", "", None);
+    let b = sca_project("sca-b", AUDIT.replace("[audit].[Log]", "[dbo].[Log]").as_str(), Some("Model"));
+    let (code, out) = quill(&[&format!("/sca1:{}", s(&a)), &format!("/sca2:{}", s(&b))]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("[dbo].[Log]") && !out.contains("Junk") && !out.contains("[dbo].[P]") && !out.contains("[dbo].[Customer]"), "{out}");
+    let (code, out) = quill(&[&format!("/sca1:{}", s(&a)), &format!("/sca2:{}", s(&a))]);
+    assert_eq!(code, 63, "{out}");
+    let (code, out) = quill(&[&format!("/sca1:{}", s(&a)), &format!("/sca2:{}", s(&b)), "/synchronize"]);
+    assert_eq!(code, 8, "{out}");
+    assert!(out.contains("The /sca2 switch cannot be used in conjunction with the /synchronize switch."), "{out}");
+    let missing = a.with_file_name("nope.sqlproj");
+    let (code, out) = quill(&[&format!("/sca1:{}", s(&missing)), &format!("/sca2:{}", s(&b))]);
+    assert_ne!(code, 0);
+    assert!(out.replace("\r\n", " ").replace('\n', " ").contains("Could not read the SCA project file at"), "{out}");
+    for p in [a, b] {
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+}
