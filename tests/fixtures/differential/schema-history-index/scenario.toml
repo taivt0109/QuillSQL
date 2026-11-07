@@ -1,0 +1,4 @@
+kind = "schema"
+about = "Temporal table whose history table has an extra index only in db1"
+finding = "schema-model M5"
+oracles = ["diffset", "names", "exit"]
