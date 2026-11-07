@@ -63,9 +63,15 @@ impl Server {
     fn drop(&self, db: &str) {
         let q = db::quote(db);
         let rt = db::runtime().unwrap();
+        // Retried: another test's cleanup on the shared server may kill the session.
         rt.block_on(async {
-            let mut c = db::connect_async(&self.spec("master")).await.unwrap();
-            let _ = db::execute(&mut c, &format!("ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q};")).await;
+            for _ in 0..3 {
+                let Ok(mut c) = db::connect_async(&self.spec("master")).await else { continue };
+                let sql = format!("IF DB_ID({}) IS NOT NULL BEGIN ALTER DATABASE {q} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {q}; END", db::literal(db));
+                if db::execute(&mut c, &sql).await.is_ok() {
+                    break;
+                }
+            }
         });
     }
 
@@ -128,7 +134,7 @@ fn assert_identical(server: &Server, live: &str, files: &[PathBuf], set: Option<
     let spec = server.spec(live);
     let from_live = catalog::read_database(&spec).unwrap();
     let c = schema::compare(&from_backup, &from_live, &Options::default_set(), &Mappings::default());
-    let differences: Vec<String> = c.differences.iter().filter(|d| d.kind != schema::DiffKind::Equal).map(|d| format!("{:?} {} {:?}", d.object_type, d.name, d.properties)).collect();
+    let differences: Vec<String> = c.differences.iter().filter(|d| d.kind != schema::DiffKind::Equal).map(|d| format!("{:?} {:?} {} {:?}", d.kind, d.object_type, d.name, d.properties)).collect();
     if let Ok(dir) = std::env::var("QUILL_BACKUP_DEBUG") {
         std::fs::write(format!("{dir}/b.json"), serde_json::to_string_pretty(&from_backup).unwrap()).unwrap();
         std::fs::write(format!("{dir}/b.json.live"), serde_json::to_string_pretty(&from_live).unwrap()).unwrap();
@@ -158,6 +164,15 @@ fn backups_read_like_the_database() {
     // Copy-only, so that the first backup stays the base of the differential below.
     let files = server.backup(&db, &[&compressed], "INIT, FORMAT, COMPRESSION, COPY_ONLY");
     assert_identical(&server, &db, &files, None);
+    // Each compressed backup lays its blocks out differently (some block headers once stopped
+    // the reader halfway); a few more of them read whole too.
+    let live = catalog::read_database(&server.spec(&db)).unwrap();
+    for _ in 0..8 {
+        let files = server.backup(&db, &[&compressed], "INIT, FORMAT, COMPRESSION, COPY_ONLY");
+        let b = backup::open(&files, &[], None).unwrap().read_database().unwrap();
+        let c = schema::compare(&b, &live, &Options::default_set(), &Mappings::default());
+        assert!(c.differences.iter().all(|d| d.kind == schema::DiffKind::Equal), "{files:?}");
+    }
     let striped = server.backup(&db, &[&s1, &s2, &s3], "INIT, FORMAT, COPY_ONLY");
     assert_identical(&server, &db, &striped, None);
 

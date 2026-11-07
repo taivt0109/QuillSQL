@@ -219,7 +219,11 @@ impl Media {
                 return Err(BackupError::Reader("One or more backups are missing from the specified set of striped backups".into()));
             }
             for p in &l.parts {
-                parts.push((self.medium(p), p));
+                let m = self.medium(p);
+                if p.extents.iter().any(|&(off, len)| off + len > m.len()) {
+                    return Err(BackupError::Reader(format!("The backup file {} is truncated or damaged", p.file.display())));
+                }
+                parts.push((m, p));
             }
         }
         Ok(PageStore::build(&parts))
