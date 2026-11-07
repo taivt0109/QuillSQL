@@ -241,3 +241,58 @@ CREATE SYMMETRIC KEY QuillSym WITH ALGORITHM = AES_256 ENCRYPTION BY CERTIFICATE
     let files = server.backup(&db, &[&f], "INIT, FORMAT");
     assert_identical(&server, &db, &files, None);
 }
+
+/// A TDE-encrypted database is listed as encrypted and refused, as SQL Compare does. Creates a
+/// certificate in master for the test and drops it afterwards (and the master key when the test
+/// made it).
+#[test]
+fn encrypted_databases_are_refused() {
+    let Some(server) = server("tde") else { return };
+    let db = name("Tde");
+    let cert = format!("QD_backup_{}_TdeCert", std::process::id());
+    let rt = db::runtime().unwrap();
+    let had_key = rt.block_on(async {
+        let mut c = db::connect_async(&server.spec("master")).await.unwrap();
+        !db::query(&mut c, "SELECT 1 FROM sys.symmetric_keys WHERE name = N'##MS_DatabaseMasterKey##'").await.unwrap().is_empty()
+    });
+    if !had_key {
+        server.run("master", "CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'Qu1ll!TdeTest#Key'");
+    }
+    server.run("master", &format!("CREATE CERTIFICATE {cert} WITH SUBJECT = 'QuillSQL TDE test'"));
+    struct Undo<'a>(&'a Server, String, String, bool);
+    impl Drop for Undo<'_> {
+        fn drop(&mut self) {
+            let f = format!("{}.bak", self.1);
+            self.0.remove(&[&f]);
+            self.0.drop(&self.1);
+            let rt = db::runtime().unwrap();
+            rt.block_on(async {
+                let mut c = db::connect_async(&self.0.spec("master")).await.unwrap();
+                let _ = db::execute(&mut c, &format!("DROP CERTIFICATE {}", self.2)).await;
+                if !self.3 {
+                    let _ = db::execute(&mut c, "DROP MASTER KEY").await;
+                }
+            });
+        }
+    }
+    let _undo = Undo(&server, db.clone(), cert.clone(), had_key);
+    server.create(&db, "CREATE TABLE dbo.T (Id int NOT NULL PRIMARY KEY);");
+    server.run(&db, &format!("CREATE DATABASE ENCRYPTION KEY WITH ALGORITHM = AES_256 ENCRYPTION BY SERVER CERTIFICATE {cert}; ALTER DATABASE CURRENT SET ENCRYPTION ON;"));
+    // Wait for the encryption scan to finish.
+    for _ in 0..60 {
+        let state = rt.block_on(async {
+            let mut c = db::connect_async(&server.spec("master")).await.unwrap();
+            let rows = db::query(&mut c, &format!("SELECT encryption_state FROM sys.dm_database_encryption_keys WHERE database_id = DB_ID({})", db::literal(&db))).await.unwrap();
+            rows.first().and_then(|r| r.get::<i32, _>(0)).unwrap_or(0)
+        });
+        if state == 3 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let f = format!("{db}.bak");
+    let files = server.backup(&db, &[&f], "INIT, FORMAT");
+    let sets = backup::list_sets(&files, &[]).unwrap();
+    assert!(sets[0].encrypted && !sets[0].can_handle());
+    assert_eq!(backup::open(&files, &[], None).err().unwrap().to_string(), "Encrypted backups are not supported");
+}
