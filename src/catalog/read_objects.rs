@@ -802,7 +802,7 @@ impl Reader {
             conn,
             "SELECT c.name, USER_NAME(c.principal_id), c.subject, c.issuer_name, CONVERT(nvarchar(100), c.thumbprint, 1),
                     CONVERT(nvarchar(30), c.start_date, 120), CONVERT(nvarchar(30), c.expiry_date, 120), c.pvt_key_encryption_type,
-                    c.is_active_for_begin_dialog
+                    c.is_active_for_begin_dialog, c.cert_serial_number
              FROM sys.certificates AS c WHERE c.name NOT LIKE N'##%' ORDER BY c.name",
         )
         .await?;
@@ -817,6 +817,7 @@ impl Reader {
                 expiry_date: s(&r, 6),
                 private_key: s(&r, 7),
                 active_for_dialog: flag(&r, 8),
+                serial_number: s(&r, 9),
             });
         }
         let rows = db::query(

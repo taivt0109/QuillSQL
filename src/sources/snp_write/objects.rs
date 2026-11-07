@@ -512,7 +512,7 @@ impl W<'_> {
         self.s(&c.subject);
         self.i64(text_ticks(&c.start_date));
         self.i64(text_ticks(&c.expiry_date));
-        self.str(None); // serial number
+        self.str(Some(&c.serial_number).filter(|s| !s.is_empty()).map(String::as_str));
         let thumbprint = hex_bytes(&c.thumbprint);
         self.len(thumbprint.len());
         self.b.b.extend(thumbprint);

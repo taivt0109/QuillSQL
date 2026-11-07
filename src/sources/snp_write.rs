@@ -370,8 +370,17 @@ impl<'a> W<'a> {
         self.object_blobs();
         let assemblies: Vec<(usize, &Assembly)> = db.assemblies.iter().enumerate().collect();
         self.coll(&assemblies, |w, (i, a)| w.assembly(*i, a));
-        self.f32(VERSION); // assembly dependencies
-        self.i32(0);
+        // Assembly dependencies: each assembly's references to other user assemblies.
+        let refs: Vec<(&str, &str)> = db.assemblies.iter().flat_map(|a| a.references.iter().map(move |r| (a.name.as_str(), r.as_str()))).collect();
+        self.f32(VERSION);
+        self.len(refs.len());
+        for (from, to) in refs {
+            self.u8(13);
+            self.s(&quote(from));
+            self.u8(13);
+            self.s(&quote(to));
+            self.bool(true);
+        }
         self.coll(&db.synonyms, W::synonym);
         let collections: Vec<(usize, &XmlSchemaCollection)> = db.xml_schema_collections.iter().enumerate().collect();
         self.coll(&collections, |w, (i, x)| w.xml_collection(*i, x));
@@ -648,7 +657,7 @@ impl<'a> W<'a> {
         self.i32(0); // natively compiled procedures
         self.u8(0); // remote data archive
         self.no_ss(3);
-        self.i64(0); // last modified
+        self.i64(t.modified.as_deref().map_or(0, crate::sources::snp::objects::text_ticks_ms)); // last modified
         let temporal_type = if t.history_table {
             1
         } else if t.temporal.is_some() {
@@ -1104,7 +1113,7 @@ impl<'a> W<'a> {
         self.str(None); // authorization
         self.execute_as(r.execute_as.as_deref());
         self.no_ss(2);
-        self.i64(0); // last modified
+        self.i64(r.modified.as_deref().map_or(0, crate::sources::snp::objects::text_ticks_ms)); // last modified
         self.references(&r.schema, &r.name);
     }
 
@@ -1163,7 +1172,7 @@ impl<'a> W<'a> {
         self.i32(0); // schema-bound tables
         self.i32(0); // numbered procedures
         self.no_ss(2);
-        self.i64(0); // last modified
+        self.i64(r.modified.as_deref().map_or(0, crate::sources::snp::objects::text_ticks_ms)); // last modified
         self.references(&r.schema, &r.name);
     }
 
@@ -1206,7 +1215,7 @@ impl<'a> W<'a> {
         self.str(None); // search property list
         self.references(&v.schema, &v.name);
         self.no_ss(2);
-        self.i64(0); // last modified
+        self.i64(v.modified.as_deref().map_or(0, crate::sources::snp::objects::text_ticks_ms)); // last modified
     }
 
     fn user_type(&mut self, t: &UserType) {

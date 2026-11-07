@@ -555,6 +555,9 @@ pub struct Temporal {
 pub struct Table {
     pub schema: String,
     pub name: String,
+    /// sys.objects.modify_date as `yyyy-MM-dd HH:mm:ss.fff`; kept for snapshots, not compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
@@ -631,6 +634,9 @@ impl Default for ModuleSettings {
 pub struct View {
     pub schema: String,
     pub name: String,
+    /// sys.objects.modify_date as `yyyy-MM-dd HH:mm:ss.fff`; kept for snapshots, not compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
     pub definition: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub encrypted: bool,
@@ -669,6 +675,9 @@ pub enum RoutineKind {
 pub struct Routine {
     pub schema: String,
     pub name: String,
+    /// sys.objects.modify_date as `yyyy-MM-dd HH:mm:ss.fff`; kept for snapshots, not compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
     pub kind: RoutineKind,
     /// The CREATE text; empty when encrypted or CLR.
     pub definition: String,

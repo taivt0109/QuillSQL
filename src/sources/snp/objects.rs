@@ -11,6 +11,8 @@ pub(super) struct More {
     pub(super) rules: Vec<BindableObject>,
     pub(super) assemblies: Vec<(Assembly, Vec<u64>, Vec<RawPerm>)>,
     pub(super) assembly_blobs: HashMap<u64, Vec<u8>>,
+    /// Assembly dependencies: (13, `[assembly]`, 13, `[referenced]`).
+    pub(super) assembly_references: Vec<(u8, String, u8, String)>,
     pub(super) xml_blobs: HashMap<u64, Vec<u8>>,
     pub(super) xml_collections: Vec<(XmlSchemaCollection, i32, Vec<RawPerm>)>,
     pub(super) message_types: Vec<(MessageType, Vec<RawPerm>)>,
@@ -59,6 +61,18 @@ pub(super) fn ticks_text(ticks: i64) -> String {
 }
 
 /// Raw .NET ticks of `yyyy-MM-dd HH:mm:ss`.
+/// Ticks as `yyyy-MM-dd HH:mm:ss.fff`, to the nearest millisecond.
+pub(super) fn ticks_text_ms(ticks: i64) -> String {
+    let t = (ticks + 5_000) / 10_000 * 10_000;
+    format!("{}.{:03}", ticks_text(t), t.rem_euclid(10_000_000) / 10_000)
+}
+
+/// `yyyy-MM-dd HH:mm:ss.fff` as ticks, with the milliseconds.
+pub(crate) fn text_ticks_ms(s: &str) -> i64 {
+    let ms = s.rsplit_once('.').and_then(|(_, f)| format!("{f:0<3}").get(..3).and_then(|x| x.parse::<i64>().ok())).unwrap_or(0);
+    text_ticks(s.split('.').next().unwrap_or(s)) + ms * 10_000
+}
+
 pub(crate) fn text_ticks(s: &str) -> i64 {
     let n: Vec<i64> = s.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).filter_map(|x| x.parse().ok()).collect();
     let (y, m, d) = (n.first().copied().unwrap_or(1), n.get(1).copied().unwrap_or(1), n.get(2).copied().unwrap_or(1));
@@ -513,7 +527,7 @@ impl Cur<'_> {
         c.subject = self.s()?;
         c.start_date = ticks_text(self.i64()?);
         c.expiry_date = ticks_text(self.i64()?);
-        self.str()?;
+        c.serial_number = self.s()?;
         let n = self.count()?;
         c.thumbprint = format!("0x{}", hex(self.take(n)?));
         let perms = self.perms()?;
@@ -730,6 +744,9 @@ impl More {
                 f.content = self.assembly_blobs.get(&id).map(|b| hex(b)).unwrap_or_default();
             }
             grant("ASSEMBLY", None, &a.name, &perms);
+            let me = crate::db::quote(&a.name);
+            a.references = self.assembly_references.iter().filter(|d| d.1.eq_ignore_ascii_case(&me)).map(|d| unquote(&d.3)).collect();
+            a.references.sort();
             db.assemblies.push(a);
         }
         for (mut x, id, perms) in self.xml_collections {

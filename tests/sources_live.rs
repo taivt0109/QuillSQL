@@ -358,3 +358,34 @@ fn source_control_and_clone_markers_are_not_schema() {
     let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&marked)).unwrap();
     assert!(!snp.extended_properties.iter().any(|p| p.name == "IsSQLCloneDatabase"));
 }
+
+/// SQL Compare itself (QUILL_TEST_SQLCOMPARE: the path to SQLCompare.exe) reads our snapshots of
+/// the fixtures as identical to their databases.
+#[test]
+fn sql_compare_reads_our_snapshots_as_identical() {
+    let Some(server) = server() else { return };
+    let Ok(exe) = std::env::var("QUILL_TEST_SQLCOMPARE") else { return };
+    let clr = |hex: &str| format!("0x{}", hex.trim());
+    let objects = include_str!("fixtures/objects/objects.sql").replace("{CLR}", &clr(include_str!("fixtures/objects/clr.hex")));
+    let keys = "CREATE USER KeyUser WITHOUT LOGIN;
+        CREATE CERTIFICATE QuillCert ENCRYPTION BY PASSWORD = 'Str0ng!Pass1' WITH SUBJECT = 'Quill', START_DATE = '20250101', EXPIRY_DATE = '20300101';
+        CREATE SYMMETRIC KEY QuillKey WITH ALGORITHM = AES_256 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+        CREATE ASYMMETRIC KEY QuillAsym WITH ALGORITHM = RSA_2048 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+        GRANT CONTROL ON CERTIFICATE::QuillCert TO KeyUser;";
+    let changed = format!("{SHOP}\nGO\n{SHOP_CHANGES}");
+    for (name, script) in [("QD_sources_RgShop", SHOP), ("QD_sources_RgChanged", changed.as_str()), ("QD_sources_RgBindings", BINDINGS), ("QD_sources_RgObjects", objects.as_str()), ("QD_sources_RgKeys", keys)] {
+        server.create(name, script);
+        let file = temp(name).with_extension("snp");
+        std::fs::write(&file, quillsql::sources::snp_write::write(&server.read(name))).unwrap();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg(format!("/snapshot1:{}", file.display())).arg(format!("/server2:{}", server.host)).arg(format!("/database2:{}", unique(name)));
+        if let Auth::Sql { user, password } = &server.auth {
+            cmd.arg(format!("/username2:{user}")).arg(format!("/password2:{password}"));
+        }
+        let out = cmd.output().unwrap();
+        server.drop(name);
+        let _ = std::fs::remove_file(&file);
+        // 63: the databases are identical.
+        assert_eq!(out.status.code(), Some(63), "{name}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+}
