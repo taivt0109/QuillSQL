@@ -293,27 +293,14 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let verbose = args.has("verbose");
     let source1 = common::source(args, 1)?.ok_or_else(|| ArgError::new(exit::USAGE, "give database 1: /server1 and /database1"))?;
     let source2 = if args.has("makescripts") { None } else { common::source(args, 2)? };
-    // A scripts folder is read without a server; when its data needs one, it is loaded into a
-    // temporary database on the other side's server.
-    let host = [Some(&source1), source2.as_ref()].into_iter().flatten().find_map(|s| match s {
-        Source::Live(spec) => Some(spec.clone()),
-        _ => None,
-    });
+    // A scripts folder is read without a server, as SQL Data Compare reads it.
     let open = |s: Source, n: u8| -> Result<Opened, ArgError> {
         let Source::Scripts { path, revision } = s else { return Ok(Opened::Live(live(s, n)?)) };
         if verbose {
             eprintln!("Reading database scripts from '{}'...", path.display());
         }
-        match crate::sources::datafolder::read(&path, revision.as_deref()).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))? {
-            Ok(f) => Ok(Opened::Folder(Box::new(f))),
-            Err(reason) => {
-                let host = host.as_ref().ok_or_else(|| ArgError::new(exit::USAGE, format!("{reason}; reading the folder needs the other database to be live")))?;
-                if verbose {
-                    eprintln!("{reason}: loading the folder into a temporary database on {}", host.server);
-                }
-                crate::sources::staging::stage(&path, revision.as_deref(), host).map(|s| Opened::Staged(Box::new(s))).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))
-            }
-        }
+        let f = crate::sources::datafolder::read(&path, revision.as_deref()).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))?;
+        Ok(Opened::Folder(Box::new(f)))
     };
     let side1 = open(source1, 1)?;
     let read = |spec: &ConnectionSpec| {
@@ -335,12 +322,6 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             Opened::Live(spec) => {
                 let db = read(spec)?;
                 let label = describe(spec, &db);
-                (db, label)
-            }
-            Opened::Staged(s) => {
-                let mut db = read(&s.spec)?;
-                db.name = s.folder.database.name.clone();
-                let label = db.name.clone();
                 (db, label)
             }
             Opened::Folder(f) => (f.folder.database.clone(), f.folder.database.name.clone()),
@@ -468,14 +449,6 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             if !quiet {
                 console::log(&format!("Deployed the data of {} to {} ({ran} batches).", db1.name, label2));
             }
-            // Deploying to a scripts folder: the changed tables' data scripts are written again.
-            if let Opened::Staged(s) = &side2 {
-                let changed: Vec<crate::catalog::ObjectName> = result.tables.iter().filter(|t| t.error.is_none() && !t.identical()).map(|t| t.pair.target.clone()).collect();
-                let files = s.write_back(&db2, &changed).map_err(|e| ArgError::new(exit::IO_ERROR, e))?;
-                if !quiet {
-                    console::log(&format!("Wrote {} data script(s) in {}.", files.len(), s.folder.path.display()));
-                }
-            }
         }
     }
     if !failed.is_empty() {
@@ -489,15 +462,12 @@ enum Opened {
     Live(ConnectionSpec),
     /// A scripts folder read without a server.
     Folder(Box<crate::sources::datafolder::DataFolder>),
-    /// A scripts folder loaded into a temporary database.
-    Staged(Box<crate::sources::staging::Staging>),
 }
 
 impl Opened {
     fn spec(&self) -> Option<&ConnectionSpec> {
         match self {
             Opened::Live(s) => Some(s),
-            Opened::Staged(s) => Some(&s.spec),
             Opened::Folder(_) => None,
         }
     }

@@ -2,19 +2,20 @@
 //! INSERT statements of its data scripts become rows in memory, in the form a live read gives,
 //! for the data engine to compare. Deploying data to the folder writes the data scripts again.
 //!
-//! Values the folder cannot give offline (computed columns, CLR types, sql_variant, values
-//! compared by hash) make the caller fall back to loading the folder into a database.
+//! As SQL Data Compare reads them, the scripts only hold literals and nothing needs a server:
+//! computed columns are not read (the comparison leaves them out), CLR, hierarchyid and spatial
+//! values are `0x…` binary, sql_variant values take their base type from the literal or its CAST,
+//! columns missing from an INSERT are NULL, and any other SQL in a VALUES list is an error.
 
 use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, NaiveDate};
 
 use super::folder::{self, Folder};
-use super::staging::data_files;
 use crate::catalog::{Column, DataType, Database, ObjectName, Table, UserTypeKind};
-use crate::data::compare::{LARGE, Memory, MemoryTable};
+use crate::data::compare::{Memory, MemoryTable};
 use crate::data::store::{self, RowKind};
-use crate::data::value::{Literal, Value};
+use crate::data::value::{Literal, Value, Variant};
 use crate::schema::text::{Tok, Token, tokenize};
 
 const DAY: i128 = 86_400_000_000_000;
@@ -33,43 +34,54 @@ pub struct DataFolder {
 enum Lit {
     Null,
     Number(String),
-    Text(String),
+    /// A string; true when written N'…'.
+    Text(String, bool),
     Bytes(Vec<u8>),
+    /// CAST(x AS type(args)) or CONVERT(type(args), x), and any COLLATE after it.
+    Cast(Box<Lit>, String, Vec<String>, Option<String>),
+    /// A literal with COLLATE.
+    Collated(Box<Lit>, String),
 }
 
-/// Reads the folder at `dir` (at `revision`, if given). `Ok(Err(reason))` when its data needs a
-/// server to be read.
-pub fn read(dir: &Path, revision: Option<&str>) -> Result<Result<DataFolder, String>, String> {
+/// The data script files of a folder: the top level of its Data folder and the files listed in
+/// its DataFileSet.
+pub fn data_files(f: &Folder) -> Vec<PathBuf> {
+    let dir = f.path.join(f.info.prefixes.get("Data").map(String::as_str).unwrap_or("Data"));
+    let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sql"))).collect())
+        .unwrap_or_default();
+    for name in &f.info.data_files {
+        let p = f.path.join(name);
+        if p.is_file() && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Reads the folder at `dir` (at `revision`, if given) and the rows of its data scripts.
+pub fn read(dir: &Path, revision: Option<&str>) -> Result<DataFolder, String> {
     let checkout = revision.map(|r| super::scm::checkout(&dir.to_string_lossy(), r)).transpose()?;
     let read_dir = checkout.as_ref().map(|c| c.dir.clone()).unwrap_or_else(|| dir.to_path_buf());
     let mut f = folder::read(&read_dir)?;
     if checkout.is_some() {
         f.database.name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(f.database.name);
     }
-    for t in &f.database.tables {
-        if let Some(c) = t.columns.iter().find(|c| needs_server(&f.database, c)) {
-            return Ok(Err(format!("{}.[{}] cannot be read without a server", t.object_name(), c.name)));
-        }
-    }
     let mut memory = Memory::new();
     let mut files = Vec::new();
+    let collation = f.database.collation.clone();
     for path in data_files(&f) {
         let text = folder::decode(&std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?, &f.info.encoding);
-        match parse_file(&f.database, &f.info.default_schema, &text) {
-            Ok(tables) => {
-                for (name, t) in tables {
-                    files.push((name.clone(), path.clone()));
-                    let entry = memory.entry(name).or_insert_with(|| MemoryTable { columns: t.columns.clone(), rows: Vec::new() });
-                    if entry.columns != t.columns {
-                        return Ok(Err(format!("{}: the INSERT statements list different columns", path.display())));
-                    }
-                    entry.rows.extend(t.rows);
-                }
-            }
-            Err(reason) => return Ok(Err(format!("{}: {reason}", path.display()))),
+        let tables = parse_file(&f.database, &f.info.default_schema, &collation, &text)
+            .map_err(|reason| format!("One or more data SQL files could not be parsed. {reason} File: {}", path.display()))?;
+        for (name, t) in tables {
+            files.push((name.clone(), path.clone()));
+            let entry = memory.entry(name).or_insert_with(|| MemoryTable { columns: t.columns.clone(), rows: Vec::new() });
+            entry.rows.extend(t.rows);
         }
     }
-    Ok(Ok(DataFolder { folder: f, memory, files, _checkout: checkout }))
+    Ok(DataFolder { folder: f, memory, files, _checkout: checkout })
 }
 
 /// The column's base type: alias types resolved.
@@ -84,9 +96,9 @@ fn base_type<'a>(db: &'a Database, t: &'a DataType) -> &'a DataType {
     t
 }
 
-fn needs_server(db: &Database, c: &Column) -> bool {
-    let t = base_type(db, &c.data_type);
-    c.computed.is_some() || t.schema.is_some() || matches!(t.name.as_str(), "sql_variant" | "hierarchyid" | "geometry" | "geography")
+/// CLR user-defined types, hierarchyid and the spatial types: written and read as binary.
+fn is_clr(t: &DataType) -> bool {
+    t.schema.is_some() || matches!(t.name.as_str(), "hierarchyid" | "geometry" | "geography")
 }
 
 fn significant(text: &str) -> Vec<Token> {
@@ -110,13 +122,31 @@ fn string_value(s: &str) -> String {
     inner.replace("''", "'").replace("\\\\\r\n\r\n", "\\\r\n").replace("\\\\\n\n", "\\\n")
 }
 
-/// The INSERT statements of one file, by table.
-fn parse_file(db: &Database, default_schema: &str, text: &str) -> Result<Vec<(ObjectName, MemoryTable)>, String> {
-    let t = significant(text);
+/// The INSERT statements of one file, by table. Large values may also be built up by
+/// `UPDATE t SET col.WRITE(…)` and `UPDATETEXT t.col @ptr NULL NULL …` on the row just inserted,
+/// and statements may be wrapped in `EXEC(N'…')`.
+fn parse_file(db: &Database, default_schema: &str, collation: &str, text: &str) -> Result<Vec<(ObjectName, MemoryTable)>, String> {
     let mut out: Vec<(ObjectName, MemoryTable)> = Vec::new();
+    parse_into(db, default_schema, collation, text, &mut out)?;
+    Ok(out)
+}
+
+fn parse_into(db: &Database, default_schema: &str, collation: &str, text: &str, out: &mut Vec<(ObjectName, MemoryTable)>) -> Result<(), String> {
+    let t = significant(text);
     let mut k = 0;
     while k < t.len() {
         let w = t[k].text.to_ascii_uppercase();
+        if (w == "EXEC" || w == "EXECUTE") && t.get(k + 1).is_some_and(|x| x.text == "(") {
+            let (inner, next) = literal(&t, k + 2)?;
+            let Lit::Text(sql, _) = inner else { return Err("Expected a value or NULL".into()) };
+            parse_into(db, default_schema, collation, &sql, out)?;
+            k = next + 1;
+            continue;
+        }
+        if w == "UPDATE" || w == "UPDATETEXT" {
+            k = append_chunk(db, default_schema, collation, &t, k, out)?;
+            continue;
+        }
         if w == "INSERT" {
             k += 1;
             if t.get(k).is_some_and(|x| x.text.eq_ignore_ascii_case("INTO")) {
@@ -133,11 +163,7 @@ fn parse_file(db: &Database, default_schema: &str, text: &str) -> Result<Vec<(Ob
                 [.., s, n] => ObjectName::new(s, n),
                 [] => return Err("INSERT without a table".into()),
             };
-            let table = db
-                .tables
-                .iter()
-                .find(|x| x.schema.eq_ignore_ascii_case(&name.schema) && x.name.eq_ignore_ascii_case(&name.name))
-                .ok_or_else(|| format!("no table {name} in the folder"))?;
+            let table = find_table(db, &name)?;
             let mut columns = Vec::new();
             if t.get(k).is_some_and(|x| x.text == "(") {
                 k += 1;
@@ -189,17 +215,15 @@ fn parse_file(db: &Database, default_schema: &str, text: &str) -> Result<Vec<(Ob
             let mut mt = MemoryTable { columns: all.iter().map(|c| c.name.clone()).collect(), rows: Vec::new() };
             for row in rows {
                 let mut values = Vec::with_capacity(all.len());
-                for c in &all {
+                for (ordinal, c) in all.iter().enumerate() {
                     let v = match columns.iter().position(|n| n.eq_ignore_ascii_case(&c.name)) {
-                        Some(i) => to_value(&row[i], base_type(db, &c.data_type))
-                            .ok_or_else(|| format!("{name}.[{}]: value {:?} is not a {}", c.name, row[i], c.data_type.sql()))?,
-                        // A column left out takes its default, which only a server can work out.
-                        None if c.default.is_some() || c.identity.is_some() => return Err(format!("{name}.[{}] is not in the INSERT statements", c.name)),
+                        // Computed columns are not compared with a scripts folder, so not read.
+                        _ if c.computed.is_some() => Value::Null,
+                        Some(i) => column_value(&row[i], base_type(db, &c.data_type), collation)
+                            .map_err(|e| format!("{e} on column {ordinal} ({}). Table affected: {name}.", c.name))?,
+                        // A column left out of the INSERT is NULL (defaults are not worked out).
                         None => Value::Null,
                     };
-                    if large(&v) {
-                        return Err(format!("{name}.[{}] holds values over {LARGE} bytes", c.name));
-                    }
                     values.push(v);
                 }
                 mt.rows.push(values);
@@ -210,22 +234,198 @@ fn parse_file(db: &Database, default_schema: &str, text: &str) -> Result<Vec<(Ob
             }
             continue;
         }
-        // SET IDENTITY_INSERT, GO and the like.
+        // SET IDENTITY_INSERT, GO, DECLARE @ptr … and the like.
         k += 1;
     }
-    Ok(out)
+    Ok(())
+}
+
+fn find_table<'a>(db: &'a Database, name: &ObjectName) -> Result<&'a Table, String> {
+    db.tables
+        .iter()
+        .find(|x| x.schema.eq_ignore_ascii_case(&name.schema) && x.name.eq_ignore_ascii_case(&name.name))
+        .ok_or_else(|| format!("There is no table {name} in the scripts folder."))
+}
+
+/// A dotted name at token `k`: its parts and the next token index.
+fn dotted(t: &[Token], mut k: usize) -> (Vec<String>, usize) {
+    let mut parts = Vec::new();
+    if let Some(x) = t.get(k) {
+        parts.push(unquote(&x.text));
+        k += 1;
+    }
+    while t.get(k).is_some_and(|x| x.text == ".") && t.get(k + 1).is_some() {
+        parts.push(unquote(&t[k + 1].text));
+        k += 2;
+    }
+    (parts, k)
+}
+
+/// `UPDATE t SET col.WRITE(value, …) …` or `UPDATETEXT t.col @ptr NULL NULL value`: the value is
+/// appended to that column of the row the previous INSERT added. Returns the next token index.
+fn append_chunk(db: &Database, default_schema: &str, collation: &str, t: &[Token], k: usize, out: &mut [(ObjectName, MemoryTable)]) -> Result<usize, String> {
+    let update = t[k].text.eq_ignore_ascii_case("UPDATE");
+    let (parts, mut k) = dotted(t, k + 1);
+    let (table, column) = if update {
+        if !t.get(k).is_some_and(|x| x.text.eq_ignore_ascii_case("SET")) {
+            return Err("Expected SET".into());
+        }
+        let (target, next) = dotted(t, k + 1);
+        k = next;
+        let [column, method] = target.as_slice() else { return Err("Expected a column".into()) };
+        if !method.eq_ignore_ascii_case("WRITE") {
+            return Err(format!("Unsupported update method {method} found in data"));
+        }
+        k += 1; // (
+        (parts, column.clone())
+    } else {
+        let Some((column, table)) = parts.split_last() else { return Err("Expected a column".into()) };
+        // The text pointer, then the offset and length (NULL NULL appends).
+        k += 3;
+        (table.to_vec(), column.clone())
+    };
+    let name = match table.as_slice() {
+        [n] => ObjectName::new(default_schema, n),
+        [.., s, n] => ObjectName::new(s, n),
+        [] => return Err("Expected a table".into()),
+    };
+    let (chunk, next) = literal(t, k)?;
+    let target = find_table(db, &name)?;
+    let Some((_, mt)) = out.last_mut().filter(|(n, _)| *n == name) else {
+        return Err("Update must refer to the row inserted by the previous INSERT statement".into());
+    };
+    let i = mt.columns.iter().position(|c| c.eq_ignore_ascii_case(&column)).ok_or_else(|| format!("There is no column {column} in {name}."))?;
+    let ty = target.columns.iter().find(|c| c.name.eq_ignore_ascii_case(&column)).map(|c| base_type(db, &c.data_type).clone()).unwrap_or_default();
+    let add = column_value(&chunk, &ty, collation)?;
+    let row = mt.rows.last_mut().ok_or("Update must refer to the row inserted by the previous INSERT statement")?;
+    row[i] = match (std::mem::replace(&mut row[i], Value::Null), add) {
+        (Value::Str(a), Value::Str(b)) => Value::Str(a + &b),
+        (Value::Bytes(mut a), Value::Bytes(b)) => {
+            a.extend(b);
+            Value::Bytes(a)
+        }
+        (Value::Null, b) => b,
+        (a, _) => a,
+    };
+    // Skip the rest of the statement (the .WRITE arguments and the WHERE clause).
+    let mut k = next;
+    while k < t.len() && !matches!(t[k].text.to_ascii_uppercase().as_str(), "INSERT" | "UPDATE" | "UPDATETEXT" | "GO" | "EXEC" | "EXECUTE" | "SET") {
+        k += 1;
+    }
+    Ok(k)
 }
 
 fn all_columns(t: &Table) -> Vec<&Column> {
     t.columns.iter().collect()
 }
 
-fn large(v: &Value) -> bool {
-    match v {
-        Value::Str(s) => s.len() as i64 > LARGE / 2,
-        Value::Bytes(b) => b.len() as i64 > LARGE,
-        _ => false,
+/// The value of a literal in a column of type `t`, or SQL Data Compare's complaint about it.
+fn column_value(lit: &Lit, t: &DataType, collation: &str) -> Result<Value, String> {
+    if t.schema.is_none() && t.name == "sql_variant" {
+        return Ok(variant(lit, collation));
     }
+    if is_clr(t) {
+        return match strip_cast(lit) {
+            Lit::Null => Ok(Value::Null),
+            Lit::Bytes(b) => Ok(Value::Clr(b.clone(), None)),
+            other => Err(format!("Invalid token type for reading binary (expected HexLiteral but got {})", kind_name(other))),
+        };
+    }
+    to_value(strip_cast(lit), t).ok_or_else(|| format!("Invalid value {} for {}", kind_name(lit), t.sql()))
+}
+
+fn strip_cast(lit: &Lit) -> &Lit {
+    match lit {
+        Lit::Cast(inner, ..) | Lit::Collated(inner, _) => strip_cast(inner),
+        other => other,
+    }
+}
+
+fn kind_name(lit: &Lit) -> &'static str {
+    match lit {
+        Lit::Null => "Null",
+        Lit::Number(_) => "Number",
+        Lit::Text(..) => "String",
+        Lit::Bytes(_) => "HexLiteral",
+        Lit::Cast(inner, ..) | Lit::Collated(inner, _) => kind_name(inner),
+    }
+}
+
+/// A sql_variant literal: the base type comes from its CAST or CONVERT, else from the literal
+/// (an integer is numeric, `0x…` image, `'…'` text, `N'…'` ntext, `$…` money; a float has no
+/// base type and reads as NULL). The text is the one a live read gives (CONVERT style 121 for
+/// dates, 3 for floats, 2 for money, upper-case `0x…` for binary).
+fn variant(lit: &Lit, default_collation: &str) -> Value {
+    let (inner, ty, args, collation) = match lit {
+        Lit::Null => return Value::Null,
+        Lit::Cast(inner, ty, args, collation) => (strip_cast(inner), Some(ty.clone()), args.clone(), collation.clone()),
+        Lit::Collated(inner, c) => (strip_cast(inner), None, Vec::new(), Some(c.clone())),
+        other => (other, None, Vec::new(), None),
+    };
+    let raw = match inner {
+        Lit::Null => return Value::Null,
+        Lit::Number(n) => n.clone(),
+        Lit::Text(s, _) => s.clone(),
+        Lit::Bytes(b) => format!("0x{}", b.iter().map(|x| format!("{x:02X}")).collect::<String>()),
+        Lit::Cast(..) | Lit::Collated(..) => return Value::Null,
+    };
+    let base = match ty {
+        Some(t) => t,
+        None => match inner {
+            Lit::Number(n) if n.starts_with('$') || n.starts_with("-$") => "money".into(),
+            Lit::Number(n) if n.contains(['.', 'e', 'E']) => return Value::Null,
+            Lit::Number(_) => "numeric".into(),
+            Lit::Bytes(_) => "image".into(),
+            Lit::Text(_, true) => "ntext".into(),
+            _ => "text".into(),
+        },
+    };
+    let arg = |i: usize| args.get(i).and_then(|a| a.parse::<i32>().ok());
+    let (mut precision, mut scale, mut max_length) = (0u8, 0u8, 0i32);
+    let text = match base.as_str() {
+        "float" | "real" => {
+            let f: f64 = raw.trim().parse().unwrap_or_default();
+            scientific(f, if base == "real" { 9 } else { 17 })
+        }
+        "decimal" | "numeric" | "money" | "smallmoney" => {
+            let s = match base.as_str() {
+                "money" | "smallmoney" => 4,
+                _ => arg(1).unwrap_or_else(|| raw.split_once('.').map_or(0, |(_, f)| f.len() as i32)),
+            };
+            precision = arg(0).unwrap_or(18) as u8;
+            scale = s as u8;
+            let digits = decimal(&raw, s as u8).unwrap_or_default();
+            let neg = digits < 0;
+            let abs = digits.unsigned_abs().to_string();
+            let s = s as usize;
+            let padded = format!("{abs:0>width$}", width = s + 1);
+            let (int, frac) = padded.split_at(padded.len() - s);
+            format!("{}{int}{}{frac}", if neg { "-" } else { "" }, if s > 0 { "." } else { "" })
+        }
+        "binary" | "varbinary" | "image" => {
+            let t = raw.to_ascii_uppercase().replacen("0X", "0x", 1);
+            max_length = arg(0).unwrap_or(((t.len().saturating_sub(2)) / 2) as i32);
+            t
+        }
+        "uniqueidentifier" => raw.trim_matches(['{', '}']).to_ascii_uppercase(),
+        "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" => {
+            let n = arg(0).unwrap_or(raw.encode_utf16().count() as i32);
+            max_length = if base.starts_with('n') { n * 2 } else { n };
+            raw
+        }
+        _ => raw,
+    };
+    let character = matches!(base.as_str(), "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext");
+    let collation = character.then(|| collation.unwrap_or_else(|| default_collation.to_string()));
+    Value::Variant(Box::new(Variant { base_type: base, precision, scale, max_length, collation, text }))
+}
+
+/// `f` as CONVERT style 3 writes it: `digits` significant digits, `e±nnn`.
+fn scientific(f: f64, digits: usize) -> String {
+    let s = format!("{:.*e}", digits - 1, f);
+    let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let e: i32 = exp.parse().unwrap_or(0);
+    format!("{mantissa}e{}{:03}", if e < 0 { '-' } else { '+' }, e.abs())
 }
 
 fn parse_hex(s: &str) -> Option<Vec<u8>> {
@@ -239,14 +439,26 @@ fn literal(t: &[Token], k: usize) -> Result<(Lit, usize), String> {
     let (mut lit, mut k) = term(t, k)?;
     loop {
         if t.get(k).is_some_and(|x| x.text.eq_ignore_ascii_case("COLLATE")) {
+            let c = t.get(k + 1).map(|x| unquote(&x.text)).unwrap_or_default();
+            lit = match lit {
+                Lit::Cast(inner, ty, args, _) => Lit::Cast(inner, ty, args, Some(c)),
+                Lit::Collated(inner, _) => Lit::Collated(inner, c),
+                other => Lit::Collated(Box::new(other), c),
+            };
             k += 2;
             continue;
         }
         if t.get(k).is_some_and(|x| x.text == "+") {
             let (rhs, next) = term(t, k + 1)?;
-            lit = match (lit, rhs) {
-                (Lit::Text(a), Lit::Text(b)) => Lit::Text(a + &b),
-                _ => return Err("only strings are joined with +".into()),
+            // Pieces are joined as text, as SQL Data Compare does (1+2 reads as 12).
+            let piece = |l: Lit| match strip_cast(&l) {
+                Lit::Text(s, n) => Some((s.clone(), *n)),
+                Lit::Number(s) => Some((s.clone(), false)),
+                _ => None,
+            };
+            lit = match (piece(lit), piece(rhs)) {
+                (Some((a, n)), Some((b, m))) => Lit::Text(a + &b, n || m),
+                _ => return Err("Expected a value or NULL".into()),
             };
             k = next;
             continue;
@@ -256,10 +468,10 @@ fn literal(t: &[Token], k: usize) -> Result<(Lit, usize), String> {
 }
 
 fn term(t: &[Token], k: usize) -> Result<(Lit, usize), String> {
-    let tok = t.get(k).ok_or("a value is missing")?;
+    let tok = t.get(k).ok_or("Expected a value or NULL")?;
     let up = tok.text.to_ascii_uppercase();
     match tok.kind {
-        Tok::Str => return Ok((Lit::Text(string_value(&tok.text)), k + 1)),
+        Tok::Str => return Ok((Lit::Text(string_value(&tok.text), tok.text.starts_with(['N', 'n'])), k + 1)),
         Tok::Word if up == "NULL" => return Ok((Lit::Null, k + 1)),
         Tok::Word if up.starts_with("0X") => return Ok((Lit::Bytes(parse_hex(&tok.text).ok_or("bad binary value")?), k + 1)),
         Tok::Word if tok.text.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '.' || c == '$') => {
@@ -277,13 +489,13 @@ fn term(t: &[Token], k: usize) -> Result<(Lit, usize), String> {
             let (inner, next) = term(t, k + 1)?;
             return match inner {
                 Lit::Number(n) => Ok((Lit::Number(if tok.text == "-" { format!("-{n}") } else { n }), next)),
-                _ => Err("a sign before something that is not a number".into()),
+                _ => Err("Expected a value or NULL".into()),
             };
         }
         Tok::Punct if tok.text == "(" => {
             let (inner, next) = literal(t, k + 1)?;
             if !t.get(next).is_some_and(|x| x.text == ")") {
-                return Err("unbalanced parentheses".into());
+                return Err("Expected )".into());
             }
             return Ok((inner, next + 1));
         }
@@ -305,30 +517,65 @@ fn term(t: &[Token], k: usize) -> Result<(Lit, usize), String> {
                     }
                 }
             }
-            end.ok_or("unbalanced parentheses")?
+            end.ok_or("Expected )")?
+        };
+        // A type at `at` with its arguments: (name, args, next index).
+        let type_at = |at: usize| -> (String, Vec<String>, usize) {
+            let name = t.get(at).map(|x| unquote(&x.text).to_ascii_lowercase()).unwrap_or_default();
+            let mut args = Vec::new();
+            let mut j = at + 1;
+            if t.get(j).is_some_and(|x| x.text == "(") {
+                j += 1;
+                while j < close && t[j].text != ")" {
+                    if t[j].text != "," {
+                        args.push(t[j].text.to_ascii_lowercase());
+                    }
+                    j += 1;
+                }
+                j += 1;
+            }
+            (name, args, j)
+        };
+        let constant = |l: &Lit| !matches!(l, Lit::Cast(..));
+        // A COLLATE inside the CAST is the value's collation.
+        let split = |l: Lit| match l {
+            Lit::Collated(inner, c) => (*inner, Some(c)),
+            other => (other, None),
         };
         match up.as_str() {
             "CONVERT" => {
-                let comma = (k + 2..close).find(|&j| t[j].text == ",").ok_or("bad CONVERT")?;
-                let (inner, _) = literal(t, comma + 1)?;
-                return Ok((inner, close + 1));
+                let (ty, args, after) = type_at(k + 2);
+                if !t.get(after).is_some_and(|x| x.text == ",") {
+                    return Err("Expected ,".into());
+                }
+                let (inner, _) = literal(t, after + 1)?;
+                if !constant(&inner) {
+                    return Err("Expected a value or NULL".into());
+                }
+                let (inner, c) = split(inner);
+                return Ok((Lit::Cast(Box::new(inner), ty, args, c), close + 1));
             }
             "CAST" => {
-                let (inner, _) = literal(t, k + 2)?;
-                return Ok((inner, close + 1));
+                let (inner, next) = literal(t, k + 2)?;
+                if !constant(&inner) || !t.get(next).is_some_and(|x| x.text.eq_ignore_ascii_case("AS")) {
+                    return Err("Expected a value or NULL".into());
+                }
+                let (ty, args, _) = type_at(next + 1);
+                let (inner, c) = split(inner);
+                return Ok((Lit::Cast(Box::new(inner), ty, args, c), close + 1));
             }
             "REPLICATE" => {
                 let (inner, next) = literal(t, k + 2)?;
                 let (count, _) = literal(t, next + 1)?;
-                return match (inner, count) {
-                    (Lit::Text(s), Lit::Number(n)) => Ok((Lit::Text(s.repeat(n.parse().unwrap_or(0))), close + 1)),
-                    _ => Err("bad replicate".into()),
+                return match (split(inner).0, count) {
+                    (Lit::Text(s, n), Lit::Number(c)) => Ok((Lit::Text(s.repeat(c.parse().unwrap_or(0)), n), close + 1)),
+                    _ => Err("Expected a value or NULL".into()),
                 };
             }
-            _ => {}
+            _ => return Err(format!("Found invalid function {} - only replicate is allowed in data", tok.text)),
         }
     }
-    Err(format!("'{}' is not a value this reader understands", tok.text))
+    Err(format!("Expected a value or NULL. Found {}", tok.text))
 }
 
 /// Days since 0001-01-01 and nanoseconds since midnight of `yyyy-mm-dd[ hh:mm:ss[.fffffff]]`.
@@ -393,7 +640,7 @@ fn to_value(lit: &Lit, t: &DataType) -> Option<Value> {
         return Some(Value::Null);
     }
     let text = |l: &Lit| match l {
-        Lit::Text(s) | Lit::Number(s) => Some(s.clone()),
+        Lit::Text(s, _) | Lit::Number(s) => Some(s.clone()),
         _ => None,
     };
     Some(match t.name.as_str() {
@@ -424,7 +671,7 @@ fn to_value(lit: &Lit, t: &DataType) -> Option<Value> {
         "binary" | "varbinary" | "image" | "timestamp" => {
             let mut b = match lit {
                 Lit::Bytes(b) => b.clone(),
-                Lit::Text(s) => s.as_bytes().to_vec(),
+                Lit::Text(s, _) => s.as_bytes().to_vec(),
                 _ => return None,
             };
             if t.name == "binary" {
@@ -590,7 +837,7 @@ mod tests {
     fn literals_become_live_values() {
         let v = |s: &str, t: DataType| {
             let toks = significant(s);
-            to_value(&literal(&toks, 0).unwrap().0, &t).unwrap()
+            column_value(&literal(&toks, 0).unwrap().0, &t, "Latin1_General_CI_AS").unwrap()
         };
         assert_eq!(v("-5", ty("int")), Value::Int(-5));
         assert_eq!(v("10.00", ty("money")), Value::Decimal(100000, 4));
@@ -608,5 +855,48 @@ mod tests {
         });
         let g = v("'6f9619ff-8b86-d011-b42d-00c04fc964ff'", ty("uniqueidentifier"));
         assert_eq!(g.display().to_ascii_lowercase(), "6f9619ff-8b86-d011-b42d-00c04fc964ff");
+        // CLR, hierarchyid and spatial values are binary.
+        assert_eq!(v("0x58", ty("hierarchyid")), Value::Clr(vec![0x58], None));
+        let toks = significant("N'/1/'");
+        assert!(column_value(&literal(&toks, 0).unwrap().0, &ty("hierarchyid"), "x").unwrap_err().contains("expected HexLiteral"));
+        // sql_variant: the base type from the CAST, the text as a live read gives it.
+        let var = |s: &str| match v(s, ty("sql_variant")) {
+            Value::Variant(x) => (x.base_type, x.text, x.max_length, x.collation),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(var("CAST(N'hi' AS nvarchar(5)) COLLATE Latin1_General_CS_AS"), ("nvarchar".into(), "hi".into(), 10, Some("Latin1_General_CS_AS".into())));
+        assert_eq!(var("CAST(1.5 AS float)").1, "1.5000000000000000e+000");
+        assert_eq!(var("CAST(1.5 AS decimal(4,2))").1, "1.50");
+        assert_eq!(var("CAST(0x0a0b AS varbinary(2))").1, "0x0A0B");
+        assert_eq!(var("CAST('2020-01-01 00:00:00.000' AS datetime)").1, "2020-01-01 00:00:00.000");
+        assert_eq!(var("5").0, "numeric");
+        assert_eq!(var("N'x'"), ("ntext".into(), "x".into(), 2, Some("Latin1_General_CI_AS".into())));
+        assert_eq!(v("1.5", ty("sql_variant")), Value::Null);
+    }
+
+    #[test]
+    fn non_literal_sql_and_appended_chunks() {
+        let db = Database {
+            tables: vec![Table {
+                schema: "dbo".into(),
+                name: "T".into(),
+                columns: vec![
+                    Column { name: "Id".into(), data_type: ty("int"), ..Default::default() },
+                    Column { name: "Body".into(), data_type: DataType { length: Some(-1), ..ty("nvarchar") }, ..Default::default() },
+                    Column { name: "Stamp".into(), data_type: ty("datetime"), default: Some(Default::default()), ..Default::default() },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = parse_file(&db, "dbo", "x", "INSERT INTO [dbo].[T] ([Id], [Body], [Stamp]) VALUES (1, N'a', GETDATE())").unwrap_err();
+        assert!(err.contains("Found invalid function GETDATE - only replicate is allowed in data"), "{err}");
+        let text = "INSERT INTO [dbo].[T] ([Id], [Body]) VALUES (1, N'ab')\r\nUPDATE [dbo].[T] SET [Body].WRITE(N'cd', NULL, NULL) WHERE [Id] = 1\r\n\
+EXEC(N'INSERT INTO [dbo].[T] ([Id], [Body]) VALUES (2, N''x'')')\r\n";
+        let t = parse_file(&db, "dbo", "x", text).unwrap();
+        let rows = &t[0].1.rows;
+        // A column left out of the INSERT is NULL.
+        assert_eq!(rows[0], vec![Value::Int(1), Value::Str("abcd".into()), Value::Null]);
+        assert_eq!(rows[1][1], Value::Str("x".into()));
     }
 }

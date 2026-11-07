@@ -47,7 +47,7 @@ pub struct Note {
 impl Note {
     /// The column is not compared (rather than a warning about a compared one).
     pub fn not_compared(&self) -> bool {
-        matches!(self.code.as_str(), "type" | "missing" | "exclude")
+        matches!(self.code.as_str(), "type" | "missing" | "exclude" | "computed")
     }
 }
 
