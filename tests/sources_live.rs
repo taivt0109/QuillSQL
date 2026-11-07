@@ -306,3 +306,25 @@ fn the_other_objects_round_trip_through_snapshots() {
     assert_identical(&snp, &live, &opts, "objects snapshot");
     assert_identical(&live, &snp, &opts, "objects snapshot, the other way");
 }
+
+#[test]
+fn certificates_and_keys_round_trip_through_snapshots() {
+    let Some(server) = server() else { return };
+    server.create(
+        "QD_sources_Keys",
+        "CREATE USER KeyUser WITHOUT LOGIN;
+        CREATE CERTIFICATE QuillCert ENCRYPTION BY PASSWORD = 'Str0ng!Pass1' WITH SUBJECT = 'Quill', START_DATE = '20250101', EXPIRY_DATE = '20300101';
+        CREATE SYMMETRIC KEY QuillKey WITH ALGORITHM = AES_256 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+        CREATE ASYMMETRIC KEY QuillAsym WITH ALGORITHM = RSA_2048 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+        GRANT CONTROL ON CERTIFICATE::QuillCert TO KeyUser;
+        GRANT VIEW DEFINITION ON SYMMETRIC KEY::QuillKey TO KeyUser;
+        GRANT CONTROL ON ASYMMETRIC KEY::QuillAsym TO KeyUser;",
+    );
+    let live = catalog::read_database(&server.spec("QD_sources_Keys")).unwrap();
+    server.drop("QD_sources_Keys");
+    assert_eq!((live.certificates.len(), live.symmetric_keys.len(), live.asymmetric_keys.len()), (1, 1, 1));
+    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+    assert_identical(&snp, &live, &Options::default_set(), "keys snapshot");
+    assert_eq!(snp.certificates, live.certificates);
+    assert_eq!(snp.symmetric_keys, live.symmetric_keys);
+}
