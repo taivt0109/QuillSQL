@@ -1049,13 +1049,15 @@ fn selections(request: &Value, result: &DataComparison) -> Result<HashMap<Object
     Ok(out)
 }
 
-/// The comparison with the project's unticked objects left unselected.
-/// The comparison with the project's unticked objects, and what its filter leaves out, unselected
-/// (as `quill schema /project` does).
+/// The comparison with the project's unticked objects (its own, or those of the selection the
+/// SQL Compare window saved), and what its filter leaves out, unselected (as `quill schema
+/// /project` does).
 fn compare_schemas(db1: &Database, db2: &Database, opts: &Options, project: &Project) -> Result<Comparison, String> {
     let mut comparison = schema::compare(db1, db2, opts, &project.schema_mappings);
     for d in &mut comparison.differences {
-        if project.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label())) {
+        if project.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label()))
+            || project.imported_selected(&d.name.schema, &d.name.name) == Some(false)
+        {
             d.selected = false;
         }
     }
@@ -1683,6 +1685,14 @@ mod tests {
         handle(&mut state, &json!({"op": "project_export", "path": scp, "project": filtered_project}), &none).unwrap();
         let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
         assert!(back["filter"].as_str().unwrap().contains("Cust%"));
+
+        // The selection a SQL Compare project saved unticks Customer.
+        let hash: String = crate::project_codec::object_hash("Customer").iter().map(|b| format!("{b:02x}")).collect();
+        let mut picked = project.clone();
+        picked["importedSelection"] = json!({"selectAll": true, "entries": [{"schema": "dbo", "hash": hash, "objectType": 1, "difference": 0, "selected": false}]});
+        let r = handle(&mut state, &json!({"op": "schema_compare", "project": picked}), &none).unwrap();
+        let selected = |n: &str| r["differences"].as_array().unwrap().iter().find(|d| d["name"] == n).unwrap()["selected"].clone();
+        assert_eq!((selected("Customer"), selected("Report")), (json!(false), json!(true)));
 
         // Mapping tabs: the default pairs, then a user mapping and an unmapped default pair.
         let m = handle(&mut state, &json!({"op": "mapping_preview", "project": project}), &none).unwrap();
