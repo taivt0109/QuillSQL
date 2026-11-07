@@ -382,7 +382,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
     }
     let deselected: Vec<crate::catalog::ObjectName> = project.iter().flat_map(|p| p.deselected.iter().map(|d| crate::catalog::ObjectName::new(&d.schema, &d.name))).collect();
-    let result = compare::compare_sides(side(&backup1, &spec1), side(&backup2, &spec2), &db1, &db2, &options, &user, |p| rules.includes(p) && !deselected.contains(&p.source), parallel, |p, r| {
+    let result = compare::compare_sides(compare::Side::of(&backup1, &spec1), compare::Side::of(&backup2, &spec2), &db1, &db2, &options, &user, |p| rules.includes(p) && !deselected.contains(&p.source), parallel, |p, r| {
         if verbose {
             eprintln!("Compared {} ({} rows differ)", p.source, r.count(RowKind::Different) + r.count(RowKind::OnlyIn1) + r.count(RowKind::OnlyIn2));
         }
@@ -473,14 +473,6 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         return Ok(exit::EXECUTION_FAILED);
     }
     Ok(exit::SUCCESS)
-}
-
-/// Where a side's rows come from.
-fn side<'a>(backup: &'a Option<crate::sources::backup::Backup>, spec: &'a ConnectionSpec) -> compare::Side<'a> {
-    match backup {
-        Some(b) => compare::Side::Backup(b),
-        None => compare::Side::Live(spec),
-    }
 }
 
 /// `server.database`, as the summary and the script header name a database.
