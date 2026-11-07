@@ -266,12 +266,6 @@ reason = "quill prints 'not compared: no primary key or unique index' warnings R
 
 [[known]]
 scenario = "data-where-scripts"
-oracle = "check"
-finding = "data H3"
-reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
-
-[[known]]
-scenario = "data-where-scripts"
 oracle = "converge-quill"
 finding = "data H3"
 reason = "Redgate refuses a WHERE clause on a scripts-folder side (table excluded, exit 60); quill compares the whole table (and also ignores the project WHERE clauses, see data-where-live)"
