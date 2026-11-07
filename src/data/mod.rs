@@ -1,6 +1,7 @@
 //! Data compare: pairs tables and keys, reads both sides in key order, merges them and stores
 //! the differing rows, then scripts the changes.
 
+mod backup_rows;
 pub mod compare;
 pub mod mapping;
 pub mod options;

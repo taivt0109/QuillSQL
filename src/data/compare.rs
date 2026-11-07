@@ -66,11 +66,11 @@ pub const LARGE: i64 = 1 << 20;
 
 /// What the server can do, from its version.
 #[derive(Clone, Copy)]
-struct Server {
+pub(super) struct Server {
     /// TRANSLATE (SQL Server 2017).
-    translate: bool,
+    pub(super) translate: bool,
     /// HASHBYTES over more than 8000 bytes (SQL Server 2016).
-    hash: bool,
+    pub(super) hash: bool,
 }
 
 impl Server {
@@ -80,11 +80,44 @@ impl Server {
     }
 }
 
+/// Where one side's rows come from.
+#[derive(Clone, Copy)]
+pub enum Side<'a> {
+    Live(&'a ConnectionSpec),
+    /// A backup set, read without a server.
+    Backup(&'a crate::sources::backup::Backup),
+}
+
+impl<'a> Side<'a> {
+    fn live(self) -> Option<&'a ConnectionSpec> {
+        match self {
+            Side::Live(spec) => Some(spec),
+            Side::Backup(_) => None,
+        }
+    }
+}
+
 /// Which pairs to compare; `include` decides by pair.
 #[allow(clippy::too_many_arguments)]
 pub fn compare(
     spec1: &ConnectionSpec,
     spec2: &ConnectionSpec,
+    db1: &Database,
+    db2: &Database,
+    opts: &DataOptions,
+    user: &DataMappings,
+    include: impl Fn(&TablePair) -> bool,
+    parallel: usize,
+    progress: impl Fn(&TablePair, &TableResult),
+) -> Result<DataComparison, String> {
+    compare_sides(Side::Live(spec1), Side::Live(spec2), db1, db2, opts, user, include, parallel, progress)
+}
+
+/// [`compare`] with either side a live database or a backup.
+#[allow(clippy::too_many_arguments)]
+pub fn compare_sides(
+    side1: Side,
+    side2: Side,
     db1: &Database,
     db2: &Database,
     opts: &DataOptions,
@@ -102,7 +135,7 @@ pub fn compare(
     let (tables, ddl_triggers) = rt.block_on(async {
         let jobs = pairs.into_iter().enumerate().map(|(i, pair)| {
             let path = session.table_path(i);
-            async move { compare_table(spec1, spec2, pair, opts, server, path).await }
+            async move { compare_table(side1, side2, pair, opts, server, path).await }
         });
         let mut done: Vec<TableResult> = futures_util::stream::iter(jobs).buffered(parallel.max(1)).collect().await;
         for r in &done {
@@ -110,7 +143,7 @@ pub fn compare(
         }
         done.sort_by(|a, b| a.pair.source.cmp(&b.pair.source));
         let mut triggers = Vec::new();
-        if opts.has(DataOpt::DisableDdlTriggers) {
+        if let (true, Some(spec2)) = (opts.has(DataOpt::DisableDdlTriggers), side2.live()) {
             let mut c = db::connect_async(spec2).await?;
             let rows = db::query(&mut c, "SELECT name FROM sys.triggers WHERE parent_class = 0 AND is_disabled = 0 AND is_ms_shipped = 0 ORDER BY name").await?;
             triggers = rows.iter().filter_map(|r| r.get::<&str, _>(0).map(str::to_string)).collect();
@@ -120,7 +153,7 @@ pub fn compare(
     Ok(DataComparison { session, tables, only_in_1, only_in_2, ddl_triggers })
 }
 
-async fn compare_table(spec1: &ConnectionSpec, spec2: &ConnectionSpec, pair: TablePair, opts: &DataOptions, server: Server, path: PathBuf) -> TableResult {
+async fn compare_table(side1: Side<'_>, side2: Side<'_>, pair: TablePair, opts: &DataOptions, server: Server, path: PathBuf) -> TableResult {
     let mut result = TableResult {
         pair,
         counts: [0; 4],
@@ -136,10 +169,10 @@ async fn compare_table(spec1: &ConnectionSpec, spec2: &ConnectionSpec, pair: Tab
         result.error = Some(p.clone());
         return result;
     }
-    if let Err(e) = run(spec1, spec2, opts, server, &mut result).await {
+    if let Err(e) = run(side1, side2, opts, server, &mut result).await {
         result.error = Some(e);
     }
-    if opts.has(DataOpt::ReseedIdentity) && result.pair.columns.iter().any(|c| c.identity && c.source_identity) {
+    if let (true, Some(spec1), Some(spec2)) = (opts.has(DataOpt::ReseedIdentity) && result.pair.columns.iter().any(|c| c.identity && c.source_identity), side1.live(), side2.live()) {
         let (a, b) = tokio::join!(ident_current(spec1, &result.pair.source), ident_current(spec2, &result.pair.target));
         result.identity_current = (a, b);
     }
@@ -156,7 +189,7 @@ async fn ident_current(spec: &ConnectionSpec, table: &ObjectName) -> Option<i128
     }
 }
 
-fn family(t: &DataType) -> &'static str {
+pub(super) fn family(t: &DataType) -> &'static str {
     match t.name.as_str() {
         "char" | "varchar" | "nchar" | "nvarchar" | "sysname" | "text" | "ntext" => "string",
         "tinyint" | "smallint" | "int" | "bigint" => "int",
@@ -175,7 +208,7 @@ fn is_lob(t: &DataType) -> bool {
 }
 
 /// The string folding a key column gets on both servers.
-fn key_fold(c: &ColumnPair, opts: &DataOptions) -> Fold {
+pub(super) fn key_fold(c: &ColumnPair, opts: &DataOptions) -> Fold {
     if opts.has(DataOpt::ForceBinaryCollation) {
         return Fold::default();
     }
@@ -218,7 +251,7 @@ fn sort_expr(column: &str, this: &DataType, other: &DataType, fold: Fold, server
 
 /// How a column's value is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shape {
+pub(super) enum Shape {
     /// One value.
     Plain,
     /// sql_variant: base type, precision, scale, max length, collation, text.
@@ -241,7 +274,7 @@ impl Shape {
 }
 
 /// The select-list expressions for a value, and how to read them back.
-fn value_exprs(column: &str, t: &DataType, hash: bool) -> (Vec<String>, Shape) {
+pub(super) fn value_exprs(column: &str, t: &DataType, hash: bool) -> (Vec<String>, Shape) {
     let c = quote(column);
     let plain = match t.name.as_str() {
         "money" => format!("CAST({c} AS decimal(19, 4))"),
@@ -394,7 +427,37 @@ fn size(v: &Value) -> usize {
     }
 }
 
-async fn produce(spec: &ConnectionSpec, sql: String, keys: usize, shapes: Vec<Shape>, tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>) {
+#[allow(clippy::too_many_arguments)]
+async fn produce(
+    from: Side<'_>,
+    pair: &TablePair,
+    side: u8,
+    opts: &DataOptions,
+    server: Server,
+    sql: String,
+    keys: usize,
+    shapes: Vec<Shape>,
+    tx: mpsc::Sender<Result<Vec<Vec<Value>>, String>>,
+) {
+    let spec = match from {
+        Side::Live(spec) => spec,
+        Side::Backup(backup) => {
+            // The rows are read and put in key order up front, then sent like a server's.
+            match super::backup_rows::sorted(backup, pair, side, opts, server, keys) {
+                Ok(rows) => {
+                    for chunk in rows.chunks(CHUNK) {
+                        if tx.send(Ok(chunk.to_vec())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                }
+            }
+            return;
+        }
+    };
     let run = async {
         let mut conn = db::connect_async(spec).await?;
         db::execute(&mut conn, "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED").await?;
@@ -444,7 +507,7 @@ impl Rows {
     }
 }
 
-fn cmp_keys(a: &[Value], b: &[Value], n: usize) -> Ordering {
+pub(super) fn cmp_keys(a: &[Value], b: &[Value], n: usize) -> Ordering {
     (0..n).map(|i| cmp_key(&a[i], &b[i])).find(|o| o.is_ne()).unwrap_or(Ordering::Equal)
 }
 
@@ -461,12 +524,12 @@ fn equality(c: &ColumnPair, opts: &DataOptions) -> Equality {
     }
 }
 
-async fn run(spec1: &ConnectionSpec, spec2: &ConnectionSpec, opts: &DataOptions, server: Server, result: &mut TableResult) -> Result<(), String> {
+async fn run(side1: Side<'_>, side2: Side<'_>, opts: &DataOptions, server: Server, result: &mut TableResult) -> Result<(), String> {
     let pair = &result.pair;
     let keys = pair.key.len();
     let width = pair.columns.len();
     // The checksum shortcut (live databases only, never with identical rows shown).
-    if opts.has(DataOpt::UseChecksumComparison) && !opts.has(DataOpt::IncludeIdenticalRecords) && pair.where1 == pair.where2 {
+    if let (true, Some(spec1), Some(spec2)) = (opts.has(DataOpt::UseChecksumComparison) && !opts.has(DataOpt::IncludeIdenticalRecords) && pair.where1 == pair.where2, side1.live(), side2.live()) {
         let (a, b) = tokio::join!(checksum(spec1, &pair.source), checksum(spec2, &pair.target));
         if let (Some(a), Some(b)) = (a, b)
             && a == b
@@ -480,8 +543,8 @@ async fn run(spec1: &ConnectionSpec, spec2: &ConnectionSpec, opts: &DataOptions,
     let (tx2, rx2) = mpsc::channel(4);
     let (sql1, shapes1) = select_sql(pair, 1, opts, server);
     let (sql2, shapes2) = select_sql(pair, 2, opts, server);
-    let p1 = produce(spec1, sql1, keys, shapes1, tx1);
-    let p2 = produce(spec2, sql2, keys, shapes2, tx2);
+    let p1 = produce(side1, pair, 1, opts, server, sql1, keys, shapes1, tx1);
+    let p2 = produce(side2, pair, 2, opts, server, sql2, keys, shapes2, tx2);
     let mut writer = TableWriter::create(&result.path, opts.has(DataOpt::CompressTemporaryFiles)).map_err(|e| e.to_string())?;
     let store_identical = opts.has(DataOpt::IncludeIdenticalRecords);
     let eq: Vec<Equality> = pair.columns.iter().map(|c| equality(c, opts)).collect();

@@ -78,13 +78,7 @@ fn decimal(b: &[u8], scale: u8) -> Value {
 }
 
 fn money(b: &[u8]) -> i64 {
-    if b.len() == 4 {
-        return i32::from_le_bytes(b[..4].try_into().unwrap()) as i64;
-    }
-    // High four bytes first.
-    let hi = i32::from_le_bytes(b[..4].try_into().unwrap()) as i64;
-    let lo = u32_at(b, 4) as i64;
-    (hi << 32) | lo
+    if b.len() == 4 { i32::from_le_bytes(b[..4].try_into().unwrap()) as i64 } else { i64::from_le_bytes(b[..8].try_into().unwrap()) }
 }
 
 /// Decodes one stored value of column `c`. `complex` marks a pointer to the value elsewhere.
