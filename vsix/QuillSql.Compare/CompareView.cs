@@ -172,6 +172,7 @@ namespace QuillSql.Compare
             if (_session != null && !_session.IsData)
             {
                 _toolsMenu.Items.Add(Ui.MenuItem("Create scripts folder…", async () => await CreateScriptsFolder(), Glyph.Folder));
+                _toolsMenu.Items.Add(Ui.MenuItem("Create snapshot…", async () => { _editor?.Collect(); await Dialogs.CreateSnapshot(_session); }, Glyph.Save));
             }
             if (_schemaResults != null)
             {
@@ -185,6 +186,8 @@ namespace QuillSql.Compare
                 _toolsMenu.Items.Add(new Separator());
                 _toolsMenu.Items.Add(Ui.MenuItem("Save results…", async () => await SaveResults(), Glyph.Save));
             }
+            _toolsMenu.Items.Add(new Separator());
+            _toolsMenu.Items.Add(Ui.MenuItem("Application options…", () => Dialogs.ApplicationOptions(_host.Owner), Glyph.Settings));
         }
 
         private static UIElement Separator()
@@ -610,7 +613,7 @@ namespace QuillSql.Compare
                         if (all) opts.Add("IncludeDependencies");
                         project["options"] = opts;
                         var ids = selected.Concat(all ? new List<object>() : extra.Select(e => (object)e)).ToList();
-                        return await Ui.Try(_host.Owner, () => _engine.RequestObject("schema_script", new JsonObject { ["session"] = session, ["selected"] = ids, ["project"] = project, ["backup"] = backup }));
+                        return await Ui.Try(_host.Owner, () => _engine.RequestObject("schema_script", new JsonObject { ["session"] = session, ["selected"] = ids, ["project"] = project, ["backup"] = backup, ["isolationLevel"] = CompareSettings.Load().IsolationLevel }));
                     });
             }
             else
@@ -639,6 +642,8 @@ namespace QuillSql.Compare
                         ["kinds"] = new List<object> { false, true, true, true },
                         ["selections"] = results.Selections(),
                         ["backup"] = backup,
+                        ["isolationLevel"] = CompareSettings.Load().IsolationLevel,
+                        ["maxTransactionSizeMB"] = CompareSettings.Load().SplitTransactions ? CompareSettings.Load().MaxTransactionSizeMB : 0,
                     })));
             }
             if (folder) wizard.DeployLabel = "Update the scripts folder";

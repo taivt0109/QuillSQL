@@ -7,6 +7,24 @@ use crate::catalog::*;
 use crate::schema::ddl_objects as d;
 use crate::schema::{ObjectType, Opt, Options};
 
+fn xprop_class(t: ObjectType) -> Option<&'static str> {
+    Some(match t {
+        ObjectType::Assembly => "ASSEMBLY",
+        ObjectType::XmlSchemaCollection => "XML SCHEMA COLLECTION",
+        ObjectType::Default => "DEFAULT",
+        ObjectType::Rule => "RULE",
+        ObjectType::PartitionFunction => "PARTITION FUNCTION",
+        ObjectType::PartitionScheme => "PARTITION SCHEME",
+        ObjectType::MessageType => "MESSAGE TYPE",
+        ObjectType::Contract => "CONTRACT",
+        ObjectType::Queue => "QUEUE",
+        ObjectType::Service => "SERVICE",
+        ObjectType::Route => "ROUTE",
+        ObjectType::ServiceBinding => "REMOTE SERVICE BINDING",
+        _ => return None,
+    })
+}
+
 /// GRANT statements on a securable that has a class prefix (`SERVICE::`) or is an object.
 fn grants(db: &Database, class: &str, schema: Option<&str>, name: &str, o: &Options) -> Vec<String> {
     if o.has(Opt::IgnorePermissions) {
@@ -15,12 +33,35 @@ fn grants(db: &Database, class: &str, schema: Option<&str>, name: &str, o: &Opti
     db.permissions.iter().filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == Some(name)).map(Permission::grant_sql).collect()
 }
 
+/// A DDL trigger's file: its text, then its extended properties.
+pub fn ddl_trigger_file(db: &Database, t: &DdlTrigger, o: &Options) -> String {
+    let mut text = script::ddl_trigger(t);
+    if !o.has(Opt::IgnoreExtendedProperties) {
+        let props: Vec<String> = db.extended_properties.iter().filter(|p| p.class == "TRIGGER" && p.schema.is_none() && p.object.as_deref() == Some(t.name.as_str())).map(script::xprop_sql).collect();
+        text.push_str(&script::statements(&props));
+    }
+    text
+}
+
 /// Every object of these kinds with its file content.
 pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
     let key = |ty, s: &str, n: &str| (FileKind::Object(ty), s.to_string(), n.to_string());
     let mut out: Vec<(ObjectKey, String)> = Vec::new();
     let mut add = |k: ObjectKey, mut v: Vec<String>, g: Vec<String>| {
         v.extend(g);
+        // Extended properties of the object.
+        let (FileKind::Object(ty), schema, name) = &k else { return };
+        if let Some(class) = xprop_class(*ty)
+            && !o.has(Opt::IgnoreExtendedProperties)
+        {
+            let scoped = ty.schema_scoped();
+            v.extend(
+                db.extended_properties
+                    .iter()
+                    .filter(|p| p.class == class && p.object.as_deref() == Some(name.as_str()) && (if scoped { p.schema.as_deref() == Some(schema.as_str()) } else { p.schema.is_none() }))
+                    .map(script::xprop_sql),
+            );
+        }
         out.push((k, script::statements(&v)));
     };
     for a in &db.assemblies {
@@ -151,7 +192,24 @@ pub fn apply(db: &mut Database, source: &Database, ty: ObjectType, n1: &ObjectNa
         ObjectType::ExternalTable => scoped!(external_tables),
         _ => return,
     }
-    // Grants on the object follow it.
+    // Extended properties and grants on the object follow it.
+    if let Some(class) = xprop_class(ty).or((ty == ObjectType::DdlTrigger).then_some("TRIGGER")) {
+        let scoped = ty.schema_scoped();
+        let on = |p: &ExtendedProperty, n: &ObjectName| {
+            p.class == class && p.object.as_deref().is_some_and(|o| eq(o, &n.name)) && (if scoped { p.schema.as_deref().is_some_and(|s| eq(s, &n.schema)) } else { p.schema.is_none() })
+        };
+        db.extended_properties.retain(|p| !on(p, n2));
+        if from_source {
+            for p in source.extended_properties.iter().filter(|p| on(p, n1)) {
+                let mut p = p.clone();
+                p.object = Some(n2.name.clone());
+                if scoped {
+                    p.schema = Some(n2.schema.clone());
+                }
+                db.extended_properties.push(p);
+            }
+        }
+    }
     let class = match ty {
         ObjectType::Queue | ObjectType::SecurityPolicy | ObjectType::ExternalTable => "OBJECT",
         ObjectType::XmlSchemaCollection => "XML SCHEMA COLLECTION",

@@ -80,6 +80,9 @@ fn changed() -> String {
         .replace("HISTORY_RETENTION_PERIOD = 6 MONTHS", "HISTORY_RETENTION_PERIOD = 1 YEAR")
         .replace("Name nvarchar(50) NULL,\n    ValidFrom", "Name nvarchar(80) NULL,\n    ValidFrom")
         .replace("GRANT SELECT (Qty) ON", "GRANT SELECT (Yr) ON")
+        .replace("N'CLR helpers', 'ASSEMBLY'", "N'CLR', 'ASSEMBLY'")
+        .replace("N'Queue', 'SCHEMA'", "N'The queue', 'SCHEMA'")
+        .replace("EXEC sp_addextendedproperty N'MS_Description', N'Route', 'ROUTE', N'QuillRoute';\n", "")
 }
 
 fn options() -> Options {
@@ -299,6 +302,90 @@ fn objects_round_trip_through_scripts_folders() {
     let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal).collect();
     assert!(left.is_empty(), "{left:#?}");
     let _ = std::fs::remove_dir_all(&dir);
+    server.drop(a);
+    server.drop(b);
+}
+
+/// Keys, a certificate and a user for it on top of the fixture.
+const KEYS: &str = "CREATE CERTIFICATE QuillCert ENCRYPTION BY PASSWORD = 'Str0ng!Pass1' WITH SUBJECT = 'Quill', EXPIRY_DATE = '20300101';
+GO
+CREATE SYMMETRIC KEY QuillKey WITH ALGORITHM = AES_256 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+GO
+CREATE ASYMMETRIC KEY QuillAsym WITH ALGORITHM = RSA_2048 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
+GO
+CREATE USER QuillCertUser FOR CERTIFICATE QuillCert;";
+
+#[test]
+fn objects_round_trip_through_snapshots() {
+    use quillsql::sources::{snp, snp_write};
+    let Some(server) = server() else { return };
+    let a = "QD_objects_Snap";
+    server.create(a, &format!("{}\nGO\n{KEYS}", objects()));
+    let live = catalog::read_database(&server.spec(a)).unwrap();
+    let identical = |x: &catalog::Database, opts: &Options, what: &str| {
+        let c = schema::compare(x, &live, opts, &Mappings::default());
+        let left: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal).collect();
+        assert!(left.is_empty(), "{what}: {left:#?}");
+    };
+    // Ours, keys and certificates included.
+    let ours = snp::read(&snp_write::write(&live)).unwrap();
+    identical(&ours, &Options::default_set().without(Opt::IgnoreFileGroups), "our snapshot");
+    assert_eq!(ours.certificates, live.certificates);
+    assert_eq!(ours.symmetric_keys, live.symmetric_keys);
+    assert_eq!(ours.asymmetric_keys, live.asymmetric_keys);
+    // SQL Compare's snapshot of the same script, run by sqlcmd (QUOTED_IDENTIFIER off; keys
+    // made then differ).
+    let theirs = snp::read(include_bytes!("fixtures/objects/rg_objects.snp")).unwrap();
+    identical(&theirs, &options().with(Opt::IgnoreQuotedIdentifiersAndAnsiNullSettings), "SQL Compare snapshot");
+    server.drop(a);
+}
+
+fn count(server: &Server, database: &str, sql: &str) -> String {
+    let rt = db::runtime().unwrap();
+    rt.block_on(async {
+        let mut c = db::connect_async(&server.spec(database)).await.unwrap();
+        let rows = db::query(&mut c, sql).await.unwrap();
+        rows[0].get::<&str, _>(0).unwrap_or_default().to_string()
+    })
+}
+
+#[test]
+fn tables_on_recreated_clr_types_and_schemes_are_rebuilt_twice() {
+    let Some(server) = server() else { return };
+    let (a, b) = ("QD_objects_Two1", "QD_objects_Two2");
+    let base = |hex: &str, range: &str| {
+        format!(
+            "CREATE ASSEMBLY QuillClr FROM {} WITH PERMISSION_SET = SAFE;
+            GO
+            CREATE TYPE dbo.Point EXTERNAL NAME QuillClr.Point;
+            GO
+            CREATE TABLE dbo.Shapes (Id int NOT NULL CONSTRAINT PK_Shapes PRIMARY KEY, Pos dbo.Point NULL);
+            GO
+            INSERT INTO dbo.Shapes VALUES (1, CONVERT(dbo.Point, '3,4')), (2, NULL);
+            GO
+            CREATE PARTITION FUNCTION pfYears (int) AS RANGE {range} FOR VALUES (2020, 2021);
+            GO
+            CREATE PARTITION SCHEME psYears AS PARTITION pfYears ALL TO ([PRIMARY]);
+            GO
+            CREATE TABLE dbo.Parted (Id int NOT NULL, Yr int NOT NULL, CONSTRAINT PK_Parted PRIMARY KEY (Id, Yr)) ON psYears (Yr);
+            GO
+            INSERT INTO dbo.Parted VALUES (1, 2019), (2, 2021), (3, 2025);",
+            clr(hex)
+        )
+    };
+    let one = base(include_str!("fixtures/objects/clr.hex"), "RIGHT");
+    let two = base(include_str!("fixtures/objects/clr3.hex"), "LEFT");
+    for (from, to) in [(&two, &one), (&one, &two)] {
+        server.create(a, from);
+        server.create(b, to);
+        let s = converge(&server, a, b, &options());
+        for text in ["Rebuild table (Unbind CLR types and partition schemes) [dbo].[Shapes]", "Rebuild table (Unbind CLR types and partition schemes) [dbo].[Parted]", "DROP ASSEMBLY [QuillClr]", "DROP PARTITION FUNCTION [pfYears]"] {
+            assert!(s.sql.contains(text), "{text}\n{}", s.sql);
+        }
+        assert_eq!(count(&server, b, "SELECT CONVERT(nvarchar(20), Pos.ToString()) FROM dbo.Shapes WHERE Id = 1"), "3,4");
+        assert_eq!(count(&server, b, "SELECT CONVERT(nvarchar(20), COUNT(*)) FROM dbo.Parted"), "3");
+        assert_eq!(count(&server, b, "SELECT CONVERT(nvarchar(20), COUNT(*)) FROM dbo.Shapes"), "2");
+    }
     server.drop(a);
     server.drop(b);
 }

@@ -119,7 +119,7 @@ namespace QuillSql.Compare
                 AutoGenerateColumns = false,
                 CanUserAddRows = false,
                 IsReadOnly = false,
-                SelectionMode = DataGridSelectionMode.Single,
+                SelectionMode = DataGridSelectionMode.Extended,
             };
             var deployColumn = Ui.CheckColumn("Deploy", "Selected", 64);
             deployColumn.Header = HeaderCheck();
@@ -132,6 +132,7 @@ namespace QuillSql.Compare
             _grid.RowStyle = rowStyle;
             _grid.GroupStyle.Add(GroupHeader());
             _grid.SelectionChanged += async (s, e) => await ShowSelected();
+            _grid.ContextMenu = RowMenu();
 
             var counts = _rows.GroupBy(r => r.Kind).ToDictionary(g => g.Key, g => g.Count());
             int n(string k) => counts.TryGetValue(k, out var c) ? c : 0;
@@ -285,6 +286,38 @@ namespace QuillSql.Compare
         private readonly StackPanel _empty;
         private readonly TextBlock _emptyText;
         private readonly int _identical;
+
+        /// <summary>Include or exclude the selected objects, or show the script of one.</summary>
+        private ContextMenu RowMenu()
+        {
+            var menu = new ContextMenu();
+            CompareTheme.Attach(menu);
+            void tick(bool on)
+            {
+                foreach (var r in _grid.SelectedItems.OfType<Row>().Where(r => r.Kind != "Equal")) r.Selected = on;
+                UpdateHeaderCheck();
+            }
+            menu.Items.Add(Ui.MenuItem("Include selected objects", () => tick(true), Glyph.Check));
+            menu.Items.Add(Ui.MenuItem("Exclude selected objects", () => tick(false)));
+            menu.Items.Add(new Separator());
+            menu.Items.Add(Ui.MenuItem("View object deployment script", async () => await ObjectScript(), Glyph.Code));
+            Dialogs.RegisterMenu(menu);
+            return menu;
+        }
+
+        /// <summary>The deployment script of the selected object on its own (with its dependencies, as the options say).</summary>
+        private async System.Threading.Tasks.Task ObjectScript()
+        {
+            if (!(_grid.SelectedItem is Row row) || row.Kind == "Equal") return;
+            var script = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("schema_script", new JsonObject
+            {
+                ["session"] = Session,
+                ["selected"] = new List<object> { row.Index },
+                ["project"] = _session.Project,
+                ["isolationLevel"] = CompareSettings.Load().IsolationLevel,
+            }));
+            if (script != null) Dialogs.ShowScript(_session.Host, "Deployment script for " + row.Name, script.Str("sql"));
+        }
 
         /// <summary>The parser warnings, one per line, to read and copy.</summary>
         private void ShowWarnings(List<string> warnings)

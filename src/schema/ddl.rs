@@ -914,6 +914,8 @@ pub fn xprop_levels(p: &ExtendedProperty, schema_map: impl Fn(&str) -> String) -
     match p.class.as_str() {
         "DATABASE" => {}
         "SCHEMA" => args.push(format!("'SCHEMA', {}", lit(&schema_map(p.schema.as_deref().unwrap_or_default())))),
+        // Database-wide objects (assemblies, Service Broker objects, DDL triggers…) are level 0.
+        class if p.schema.is_none() => args.push(format!("'{class}', {}", lit(p.object.as_deref().unwrap_or_default()))),
         class => {
             args.push(format!("'SCHEMA', {}", lit(&schema_map(p.schema.as_deref().unwrap_or_default()))));
             args.push(format!("'{class}', {}", lit(p.object.as_deref().unwrap_or_default())));

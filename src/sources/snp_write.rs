@@ -9,6 +9,8 @@ use crate::db::quote;
 use crate::schema::ddl::module_sql;
 use crate::schema::text::{Tok, tokenize};
 
+mod objects;
+
 const MAGIC: &str = "SQLCOMPARE";
 const VERSION: f32 = 23.0;
 /// Version of keyed collections and permission lists.
@@ -53,7 +55,6 @@ const OT_MESSAGE_TYPE: u8 = 16;
 const OT_CONTRACT: u8 = 17;
 const OT_CHECK: u8 = 31;
 const OT_SEQUENCE: u8 = 35;
-const OT_ASSEMBLY: u8 = 13;
 
 const SB: &str = "http://schemas.microsoft.com/SQL/ServiceBroker/";
 const SN: &str = "http://schemas.microsoft.com/SQL/Notifications/";
@@ -101,8 +102,6 @@ const CONTRACTS: [(&str, &str, i32, &[Usage]); 6] = [
     ),
     (SB, "ServiceEcho", 4, &[(SB, "ServiceEcho/Echo", true, true)]),
 ];
-/// A contract's message type as written: (`[name]`, sent by initiator, sent by target).
-type MessageUsage = (String, bool, bool);
 /// System queues (dbo) with the object ids they have in every database.
 const QUEUES: [(&str, i32); 3] =
     [("QueryNotificationErrorsQueue", 1_977_058_079), ("EventNotificationErrorsQueue", 2_009_058_193), ("ServiceBrokerQueue", 2_041_058_307)];
@@ -227,8 +226,7 @@ struct W<'a> {
     kinds: HashMap<ObjectName, u8>,
     /// DML triggers by (schema, name) → their parent.
     trigger_parents: HashMap<ObjectName, ObjectName>,
-    /// Contract ids, so a contract listed in a service has the id of its own record.
-    contract_ids: HashMap<String, i32>,
+    early: objects::Early,
 }
 
 impl std::ops::Deref for W<'_> {
@@ -283,7 +281,7 @@ impl<'a> W<'a> {
         for name in trigger_parents.keys() {
             kinds.entry(name.clone()).or_insert(OT_TRIGGER);
         }
-        W { db, b: Buf::default(), cs: db.case_sensitive(), next_id: FIRST_ID, texts: Vec::new(), encrypted: Vec::new(), kinds, trigger_parents, contract_ids: HashMap::new() }
+        W { db, b: Buf::default(), cs: db.case_sensitive(), next_id: FIRST_ID, texts: Vec::new(), encrypted: Vec::new(), kinds, trigger_parents, early: objects::Early::default() }
     }
 
     fn id(&mut self) -> i32 {
@@ -335,8 +333,8 @@ impl<'a> W<'a> {
     fn body(&mut self) {
         let db = self.db;
         let cs = self.cs;
-        // History tables are written inside their system-versioned table.
-        let histories: HashSet<ObjectName> = db.tables.iter().filter_map(|t| t.temporal.as_ref().map(|h| h.history_table.clone())).collect();
+        // History tables of system-versioned tables are written inside them.
+        let histories: HashSet<ObjectName> = db.tables.iter().filter_map(|t| t.temporal.as_ref()).map(|h| h.history_table.clone()).collect();
         let tables: Vec<&Table> = db.tables.iter().filter(|t| !histories.contains(&t.object_name())).collect();
         self.coll(&tables, |w, t| {
             w.u8(0); // ordinary table, not a FileTable
@@ -346,8 +344,8 @@ impl<'a> W<'a> {
         let functions: Vec<&Routine> = db.routines.iter().filter(|r| !is_procedure(r)).collect();
         let procedures: Vec<&Routine> = db.routines.iter().filter(|r| is_procedure(r)).collect();
         self.coll(&functions, |w, r| w.function(r));
-        self.coll(&db.defaults, |w, d| w.default_or_rule(d, "DEFAULT"));
-        self.coll(&db.rules, |w, r| w.default_or_rule(r, "RULE"));
+        self.coll(&db.defaults, |w, d| w.bindable(d, "DEFAULT"));
+        self.coll(&db.rules, |w, r| w.bindable(r, "RULE"));
         self.users();
         self.roles();
         // Alias types before table types, as SQL Compare lists them.
@@ -365,88 +363,43 @@ impl<'a> W<'a> {
         self.eprops_of(&props);
         self.bool(true); // full-text enabled
         self.bool(false); // remote data archive
-        self.empty_coll(); // full-text catalogs
+        self.coll(&db.fulltext_catalogs, W::fulltext_catalog);
         self.bool(cs);
-        // DDL triggers come after the comments store: their text goes in it now.
-        let ddl_triggers: Vec<(&DdlTrigger, i32)> = db
-            .ddl_triggers
-            .iter()
-            .map(|t| {
-                let id = self.id();
-                if t.clr_method.is_none() {
-                    self.text(id, module_sql(&t.definition, "CREATE", &quote(&t.name)), t.encrypted);
-                }
-                (t, id)
-            })
-            .collect();
+        self.early_ids();
         self.comments();
-        // Assembly binaries, one blob per file.
-        let files: Vec<Vec<u8>> = db.assemblies.iter().flat_map(|a| &a.files).map(|f| unhex(&f.content)).collect();
-        let blob_ids: Vec<i32> = files.iter().map(|_| self.id()).collect();
-        self.f32(BLOBS);
-        self.len(files.len());
-        for (bytes, id) in files.iter().zip(&blob_ids) {
-            self.u64(*id as i64 as u64);
-            self.len(bytes.len());
-            self.b.b.extend(bytes);
-        }
+        self.object_blobs();
+        let assemblies: Vec<(usize, &Assembly)> = db.assemblies.iter().enumerate().collect();
+        self.coll(&assemblies, |w, (i, a)| w.assembly(*i, a));
+        self.f32(VERSION); // assembly dependencies
         self.i32(0);
-        // XML schema collection contents, by the collection's id.
-        let xml_ids: Vec<i32> = db.xml_schema_collections.iter().map(|_| self.id()).collect();
-        self.f32(BLOBS);
-        self.len(xml_ids.len());
-        for (x, id) in db.xml_schema_collections.iter().zip(&xml_ids) {
-            self.u64(*id as i64 as u64);
-            self.len(x.definition.len());
-            self.b.b.extend(x.definition.as_bytes());
-        }
-        self.i32(0);
-        let mut blobs = files.iter().zip(blob_ids);
-        let cs = self.cs;
-        self.coll_head(cs, db.assemblies.len());
-        for a in &db.assemblies {
-            let mine: Vec<(&AssemblyFile, &Vec<u8>, i32)> = a.files.iter().filter_map(|f| blobs.next().map(|(b, id)| (f, b, id))).collect();
-            self.assembly(a, &mine);
-        }
-        // Assembly dependencies: the user assemblies each one references.
-        let refs: Vec<(&str, &str)> = db.assemblies.iter().flat_map(|a| a.references.iter().map(move |r| (a.name.as_str(), r.as_str()))).collect();
-        self.f32(VERSION);
-        self.len(refs.len());
-        for (from, to) in refs {
-            self.u8(OT_ASSEMBLY);
-            self.s(&quote(from));
-            self.u8(OT_ASSEMBLY);
-            self.s(&quote(to));
-            self.bool(true);
-        }
         self.coll(&db.synonyms, W::synonym);
-        let xml: Vec<(&XmlSchemaCollection, i32)> = db.xml_schema_collections.iter().zip(xml_ids).collect();
-        self.coll(&xml, |w, (x, id)| w.xml_schema_collection(x, *id));
+        let collections: Vec<(usize, &XmlSchemaCollection)> = db.xml_schema_collections.iter().enumerate().collect();
+        self.coll(&collections, |w, (i, x)| w.xml_collection(*i, x));
         self.message_types();
         self.contracts();
         self.queues();
-        self.services();
+        self.coll(&db.services, W::service);
         self.routes();
-        let db = self.db;
-        self.coll(&db.event_notifications, W::event_notification);
+        let notifications: Vec<&EventNotification> = db.event_notifications.iter().filter(|e| e.queue.is_none()).collect();
+        self.coll(&notifications, |w, e| w.event_notification(e));
         self.coll(&db.partition_functions, W::partition_function);
         self.coll(&db.partition_schemes, W::partition_scheme);
         self.schemas();
         self.empty_coll(); // database-level trigger list
-        self.coll(&ddl_triggers, |w, (t, id)| w.ddl_trigger(t, *id));
+        let triggers: Vec<(usize, &DdlTrigger)> = db.ddl_triggers.iter().enumerate().collect();
+        self.coll(&triggers, |w, (i, t)| w.ddl_trigger(*i, t));
         self.coll(&db.service_bindings, W::service_binding);
         self.coll(&db.certificates, W::certificate);
         self.coll(&db.symmetric_keys, W::symmetric_key);
         self.coll(&db.asymmetric_keys, W::asymmetric_key);
-        self.empty_coll(); // full-text stoplists
+        self.coll(&db.fulltext_stoplists, W::stoplist);
         self.coll(&db.sequences, W::sequence);
-        self.empty_coll(); // search property lists
+        self.coll(&db.search_property_lists, W::property_list);
         self.coll(&db.security_policies, W::security_policy);
-        for _ in 0..4 {
-            // External file formats, external data sources, external tables, database-scoped
-            // credentials.
-            self.empty_coll();
-        }
+        self.coll(&db.external_file_formats, W::file_format);
+        self.coll(&db.external_data_sources, W::data_source);
+        self.coll(&db.external_tables, W::external_table);
+        self.coll(&db.credentials, |w, c| w.s(c));
     }
 
     // --------------------------------------------------------------------------- shared records
@@ -456,32 +409,29 @@ impl<'a> W<'a> {
         self.perms_on(class, Some(schema), object);
     }
 
-    /// Permissions on a securable; `schema` is None for the ones without a schema.
+    /// Permissions on one securable; column permissions with the same grant share a column list.
     fn perms_on(&mut self, class: &str, schema: Option<&str>, object: Option<&str>) {
         let db = self.db;
-        let list: Vec<&Permission> = db
-            .permissions
-            .iter()
-            .filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == object)
-            .filter(|p| statement(&p.state).is_some())
-            .collect();
-        // Column permissions with the same state, action and grantee are one record.
-        let mut records: Vec<(&Permission, Vec<&str>)> = Vec::new();
-        for p in list {
-            match (&p.column, records.iter_mut().find(|(r, cols)| !cols.is_empty() && r.state == p.state && r.permission == p.permission && r.grantee == p.grantee)) {
-                (Some(c), Some((_, cols))) => cols.push(c),
-                (Some(c), None) => records.push((p, vec![c.as_str()])),
-                (None, _) => records.push((p, Vec::new())),
+        let mut list: Vec<(u8, &str, &str, Vec<&str>)> = Vec::new();
+        for p in db.permissions.iter().filter(|p| p.class == class && p.schema.as_deref() == schema && p.object.as_deref() == object) {
+            let Some(st) = statement(&p.state) else { continue };
+            let Some(column) = p.column.as_deref() else {
+                list.push((st, &p.permission, &p.grantee, Vec::new()));
+                continue;
+            };
+            match list.iter_mut().find(|x| x.0 == st && x.1 == p.permission && x.2 == p.grantee && !x.3.is_empty()) {
+                Some(x) => x.3.push(column),
+                None => list.push((st, &p.permission, &p.grantee, vec![column])),
             }
         }
         self.f32(COLL);
-        self.len(records.len());
+        self.len(list.len());
         let cs = self.cs;
-        for (p, columns) in records {
+        for (st, permission, grantee, columns) in list {
             self.f32(VERSION);
-            self.i32(i32::from(statement(&p.state).unwrap_or(GRANT)));
-            self.s(&p.permission);
-            self.s(&p.grantee);
+            self.i32(i32::from(st));
+            self.s(permission);
+            self.s(grantee);
             self.bool(cs);
             self.bool(!columns.is_empty());
             if !columns.is_empty() {
@@ -541,6 +491,8 @@ impl<'a> W<'a> {
             let (types, names): ([Option<&str>; 3], [Option<&str>; 3]) = match p.class.as_str() {
                 "DATABASE" => ([None; 3], [None; 3]),
                 "SCHEMA" => ([Some("SCHEMA"), None, None], [p.schema.as_deref(), None, None]),
+                // Database-wide objects are named at level 0.
+                class if p.schema.is_none() => ([Some(class), None, None], [p.object.as_deref(), None, None]),
                 class => (
                     [Some("SCHEMA"), Some(class), p.minor_type.as_deref()],
                     [p.schema.as_deref(), p.object.as_deref(), p.minor_type.as_ref().and(p.minor_name.as_deref())],
@@ -575,100 +527,6 @@ impl<'a> W<'a> {
         }
     }
 
-    /// Parameters (none are modelled), then the id map.
-    fn no_params(&mut self) {
-        self.empty_coll();
-    }
-
-    /// Parameters, then the id map.
-    fn params(&mut self, list: &[ParamRec]) {
-        let cs = self.cs;
-        self.coll_head(cs, list.len());
-        for p in list {
-            self.param(p);
-        }
-        for p in list {
-            self.i32(p.id);
-            self.s(p.name);
-        }
-    }
-
-    fn param(&mut self, p: &ParamRec) {
-        let t = &p.ty;
-        let ty = facets(self.db, t);
-        self.f32(VERSION);
-        self.i32(ty.sql_type);
-        self.s(p.name);
-        self.i32(ty.size);
-        self.i32(ty.scale);
-        self.i32(ty.precision);
-        self.s(&ty.type_name);
-        self.s(if ty.type_schema.is_empty() { "sys" } else { &ty.type_schema });
-        self.bool(p.default.is_some());
-        self.s(p.default.unwrap_or("NULL"));
-        self.bool(p.output);
-        self.bool(t.xml_document);
-        self.str(t.xml_collection.as_deref());
-        self.str(ty.udt.as_deref());
-    }
-
-    /// A CLR module's parameters, numbered from 1.
-    fn clr_params(&mut self, r: &Routine) {
-        let list: Vec<ParamRec> = r
-            .parameters
-            .iter()
-            .enumerate()
-            .map(|(i, p)| ParamRec {
-                id: i32::try_from(i + 1).unwrap_or(i32::MAX),
-                name: &p.name,
-                ty: parse_type(&p.data_type),
-                output: p.output,
-                default: p.default.as_deref(),
-            })
-            .collect();
-        self.params(&list);
-    }
-
-    fn partition_function(&mut self, f: &PartitionFunction) {
-        let cs = self.cs;
-        self.f32(VERSION);
-        self.s(&f.name);
-        self.s("dbo");
-        let id = self.id();
-        self.i32(id);
-        self.bool(cs);
-        self.bool(f.range_right);
-        // SQL Compare looks the input type up as parameter 0.
-        self.params(&[ParamRec { id: 0, name: "", ty: f.data_type.clone(), output: false, default: None }]);
-        self.no_eprops();
-        self.len(f.boundaries.len());
-        for b in &f.boundaries {
-            let value = boundary_text(b);
-            self.bool(value.is_none());
-            if let Some(v) = value {
-                self.s(&v);
-            }
-        }
-        self.no_ss(1);
-    }
-
-    fn partition_scheme(&mut self, s: &PartitionScheme) {
-        self.f32(VERSION);
-        self.s(&s.name);
-        self.s("dbo");
-        let id = self.id();
-        self.i32(id);
-        self.s(&quote(&s.function));
-        self.no_eprops();
-        self.f32(COLL);
-        self.len(s.filegroups.len());
-        for fg in &s.filegroups {
-            self.f32(COLL);
-            self.s(fg);
-        }
-        self.no_ss(1);
-    }
-
     fn execute_as(&mut self, who: Option<&str>) {
         match who {
             None => self.i32(0),
@@ -694,18 +552,41 @@ impl<'a> W<'a> {
         }
     }
 
-    fn compression(&mut self, list: &[PartitionCompression]) {
+    /// Compression by partition; partitioned storage lists every partition, as SQL Compare does.
+    fn compression(&mut self, storage: &Storage) {
+        let list = &storage.compression;
+        let code = |c: &str| match c {
+            "ROW" => 1,
+            "PAGE" => 2,
+            "COLUMNSTORE" => 3,
+            "COLUMNSTORE_ARCHIVE" => 4,
+            _ => 0,
+        };
+        let partitions = self.partitions(storage);
+        if partitions > 0 {
+            self.len(partitions);
+            for n in 1..=partitions {
+                let c = list.iter().find(|p| p.partition as usize == n).or_else(|| list.iter().find(|p| p.partition == 0));
+                self.len(n);
+                self.u8(c.map_or(0, |c| code(&c.compression)));
+            }
+            return;
+        }
         self.len(list.len());
         for p in list {
             self.len(p.partition.max(1) as usize);
-            self.u8(match p.compression.as_str() {
-                "ROW" => 1,
-                "PAGE" => 2,
-                "COLUMNSTORE" => 3,
-                "COLUMNSTORE_ARCHIVE" => 4,
-                _ => 0,
-            });
+            self.u8(code(&p.compression));
         }
+    }
+
+    /// Partitions of storage on a partition scheme; 0 when not partitioned.
+    fn partitions(&self, storage: &Storage) -> usize {
+        let db = self.db;
+        if storage.partition_column.is_none() {
+            return 0;
+        }
+        let scheme = storage.data_space.as_deref().and_then(|d| db.partition_schemes.iter().find(|s| s.name == d));
+        scheme.and_then(|s| db.partition_functions.iter().find(|f| f.name == s.function)).map_or(0, |f| f.boundaries.len() + 1)
     }
 
     // --------------------------------------------------------------------------- tables
@@ -729,14 +610,7 @@ impl<'a> W<'a> {
         }
         let mut indexes: Vec<&Index> = t.indexes.iter().filter(|i| i.kind != IndexKind::Heap).collect();
         indexes.sort_by_key(|i| (index_rank(i), i.name.clone()));
-        // Statistics are index records of their own kind.
-        self.coll_head(cs, indexes.len() + t.statistics.len());
-        for ix in indexes {
-            self.index(t, ix, rec.type_table);
-        }
-        for s in &t.statistics {
-            self.statistic(s);
-        }
+        self.indexes(t, &indexes, &t.statistics, rec.type_table);
         self.coll(&t.foreign_keys, |w, fk| w.foreign_key(t, fk));
         self.coll(&t.check_constraints, |w, ck| w.check(t, ck));
         let parent = t.object_name().quoted();
@@ -746,7 +620,8 @@ impl<'a> W<'a> {
         let columns = sorted_columns(&t.columns);
         self.coll(&columns, |w, c| w.column(t, c));
         let partitioned = t.storage.partition_column.is_some();
-        self.str(t.storage.data_space.as_deref().filter(|_| !rec.type_table));
+        // Partitioned tables name their scheme further on, not as their filegroup.
+        self.str(t.storage.data_space.as_deref().filter(|_| !rec.type_table && !partitioned));
         self.str(t.text_filegroup.as_deref().filter(|_| !rec.type_table));
         self.bool(partitioned);
         if let Some(pc) = &t.storage.partition_column {
@@ -755,7 +630,7 @@ impl<'a> W<'a> {
         self.str(t.storage.data_space.as_deref().filter(|_| partitioned).map(quote).as_deref());
         self.bool(false); // system object
         self.str(t.filestream_filegroup.as_deref());
-        self.compression(&t.storage.compression);
+        self.compression(&t.storage);
         self.str(None); // authorization
         self.u8(match &t.change_tracking {
             None => 0,
@@ -810,6 +685,18 @@ impl<'a> W<'a> {
         self.bool(false); // large value types out of row
         self.coll(&t.edge_constraints, W::edge_constraint);
         self.i32(0); // ALTER TABLE SET script sources
+    }
+
+    /// Indexes, then statistics, which SQL Compare keeps in the same list.
+    fn indexes(&mut self, t: &Table, indexes: &[&Index], statistics: &[Statistic], type_table: bool) {
+        let cs = self.cs;
+        self.coll_head(cs, indexes.len() + statistics.len());
+        for ix in indexes {
+            self.index(t, ix, type_table);
+        }
+        for s in statistics {
+            self.statistic(s, t.storage.data_space.as_deref());
+        }
     }
 
     /// The column a partitioned table or index is split on.
@@ -937,61 +824,14 @@ impl<'a> W<'a> {
         self.str(None);
     }
 
-    /// A column's data classification (the format has no rank).
+    /// A data classification; the rank is not kept.
     fn sensitivity(&mut self, s: Option<&Sensitivity>) {
         self.f32(VERSION);
-        for x in [s.and_then(|s| s.label.as_deref()), s.and_then(|s| s.label_id.as_deref()), s.and_then(|s| s.information_type.as_deref()), s.and_then(|s| s.information_type_id.as_deref())] {
-            self.str(x);
+        let parts = s.map(|s| [&s.label, &s.label_id, &s.information_type, &s.information_type_id]);
+        for i in 0..4 {
+            self.str(parts.and_then(|p| p[i].as_deref()));
         }
         self.no_ss(5);
-    }
-
-    /// A CREATE STATISTICS object, as an index record of kind 1.
-    fn statistic(&mut self, s: &Statistic) {
-        let cs = self.cs;
-        self.f32(VERSION);
-        self.u8(1);
-        self.bool(cs);
-        self.s(&s.name);
-        self.len(s.columns.len());
-        for c in &s.columns {
-            self.s(c);
-            self.bool(false);
-            self.bool(false);
-            self.i32(0);
-        }
-        let mut flags = 0x0Ci16;
-        if s.no_recompute {
-            flags |= 0x2;
-        }
-        if s.incremental {
-            flags |= 0x100;
-        }
-        self.i16(flags);
-        self.s("PRIMARY");
-        self.u8(0); // fill factor
-        self.i32(0);
-        self.bool(false); // system named
-        self.no_ss(3);
-        self.bool(false); // FileTable primary key
-        self.f32(7.5);
-        self.str(s.filter.as_deref());
-    }
-
-    fn edge_constraint(&mut self, e: &EdgeConstraint) {
-        self.f32(VERSION);
-        self.s(&e.name);
-        self.bool(e.disabled);
-        let id = self.id();
-        self.i32(id);
-        self.bool(e.not_trusted);
-        self.len(e.connections.len());
-        for (from, to) in &e.connections {
-            self.s(&from.quoted());
-            self.s(&to.quoted());
-        }
-        self.bool(e.system_named);
-        self.no_ss(2);
     }
 
     fn index(&mut self, t: &Table, ix: &Index, type_table: bool) {
@@ -1061,7 +901,7 @@ impl<'a> W<'a> {
                     self.partition_field(t, ix.storage.partition_column.as_deref().unwrap_or_default());
                 }
                 self.str(ix.filter.as_deref());
-                self.compression(&ix.storage.compression);
+                self.compression(&ix.storage);
                 self.bool(columnstore);
                 self.bool(ix.kind == IndexKind::NonclusteredHash);
                 self.i32(ix.bucket_count.and_then(|n| i32::try_from(n).ok()).unwrap_or(0));
@@ -1236,7 +1076,6 @@ impl<'a> W<'a> {
         self.s(&r.schema);
         self.i32(if clr { -1 } else { id });
         self.perms("OBJECT", &r.schema, Some(&r.name));
-        // CLR modules have no SET options.
         self.bool(r.settings.quoted_identifier && !clr);
         self.bool(r.settings.ansi_nulls && !clr);
         self.i32(id);
@@ -1256,28 +1095,10 @@ impl<'a> W<'a> {
         self.bool(r.encrypted);
         self.bool(false); // recursive
         self.clr_binding(r.clr_method.as_deref());
-        self.len(r.result_columns.len());
-        if !r.result_columns.is_empty() {
-            let t = Table { schema: r.schema.clone(), name: r.name.clone(), columns: r.result_columns.clone(), ..Default::default() };
-            self.coll_head(cs, t.columns.len());
-            for c in &t.columns {
-                self.column(&t, c);
-            }
-        }
+        self.result_columns(r);
         self.bool(clr);
-        if clr {
-            self.clr_params(r);
-        } else {
-            self.no_params();
-        }
-        match r.returns.as_deref().filter(|_| clr) {
-            Some(ty) => {
-                self.bool(true);
-                // The return value is parameter 0, an OUTPUT one.
-                self.param(&ParamRec { id: 0, name: "", ty: parse_type(ty), output: true, default: None });
-            }
-            None => self.bool(false),
-        }
+        self.params(&r.parameters);
+        self.returns(r.returns.as_deref());
         self.bool(false); // system object
         self.bool(r.null_on_null_input);
         self.str(None); // authorization
@@ -1300,8 +1121,8 @@ impl<'a> W<'a> {
         self.eprops_of(&refs);
     }
 
-    /// CLR assembly, class and method: `[a].[b].[c]`.
-    /// `[assembly]`, then the class and the method as the assembly names them.
+    /// CLR assembly, class and method of `[a].[b].[c]`: the assembly quoted, the others as
+    /// sys.assembly_modules has them.
     fn clr_binding(&mut self, method: Option<&str>) {
         let parts = method.map(split_multipart).unwrap_or_default();
         self.str(parts.first().map(|a| quote(a)).as_deref());
@@ -1337,11 +1158,7 @@ impl<'a> W<'a> {
         // SQL Compare leaves EXECUTE AS of procedures to the module text.
         self.i32(0);
         self.clr_binding(r.clr_method.as_deref());
-        if clr {
-            self.clr_params(r);
-        } else {
-            self.no_params();
-        }
+        self.params(&r.parameters);
         self.str(None); // authorization
         self.i32(0); // schema-bound tables
         self.i32(0); // numbered procedures
@@ -1366,7 +1183,7 @@ impl<'a> W<'a> {
         let host = Table { schema: v.schema.clone(), name: v.name.clone(), columns: v.columns.clone(), ..Default::default() };
         let mut indexes: Vec<&Index> = v.indexes.iter().collect();
         indexes.sort_by_key(|i| (index_rank(i), i.name.clone()));
-        self.coll(&indexes, |w, ix| w.index(&host, ix, false));
+        self.indexes(&host, &indexes, &v.statistics, false);
         self.coll(&v.triggers, |w, tr| w.trigger(&v.schema, &name, tr));
         self.bool(cs);
         // Index columns must name output columns: models read from snapshots have none.
@@ -1434,12 +1251,11 @@ impl<'a> W<'a> {
         self.strs(&tables);
         self.i32(0); // functions using it
         self.i32(0); // procedures using it
-        // The assembly quoted, the class as it is named in the assembly.
         let (assembly, class) = match t.clr_class.as_deref().map(split_multipart).as_deref() {
-            Some([a, rest @ ..]) if !rest.is_empty() => (quote(a), Some(rest.join("."))),
+            Some([a, rest @ ..]) if !rest.is_empty() => (a.clone(), Some(rest.join("."))),
             _ => (String::new(), None),
         };
-        self.s(&assembly);
+        self.s(&if assembly.is_empty() { assembly } else { quote(&assembly) });
         self.str(class.as_deref());
         if t.kind == UserTypeKind::Table {
             let id = self.id();
@@ -1455,7 +1271,7 @@ impl<'a> W<'a> {
             };
             self.table(&TableRec { t: &table, object_id: id, type_table: true });
         }
-        self.perms_on("TYPE", Some(&t.schema), Some(&t.name));
+        self.perms("TYPE", &t.schema, Some(&t.name));
         self.str(None); // authorization
         self.no_ss(2);
         self.i32(0); // user types used
@@ -1502,53 +1318,6 @@ impl<'a> W<'a> {
         self.no_ss(2);
     }
 
-    fn ddl_trigger(&mut self, t: &DdlTrigger, id: i32) {
-        let cs = self.cs;
-        self.f32(VERSION);
-        self.s(&t.name);
-        self.str(None);
-        self.i32(id);
-        self.bool(cs);
-        self.bool(t.disabled);
-        self.bool(t.clr_method.is_some());
-        self.bool(t.settings.quoted_identifier);
-        self.bool(t.settings.ansi_nulls);
-        self.i32(id);
-        let codes: Vec<i32> = t.events.iter().filter_map(|e| super::snp_events::code(e)).collect();
-        self.coll_head(cs, codes.len());
-        for c in codes {
-            self.i32(c);
-        }
-        let method = t.clr_method.as_deref().map(split_multipart).unwrap_or_default();
-        for i in 0..3 {
-            self.str(method.get(i).map(String::as_str));
-        }
-        self.execute_as(t.execute_as.as_deref());
-        self.no_eprops();
-        self.bool(t.encrypted);
-        self.no_ss(1);
-    }
-
-    /// A CREATE DEFAULT or CREATE RULE object; `kind` is the extended-property level-1 type.
-    fn default_or_rule(&mut self, d: &BindableObject, kind: &str) {
-        self.f32(VERSION);
-        self.s(&d.name);
-        self.s(&d.schema);
-        let id = self.id();
-        self.i32(id);
-        // SQL Compare keeps the name in the header as [schema].[name].
-        self.s(&module_sql(&d.definition, "CREATE", &qualified(&d.schema, &d.name)));
-        let db = self.db;
-        let props: Vec<ExtendedProperty> = db
-            .extended_properties
-            .iter()
-            .filter(|p| p.class == "OBJECT" && p.schema.as_deref() == Some(d.schema.as_str()) && p.object.as_deref() == Some(d.name.as_str()))
-            .map(|p| ExtendedProperty { class: kind.into(), ..p.clone() })
-            .collect();
-        self.eprops_of(&props.iter().collect::<Vec<_>>());
-        self.no_ss(1);
-    }
-
     // --------------------------------------------------------------------------- security
 
     fn users(&mut self) {
@@ -1557,8 +1326,8 @@ impl<'a> W<'a> {
         let cs = self.cs;
         self.coll_head(cs, users.len() + 2);
         // dbo and guest, then the database's own users.
-        self.user("dbo", None, 1, Some("dbo"), true);
-        self.user("guest", None, 1, Some("guest"), false);
+        self.user(&Principal { name: "dbo".into(), login: db.owner.clone(), default_schema: Some("dbo".into()), ..Default::default() }, 1, true);
+        self.user(&Principal { name: "guest".into(), default_schema: Some("guest".into()), ..Default::default() }, 1, false);
         for p in users {
             let user_type = match p.kind.as_str() {
                 "WINDOWS_USER" | "WINDOWS_GROUP" => 2,
@@ -1568,21 +1337,21 @@ impl<'a> W<'a> {
                 _ => 1,
             };
             let denied = self.db.permissions.iter().any(|x| x.class == "DATABASE" && x.grantee == p.name && x.permission.eq_ignore_ascii_case("CONNECT"));
-            self.user(&p.name, p.login.as_deref(), user_type, p.default_schema.as_deref(), !p.no_connect && !denied);
+            self.user(p, user_type, !p.no_connect && !denied);
         }
     }
 
-    fn user(&mut self, name: &str, login: Option<&str>, user_type: i32, default_schema: Option<&str>, connect: bool) {
+    fn user(&mut self, p: &Principal, user_type: i32, connect: bool) {
         self.f32(VERSION);
-        self.s(name);
-        self.str(login);
+        self.s(&p.name);
+        self.str(p.login.as_deref());
         self.i32(user_type);
-        self.str(None); // certificate
-        self.str(None); // asymmetric key
-        self.str(default_schema);
+        self.str(p.certificate.as_deref());
+        self.str(p.asymmetric_key.as_deref());
+        self.str(p.default_schema.as_deref());
         self.no_eprops();
         self.no_perms();
-        self.db_perms(name, connect);
+        self.db_perms(&p.name, connect);
         self.no_ss(1);
     }
 
@@ -1593,10 +1362,10 @@ impl<'a> W<'a> {
         self.coll_head(cs, roles.len() + 1 + FIXED_ROLES.len());
         self.role("public", Some("dbo"), false);
         for p in roles {
-            // An application role's owner field holds its default schema.
-            let app_role = p.kind == "APPLICATION_ROLE";
-            let owner = if app_role { p.default_schema.as_deref().unwrap_or("dbo") } else { p.owner.as_deref().unwrap_or("dbo") };
-            self.role(&p.name, Some(owner), app_role);
+            // Application roles keep their default schema where roles keep their owner.
+            let app = p.kind == "APPLICATION_ROLE";
+            let owner = if app { p.default_schema.as_deref() } else { Some(p.owner.as_deref().unwrap_or("dbo")) };
+            self.role(&p.name, owner, app);
         }
         for r in FIXED_ROLES {
             self.role(r, Some("dbo"), false);
@@ -1655,8 +1424,8 @@ impl<'a> W<'a> {
     // --------------------------------------------------------------------------- Service Broker
 
     fn message_types(&mut self) {
-        let cs = self.cs;
         let db = self.db;
+        let cs = self.cs;
         self.coll_head(cs, MESSAGE_TYPES.len() + db.message_types.len());
         for (i, (prefix, name, validation, contract)) in MESSAGE_TYPES.into_iter().enumerate() {
             self.f32(VERSION);
@@ -1673,86 +1442,41 @@ impl<'a> W<'a> {
             self.no_ss(2);
         }
         for m in &db.message_types {
-            self.f32(VERSION);
-            self.s(&m.name);
-            self.str(m.owner.as_deref());
-            let id = self.id();
-            self.i32(id);
-            self.bool(cs);
-            self.i32(match m.validation.as_str() {
-                "WELL_FORMED_XML" | "VALID_XML" => 1,
-                "EMPTY" => 2,
-                _ => 0,
-            });
-            self.str(m.xml_collection.as_deref());
-            self.no_eprops();
-            self.perms_on("MESSAGE TYPE", None, Some(&m.name));
-            let contracts: Vec<String> =
-                db.contracts.iter().filter(|c| c.messages.iter().any(|u| u.message_type == m.name)).map(|c| quote(&c.name)).collect();
-            self.strs(&contracts);
-            self.no_ss(2);
+            self.message_type(m);
         }
     }
 
     fn contracts(&mut self) {
-        let cs = self.cs;
         let db = self.db;
+        let cs = self.cs;
         self.coll_head(cs, CONTRACTS.len() + db.contracts.len());
-        for (prefix, name, _, _) in CONTRACTS {
-            self.contract(&format!("{prefix}{name}"));
-        }
-        for c in &db.contracts {
-            self.contract(&c.name);
-        }
-    }
-
-    /// A contract record: a system one, or one of the model's.
-    fn contract(&mut self, name: &str) {
-        let cs = self.cs;
-        let db = self.db;
-        let (owner, id, system, usages): (Option<&str>, i32, bool, Vec<MessageUsage>) =
-            match CONTRACTS.iter().find(|(p, n, _, _)| format!("{p}{n}") == name) {
-                Some((_, _, id, usages)) => (Some("dbo"), *id, true, usages.iter().map(|(p, n, i, t)| (format!("[{p}{n}]"), *i, *t)).collect()),
-                None => {
-                    let c = db.contracts.iter().find(|c| c.name == name);
-                    let usages = c
-                        .map(|c| c.messages.iter().map(|m| (quote(&m.message_type), m.sent_by != "TARGET", m.sent_by != "INITIATOR")).collect())
-                        .unwrap_or_default();
-                    let id = *self.contract_ids.entry(name.to_string()).or_insert_with(|| {
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        id
-                    });
-                    (c.and_then(|c| c.owner.as_deref()), id, false, usages)
-                }
-            };
-        self.f32(VERSION);
-        self.s(name);
-        self.str(owner);
-        self.i32(id);
-        self.no_eprops();
-        self.bool(system);
-        self.bool(cs);
-        self.coll_head(cs, usages.len());
-        for (m, initiator, target) in usages {
-            self.s(&m);
-            self.bool(initiator);
-            self.bool(target);
-        }
-        if system {
+        for (prefix, name, id, usages) in CONTRACTS {
+            self.f32(VERSION);
+            self.s(&format!("{prefix}{name}"));
+            self.s("dbo");
+            self.i32(id);
+            self.no_eprops();
+            self.bool(true); // system object
+            self.bool(cs);
+            self.coll_head(cs, usages.len());
+            for (p, n, initiator, target) in usages {
+                self.s(&format!("[{p}{n}]"));
+                self.bool(*initiator);
+                self.bool(*target);
+            }
             self.no_perms();
-        } else {
-            self.perms_on("CONTRACT", None, Some(name));
+            self.i32(0); // services
+            self.no_ss(2);
         }
-        let services: Vec<String> = db.services.iter().filter(|s| s.contracts.iter().any(|c| c == name)).map(|s| quote(&s.name)).collect();
-        self.strs(&services);
-        self.no_ss(2);
+        for k in &db.contracts {
+            self.contract(k);
+        }
     }
 
     fn queues(&mut self) {
+        let db = self.db;
         let cs = self.cs;
-        let n = QUEUES.len() + self.db.queues.len();
-        self.coll_head(cs, n);
+        self.coll_head(cs, QUEUES.len() + db.queues.len());
         for (name, id) in QUEUES {
             self.f32(VERSION);
             self.s(name);
@@ -1776,235 +1500,14 @@ impl<'a> W<'a> {
             self.bool(false); // poison message handling
             self.no_ss(2);
         }
-        let db = self.db;
         for q in &db.queues {
-            self.f32(VERSION);
-            self.s(&q.name);
-            self.s(&q.schema);
-            let id = self.id();
-            self.i32(id);
-            self.bool(false); // system object
-            self.bool(cs);
-            let a = q.activation.as_ref();
-            self.i16(a.map_or(0, |a| i16::try_from(a.max_readers).unwrap_or(i16::MAX)));
-            self.str(a.map(|a| a.procedure.as_str()));
-            self.execute_as(a.and_then(|a| a.execute_as.as_deref()));
-            self.bool(a.is_some_and(|a| a.enabled));
-            self.bool(q.enabled); // receive
-            self.bool(q.enabled); // enqueue
-            self.bool(q.retention);
-            self.str(q.filegroup.as_deref());
-            self.no_eprops();
-            self.coll(&q.event_notifications, W::event_notification);
-            let me = ObjectName::new(&q.schema, &q.name);
-            let services: Vec<String> = db.services.iter().filter(|s| s.queue == me).map(|s| quote(&s.name)).collect();
-            self.strs(&services);
-            self.str(q.owner.as_deref());
-            self.perms("OBJECT", &q.schema, Some(&q.name));
-            self.bool(q.poison_message_handling);
-            self.no_ss(2);
+            self.queue(q);
         }
-    }
-
-    fn services(&mut self) {
-        let cs = self.cs;
-        let db = self.db;
-        self.coll_head(cs, db.services.len());
-        for s in &db.services {
-            self.f32(VERSION);
-            self.s(&s.name);
-            self.str(s.owner.as_deref());
-            let id = self.id();
-            self.i32(id);
-            self.bool(false); // system object
-            self.bool(cs);
-            self.s(&s.queue.quoted());
-            self.coll_head(cs, s.contracts.len());
-            for c in &s.contracts {
-                self.contract(c);
-            }
-            self.no_eprops();
-            self.perms_on("SERVICE", None, Some(&s.name));
-            self.empty_coll(); // event notifications
-            self.no_ss(2);
-        }
-    }
-
-    fn event_notification(&mut self, en: &EventNotification) {
-        let cs = self.cs;
-        self.f32(VERSION);
-        self.s(&en.name);
-        self.str(None); // owner
-        let id = self.id();
-        self.i32(id);
-        self.bool(cs);
-        self.s(&en.service);
-        self.s(&en.broker_instance);
-        self.bool(en.fan_in);
-        let codes: Vec<i32> = en.events.iter().filter_map(|e| super::snp_events::code(e)).collect();
-        self.coll_head(cs, codes.len());
-        for c in codes {
-            self.i32(c);
-        }
-        self.no_eprops();
-        self.no_ss(1);
-    }
-
-    /// An assembly with its files: (file, bytes, blob id).
-    fn assembly(&mut self, a: &Assembly, files: &[(&AssemblyFile, &Vec<u8>, i32)]) {
-        let cs = self.cs;
-        self.u8(0xFF);
-        self.f32(VERSION);
-        self.s(&a.name);
-        self.str(a.owner.as_deref());
-        let id = self.id();
-        self.i32(id);
-        self.bool(cs);
-        self.no_eprops();
-        // The module version id of the main image, which SQL Compare compares.
-        let mvid = files.first().and_then(|(_, b, _)| mvid(b)).unwrap_or([0; 16]);
-        self.b.b.extend(mvid);
-        self.s(&a.clr_name);
-        self.bool(a.visible);
-        self.len(files.len());
-        for (f, bytes, blob) in files {
-            self.u8(0xFF);
-            self.f32(VERSION);
-            self.s(&f.name);
-            self.u64(*blob as i64 as u64);
-            self.len(bytes.len());
-            self.no_ss(1);
-        }
-        self.i32(match a.permission_set.as_str() {
-            "EXTERNAL_ACCESS" => 2,
-            "UNSAFE" => 3,
-            _ => 1,
-        });
-        self.perms_on("ASSEMBLY", None, Some(&a.name));
-        self.no_ss(3);
-    }
-
-    fn certificate(&mut self, c: &Certificate) {
-        self.f32(VERSION);
-        self.s(&c.name);
-        self.str(c.owner.as_deref());
-        self.i32(key_encryption(&c.private_key));
-        self.bool(c.active_for_dialog);
-        self.s(&c.issuer);
-        self.s(&c.subject);
-        self.i64(text_ticks(&c.start_date).unwrap_or(0));
-        self.i64(text_ticks(&c.expiry_date).unwrap_or(0));
-        self.str(None); // serial number
-        let thumbprint = unhex(&c.thumbprint);
-        self.len(thumbprint.len());
-        self.b.b.extend(thumbprint);
-        self.perms_on("CERTIFICATE", None, Some(&c.name));
-        self.no_ss(2);
-    }
-
-    fn symmetric_key(&mut self, k: &SymmetricKey) {
-        self.f32(VERSION);
-        self.s(&k.name);
-        self.str(k.owner.as_deref());
-        self.i64(text_ticks(&k.modify_date).unwrap_or(0));
-        self.i64(text_ticks(&k.create_date).unwrap_or(0));
-        self.b.b.extend(guid_bytes(&k.key_guid));
-        self.i32(k.key_length);
-        self.i32(match k.algorithm.as_str() {
-            "RC2" => 1,
-            "RC4" => 2,
-            "DES" => 3,
-            "TRIPLE_DES" => 4,
-            "DESX" => 5,
-            "AES_128" => 6,
-            "AES_192" => 7,
-            "AES_256" => 8,
-            _ => 0,
-        });
-        self.perms_on("SYMMETRIC KEY", None, Some(&k.name));
-        self.no_ss(2);
-    }
-
-    fn asymmetric_key(&mut self, k: &AsymmetricKey) {
-        self.f32(VERSION);
-        self.s(&k.name);
-        self.str(k.owner.as_deref());
-        let thumbprint = unhex(&k.thumbprint);
-        self.len(thumbprint.len());
-        self.b.b.extend(thumbprint);
-        self.i32(k.key_length);
-        self.i32(match k.algorithm.as_str() {
-            "RSA_512" => 0,
-            "RSA_1024" => 1,
-            "RSA_2048" => 2,
-            _ => 3,
-        });
-        self.i32(key_encryption(&k.private_key));
-        self.perms_on("ASYMMETRIC KEY", None, Some(&k.name));
-        self.no_ss(2);
-    }
-
-    fn security_policy(&mut self, p: &SecurityPolicy) {
-        self.f32(VERSION);
-        let id = self.id();
-        self.i32(id);
-        self.s(&p.schema);
-        self.s(&p.name);
-        self.str(None); // authorization
-        self.bool(p.enabled);
-        self.bool(p.schema_bound);
-        self.bool(p.not_for_replication);
-        self.len(p.predicates.len());
-        for q in &p.predicates {
-            self.s(&q.function);
-            self.s(&q.arguments);
-            self.s(&q.table.quoted());
-            self.i32(i32::from(q.kind == "BLOCK"));
-            self.i32(match q.operation.as_deref() {
-                Some("AFTER INSERT") => 1,
-                Some("AFTER UPDATE") => 2,
-                Some("BEFORE UPDATE") => 3,
-                Some("BEFORE DELETE") => 4,
-                _ => 0,
-            });
-        }
-        self.no_eprops();
-        self.perms("OBJECT", &p.schema, Some(&p.name));
-        self.no_ss(2);
-    }
-
-    fn xml_schema_collection(&mut self, x: &XmlSchemaCollection, id: i32) {
-        let cs = self.cs;
-        self.f32(VERSION);
-        self.s(&x.name);
-        self.s(&x.schema);
-        self.i32(id);
-        self.bool(cs);
-        self.no_eprops();
-        self.perms_on("XML SCHEMA COLLECTION", Some(&x.schema), Some(&x.name));
-        self.str(x.owner.as_deref());
-        self.no_ss(2);
-    }
-
-    fn service_binding(&mut self, b: &ServiceBinding) {
-        let cs = self.cs;
-        self.f32(VERSION);
-        self.s(&b.name);
-        self.str(b.owner.as_deref());
-        let id = self.id();
-        self.i32(id);
-        self.bool(cs);
-        self.s(&b.remote_service);
-        self.s(&b.user);
-        self.bool(b.anonymous);
-        self.no_eprops();
-        self.perms_on("REMOTE SERVICE BINDING", None, Some(&b.name));
-        self.no_ss(2);
     }
 
     fn routes(&mut self) {
-        let cs = self.cs;
         let db = self.db;
+        let cs = self.cs;
         self.coll_head(cs, 1 + db.routes.len());
         self.f32(VERSION);
         self.s("AutoCreatedLocal");
@@ -2022,22 +1525,7 @@ impl<'a> W<'a> {
         self.no_perms();
         self.no_ss(2);
         for r in &db.routes {
-            self.f32(VERSION);
-            self.s(&r.name);
-            self.str(r.owner.as_deref());
-            let id = self.id();
-            self.i32(id);
-            self.bool(cs);
-            self.bool(false); // system object
-            self.str(r.remote_service.as_deref());
-            self.str(r.broker_instance.as_deref());
-            self.s(&r.address);
-            self.str(r.mirror_address.as_deref());
-            self.i64(r.expires.as_deref().and_then(text_ticks).unwrap_or(0));
-            self.bool(r.expires.is_some());
-            self.no_eprops();
-            self.perms_on("ROUTE", None, Some(&r.name));
-            self.no_ss(2);
+            self.route(r);
         }
     }
 
@@ -2183,54 +1671,16 @@ fn referential_action(action: &str) -> u8 {
 }
 
 /// `6 MONTHS` → (6, `MONTHS`).
+/// `6 MONTHS` → (6, `MONTH`), the singular unit SQL Compare stores.
 fn split_retention(r: &str) -> Option<(i32, String)> {
     let (n, unit) = r.trim().split_once(' ')?;
-    Some((n.parse().ok()?, unit.trim().to_ascii_uppercase()))
+    Some((n.parse().ok()?, unit.trim().to_ascii_uppercase().trim_end_matches('S').to_string()))
 }
 
 /// Current time as an OLE Automation date.
 fn oa_now() -> f64 {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     secs / 86_400.0 + 25_569.0
-}
-
-/// A parameter record to write.
-struct ParamRec<'a> {
-    id: i32,
-    name: &'a str,
-    ty: DataType,
-    output: bool,
-    default: Option<&'a str>,
-}
-
-/// A type as written in DDL (`nvarchar(50)`, `decimal(10, 2)`, `varbinary(max)`, `[dbo].[Point]`).
-fn parse_type(s: &str) -> DataType {
-    let s = s.trim();
-    let (base, args) = match s.find('(') {
-        Some(i) if s.ends_with(')') && !s.starts_with('[') => (s[..i].trim(), Some(&s[i + 1..s.len() - 1])),
-        _ => (s, None),
-    };
-    let parts = split_multipart(base);
-    if let [schema, name] = parts.as_slice() {
-        return DataType { name: name.clone(), schema: Some(schema.clone()), ..Default::default() };
-    }
-    let name = parts.last().cloned().unwrap_or_default().to_ascii_lowercase();
-    let mut t = DataType { name, ..Default::default() };
-    let nums: Vec<&str> = args.map(|a| a.split(',').map(str::trim).collect()).unwrap_or_default();
-    let n = |i: usize| nums.get(i).and_then(|x| x.parse::<i32>().ok());
-    match t.name.as_str() {
-        "char" | "varchar" | "nchar" | "nvarchar" | "binary" | "varbinary" => {
-            t.length = if nums.first().is_some_and(|x| x.eq_ignore_ascii_case("max")) { Some(-1) } else { n(0) };
-        }
-        "decimal" | "numeric" => {
-            t.precision = n(0).and_then(|x| u8::try_from(x).ok());
-            t.scale = n(1).and_then(|x| u8::try_from(x).ok()).or(Some(0));
-        }
-        "datetime2" | "time" | "datetimeoffset" => t.scale = n(0).and_then(|x| u8::try_from(x).ok()),
-        "float" => t.precision = n(0).and_then(|x| u8::try_from(x).ok()),
-        _ => {}
-    }
-    t
 }
 
 /// How a type is described in Field, Param and UDT records.
@@ -2418,123 +1868,6 @@ fn synonym_target(base: &str, database: &str) -> Option<ObjectName> {
     }
 }
 
-/// The code of a private key's protection (sys.certificates.pvt_key_encryption_type).
-fn key_encryption(kind: &str) -> i32 {
-    match kind {
-        "MK" => 1,
-        "PW" => 2,
-        "SK" => 3,
-        _ => 0,
-    }
-}
-
-/// A GUID's text in the .NET byte order (the first three groups little-endian).
-fn guid_bytes(s: &str) -> [u8; 16] {
-    let b = unhex(&s.replace(['-', '{', '}'], ""));
-    let mut out = [0u8; 16];
-    if b.len() == 16 {
-        out.copy_from_slice(&b);
-        out[..4].reverse();
-        out[4..6].reverse();
-        out[6..8].reverse();
-    }
-    out
-}
-
-/// Upper- or lower-case hex (no `0x`) as bytes.
-fn unhex(s: &str) -> Vec<u8> {
-    let s = s.strip_prefix("0x").unwrap_or(s).as_bytes();
-    s.chunks(2).filter_map(|p| std::str::from_utf8(p).ok().and_then(|p| u8::from_str_radix(p, 16).ok())).collect()
-}
-
-/// The MVID of a .NET assembly image: the Module table's GUID in the CLI metadata (ECMA-335).
-fn mvid(pe: &[u8]) -> Option<[u8; 16]> {
-    let u16_at = |o: usize| pe.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    let u32_at = |o: usize| pe.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-    let pe_at = u32_at(0x3C)? as usize;
-    if pe.get(pe_at..pe_at + 4)? != b"PE\0\0" {
-        return None;
-    }
-    let coff = pe_at + 4;
-    let sections = usize::from(u16_at(coff + 2)?);
-    let optional = coff + 20;
-    let optional_size = usize::from(u16_at(coff + 16)?);
-    // Data directory 14 is the CLI header; directories start at 96 (PE32) or 112 (PE32+).
-    let dirs = optional + if u16_at(optional)? == 0x20B { 112 } else { 96 };
-    let cli_rva = u32_at(dirs + 14 * 8)?;
-    let table = optional + optional_size;
-    let offset = |rva: u32| -> Option<usize> {
-        (0..sections).find_map(|i| {
-            let s = table + i * 40;
-            let (va, size, raw) = (u32_at(s + 12)?, u32_at(s + 16)?.max(u32_at(s + 8)?), u32_at(s + 20)?);
-            (rva >= va && rva < va + size).then(|| (rva - va + raw) as usize)
-        })
-    };
-    let cli = offset(cli_rva)?;
-    let meta = offset(u32_at(cli + 8)?)?;
-    if u32_at(meta)? != 0x424A_5342 {
-        return None;
-    }
-    let version_len = u32_at(meta + 12)? as usize;
-    let mut at = meta + 16 + version_len + 2;
-    let streams = usize::from(u16_at(at)?);
-    at += 2;
-    let (mut tables, mut guids) = (None, None);
-    for _ in 0..streams {
-        let (start, _) = (u32_at(at)? as usize, u32_at(at + 4)?);
-        let name_at = at + 8;
-        let name_len = pe.get(name_at..)?.iter().position(|&b| b == 0)?;
-        let name = &pe[name_at..name_at + name_len];
-        match name {
-            b"#~" | b"#-" => tables = Some(meta + start),
-            b"#GUID" => guids = Some(meta + start),
-            _ => {}
-        }
-        at = name_at + (name_len + 4) / 4 * 4;
-    }
-    let (tables, guids) = (tables?, guids?);
-    let heap_sizes = *pe.get(tables + 6)?;
-    let valid = pe.get(tables + 8..tables + 16).map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))?;
-    // The Module table (table 0) comes first, after one row count per present table.
-    let rows = tables + 24 + valid.count_ones() as usize * 4;
-    let string_index = if heap_sizes & 0x1 != 0 { 4 } else { 2 };
-    let guid_at = rows + 2 + string_index;
-    let index = if heap_sizes & 0x2 != 0 { u32_at(guid_at)? as usize } else { usize::from(u16_at(guid_at)?) };
-    let g = guids + index.checked_sub(1)? * 16;
-    pe.get(g..g + 16)?.try_into().ok()
-}
-
-/// A partition boundary literal as SQL Compare stores the value: the text of a string or date,
-/// a GUID without braces, None for NULL.
-fn boundary_text(literal: &str) -> Option<String> {
-    let l = literal.trim();
-    if l.eq_ignore_ascii_case("NULL") {
-        return None;
-    }
-    let inner = l.strip_prefix('N').unwrap_or(l);
-    Some(match inner.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')) {
-        Some(x) if x.starts_with('{') && x.ends_with('}') => x.trim_matches(['{', '}']).to_ascii_lowercase(),
-        Some(x) => x.replace("''", "'"),
-        None => l.to_string(),
-    })
-}
-
-/// `yyyy-MM-dd HH:mm:ss.fff` as a .NET `DateTime` (100 ns ticks from 0001-01-01).
-fn text_ticks(s: &str) -> Option<i64> {
-    let n = |r: std::ops::Range<usize>| s.get(r).and_then(|x| x.parse::<i64>().ok());
-    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
-    let (hh, mi, ss) = (n(11..13).unwrap_or(0), n(14..16).unwrap_or(0), n(17..19).unwrap_or(0));
-    let ms = s.get(20..).map_or(Some(0), |f| format!("{f:0<3}").get(..3).and_then(|x| x.parse::<i64>().ok()))?;
-    // Day number from a civil date (H. Hinnant), from 1970-01-01.
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468 + 719_162;
-    Some(((days * 86_400 + hh * 3600 + mi * 60 + ss) * 1000 + ms) * 10_000)
-}
-
 /// Splits `[a].[b].c` into its unquoted parts.
 fn split_multipart(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
@@ -2627,7 +1960,7 @@ mod tests {
         }
         let cols = |names: &[&str]| names.iter().map(|n| Column { name: n.to_string(), ..Default::default() }).collect::<Vec<_>>();
         assert_eq!(referenced_columns("([a]+[B]*(2))>[a]", &cols(&["A", "b", "c"])), ["A", "b"]);
-        assert_eq!(split_retention("6 MONTHS"), Some((6, "MONTHS".into())));
+        assert_eq!(split_retention("6 MONTHS"), Some((6, "MONTH".into())));
     }
 
     #[test]
@@ -2661,14 +1994,5 @@ mod tests {
                 std::fs::write(std::path::Path::new(&out).join(name), &bytes).unwrap();
             }
         }
-    }
-
-    #[test]
-    fn assembly_mvid() {
-        // SQL Compare 15 stores this MVID for the fixture's assembly.
-        let dll = unhex(include_str!("../../tests/fixtures/objects/clr.hex").trim());
-        let expected = [0x62, 0x35, 0x4b, 0x7b, 0xe2, 0x36, 0x27, 0x48, 0xb2, 0x75, 0x51, 0xd5, 0xe8, 0x37, 0x67, 0xad];
-        assert_eq!(mvid(&dll), Some(expected));
-        assert_eq!(mvid(b"not an image"), None);
     }
 }
