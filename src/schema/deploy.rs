@@ -154,6 +154,8 @@ enum Phase {
     Routes,
     ExtendedProperties,
     Permissions,
+    /// ALTER AUTHORIZATION on schema objects.
+    Authorizations,
     DropSchemas,
     EnableDdlTriggers,
     AddSensitivity,
@@ -437,6 +439,7 @@ impl<'a> Planner<'a> {
         self.refresh_views();
         self.extended_properties(&selected);
         self.permissions(&selected);
+        self.authorizations(&selected);
         self.deployment_warnings();
         self.principals_before_transaction();
         self.sort();
@@ -766,6 +769,14 @@ impl<'a> Planner<'a> {
     /// Natively compiled modules need memory-optimized support and no transaction.
     fn native_module(&mut self, name: &ObjectName, m: Module<'a>) {
         if let Module::Routine(r) = m
+            && r.kind != RoutineKind::Procedure
+            && has_inline_option(&r.definition)
+            && !self.has(Feature::ScalarInlining)
+        {
+            let version = self.r.features.version_name();
+            self.warn(warn::target::scalar_inlining(&name.to_string(), version));
+        }
+        if let Module::Routine(r) = m
             && r.native_compilation
         {
             self.memory_optimized = true;
@@ -986,6 +997,10 @@ impl<'a> Planner<'a> {
 
     fn create_table(&mut self, s: &'a Table) {
         let name = s.object_name();
+        if s.file_table.is_some() && !self.has(Feature::FileTables) {
+            self.warn(warn::target::file_table(&name.to_string()));
+            return;
+        }
         // A system-versioned table comes with its history table, created first.
         let mut statements = Vec::new();
         if let Some(temporal) = &s.temporal {
@@ -1009,6 +1024,9 @@ impl<'a> Planner<'a> {
             self.objects.inline_key.insert(name.clone());
         }
         statements.push(self.ex.object(&name, "U", Check::Create, &ddl::create_table_with(s, None, inline_key, &self.r)));
+        if s.large_value_types_out_of_row {
+            statements.push(ddl::large_values_out_of_row(&name.quoted(), true));
+        }
         if s.lock_escalation != "TABLE" && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&name.quoted(), &s.lock_escalation));
         }
@@ -1380,6 +1398,12 @@ impl<'a> Planner<'a> {
     }
 
     fn alter_table(&mut self, s: &'a Table, t: &'a Table) {
+        // A FileTable can't be made from an ordinary table or back: the table is re-created.
+        if s.file_table.is_some() != t.file_table.is_some() {
+            self.drop_table(t);
+            self.create_table(s);
+            return;
+        }
         let pairs = self.column_pairs(s, t);
         if let Some(why) = self.rebuild_reason(s, t, &pairs) {
             for w in why {
@@ -1717,6 +1741,14 @@ impl<'a> Planner<'a> {
         }
         if s.lock_escalation != t.lock_escalation && !s.lock_escalation.is_empty() {
             statements.push(ddl::lock_escalation(&table, &s.lock_escalation));
+        }
+        if s.large_value_types_out_of_row != t.large_value_types_out_of_row {
+            statements.push(ddl::large_values_out_of_row(&table, s.large_value_types_out_of_row));
+        }
+        if let (Some(a), Some(b)) = (&s.file_table, &t.file_table)
+            && a.directory != b.directory
+        {
+            statements.push(format!("ALTER TABLE {table} SET ( FILETABLE_DIRECTORY = {} )", literal(&a.directory)));
         }
         if disturbed {
             self.disturbed.insert(name.clone());
@@ -2193,6 +2225,9 @@ impl<'a> Planner<'a> {
             }
         }
         let tmp_q = tmp.quoted();
+        if s.large_value_types_out_of_row {
+            statements.push(ddl::large_values_out_of_row(&tmp_q, true));
+        }
         // Period columns the target does not have yet get their values from the period, so it
         // goes on before the copy; otherwise after, as the copy writes the old period values.
         let temporal = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal) && !memory_optimized);
@@ -2804,6 +2839,12 @@ impl<'a> Module<'a> {
 /// system-versioned table and sensitivity labels are deployed on their own.
 fn material_differences(a: &Column, b: &Column, o: &Options) -> Vec<super::compare::PropDiff> {
     column_differences(a, b, o, false).into_iter().filter(|d| d.name != "GENERATED ALWAYS" && d.name != "Hidden").collect()
+}
+
+/// The function text sets INLINE = ON or OFF (scalar UDF inlining, SQL Server 2019).
+fn has_inline_option(text: &str) -> bool {
+    let words: Vec<String> = super::text::tokenize(text).iter().filter(|t| !matches!(t.kind, super::text::Tok::Space | super::text::Tok::LineComment | super::text::Tok::BlockComment)).map(|t| t.text.to_ascii_uppercase()).collect();
+    words.windows(2).any(|w| w[0] == "INLINE" && w[1] == "=")
 }
 
 fn is_clustered(ix: &Index) -> bool {

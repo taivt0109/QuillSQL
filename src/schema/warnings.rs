@@ -184,7 +184,7 @@ pub fn recovered_table(t: &str) -> Warning {
     w(
         Severity::Medium,
         t,
-        "The target database includes a table that was recovered from a failed deployment. You can use recovery tables to restore data lost in a failed deployment.".into(),
+        "The target database includes a table that was recovered from a failed QuillSQL Compare deployment. You can use recovery tables to restore data lost in a failed deployment.".into(),
     )
 }
 
@@ -192,7 +192,7 @@ pub fn no_transactions() -> Warning {
     w(
         Severity::High,
         "",
-        "This deployment will run without transactions. This could leave your database in an inconsistent state if it fails. We recommend backing up the database as part of the deployment, or enabling transactions.".into(),
+        "This deployment will run without transactions. This could leave your database in an inconsistent state if it fails.  We recommend backing up the database as part of the deployment, or enabling transactions.".into(),
     )
 }
 
@@ -200,7 +200,7 @@ pub fn memory_optimized_in_transaction() -> Warning {
     w(
         Severity::High,
         "",
-        "You're attempting to deploy one or more memory-optimized objects (memory-optimized tables, natively compiled stored procedures or memory-optimized table types) in a transaction, which is not supported by SQL Server.\r\n\r\nIf you want to deploy memory-optimized objects, you need to select the 'Do not use transactions in deployment scripts' project option.".into(),
+        "You\u{2019}re attempting to deploy one or more memory-optimized objects (memory-optimized tables, natively compiled stored procedures or memory-optimized table types) in a transaction, which is not supported by SQL Server.\r\n\r\nIf you want to deploy memory-optimized objects, you need to select the 'Do not use transactions in deployment scripts' project option.".into(),
     )
 }
 
@@ -229,7 +229,7 @@ pub fn use_unsupported() -> Warning {
 }
 
 pub fn old_server() -> Warning {
-    w(Severity::Low, "", "A future version of QuillSQL Compare will no longer support SQL Server 2008 and SQL Server 2008R2.".into())
+    w(Severity::Low, "", "A future version of QuillSQL Compare and QuillSQL Data Compare will no longer support SQL Server 2008 and SQL Server 2008R2.".into())
 }
 
 /// What the target version cannot take (High unless stated).
@@ -256,7 +256,7 @@ pub mod target {
         w(
             Severity::High,
             f,
-            format!("The natively compiled function {f} is not supported in database versions older than SQL Server 2016 or in Microsoft Azure SQL Databases."),
+            format!("The natively compiled stored function {f} is not supported in database versions older than SQL Server 2014 or in Microsoft Azure SQL Databases."),
         )
     }
 
@@ -293,7 +293,19 @@ pub mod target {
     }
 
     pub fn graph(t: &str) -> Warning {
-        w(Severity::High, t, format!("The graph table {t} is not supported in the target database version."))
+        w(Severity::High, t, format!("Graph tables are not supported in the target database version. {t} can be deployed but will not be a graph table in the target database."))
+    }
+
+    pub fn file_table(t: &str) -> Warning {
+        w(Severity::High, t, format!("The filetable {t} is not supported in the target database version."))
+    }
+
+    pub fn scalar_inlining(f: &str, version: &str) -> Warning {
+        w(
+            Severity::High,
+            f,
+            format!("Inlineable scalar user defined functions are only supported in SQL Server 2019 and later. As the target server is SQL Server {version}, the deployment script will likely fail."),
+        )
     }
 
     pub fn clustered_columnstore(t: &str, ix: &str) -> Warning {
@@ -592,4 +604,37 @@ pub fn user_unsyncable(u: &str) -> Warning {
 
 pub fn history_not_null_default(column: &str, history: &str) -> Warning {
     w(Severity::Low, history, format!("The column [{column}] on history table {history} is being marked as NOT NULL. The default value will be applied where appropriate."))
+}
+
+/// Stretch Database (removed from SQL Server 2022 and Azure SQL Database).
+pub mod stretch {
+    use super::*;
+
+    pub fn unsupported(t: &str) -> Warning {
+        w(Severity::High, t, format!("The REMOTE_DATA_ARCHIVE option on table {t} is not supported in the target database version."))
+    }
+
+    pub fn make_sure_enabled() -> Warning {
+        w(
+            Severity::High,
+            "",
+            "The deployment includes stretch tables but Stretch Database isn't enabled on the target database. Make sure Stretch Database is enabled on the target database before you run the deployment script.".into(),
+        )
+    }
+
+    pub fn rebuild_alter(t: &str) -> Warning {
+        w(
+            Severity::Medium,
+            t,
+            format!("The deployment will alter the stretch table {t}. To do this, QuillSQL Compare will download the table's remote data from Azure and then rebuild the table. Downloading remote data may cause the deployment to take a long time."),
+        )
+    }
+
+    pub fn rebuild_removal(t: &str) -> Warning {
+        w(
+            Severity::Medium,
+            t,
+            format!("The deployment will disable Stretch Database on the {t} table. To do this, QuillSQL Compare will download the table's remote data from Azure and then rebuild the table. Downloading remote data may cause the deployment to take a long time."),
+        )
+    }
 }
