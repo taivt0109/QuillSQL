@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::compare::{DataComparison, TableResult};
+use super::compare::{DataComparison, SideKind, TableResult};
 use super::mapping::TablePair;
 use super::store::Session;
 use crate::catalog::ObjectName;
@@ -24,6 +24,10 @@ struct Header {
     only_in_2: Vec<ObjectName>,
     ddl_triggers: Vec<String>,
     tables: Vec<SavedTable>,
+    #[serde(default)]
+    excluded: Vec<TablePair>,
+    #[serde(default)]
+    kinds: [SideKind; 2],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +53,8 @@ pub fn save(result: &DataComparison, extra: serde_json::Value, path: &Path) -> R
         only_in_1: result.only_in_1.clone(),
         only_in_2: result.only_in_2.clone(),
         ddl_triggers: result.ddl_triggers.clone(),
+        excluded: result.excluded.clone(),
+        kinds: result.kinds,
         tables: result
             .tables
             .iter()
@@ -114,7 +120,7 @@ pub fn load(path: &Path) -> Result<(DataComparison, serde_json::Value), String> 
             column_differences: t.column_differences,
         });
     }
-    let result = DataComparison { session, tables, only_in_1: header.only_in_1, only_in_2: header.only_in_2, ddl_triggers: header.ddl_triggers };
+    let result = DataComparison { session, tables, only_in_1: header.only_in_1, only_in_2: header.only_in_2, ddl_triggers: header.ddl_triggers, excluded: header.excluded, kinds: header.kinds, masked_reads: false, old_server: false };
     Ok((result, header.extra))
 }
 
@@ -143,6 +149,8 @@ mod tests {
             problem: None,
             is_view: false,
             notes: vec![],
+            excluded: None,
+            target_missing: false,
         };
         let t = TableResult {
             pair,
@@ -155,7 +163,7 @@ mod tests {
             identity_current: (Some(5), None),
             column_differences: vec![],
         };
-        let result = DataComparison { session, tables: vec![t], only_in_1: vec![ObjectName::new("dbo", "Old")], only_in_2: vec![], ddl_triggers: vec![] };
+        let result = DataComparison { session, tables: vec![t], only_in_1: vec![ObjectName::new("dbo", "Old")], only_in_2: vec![], ddl_triggers: vec![], excluded: vec![], kinds: Default::default(), masked_reads: false, old_server: false };
         let file = result.session.dir.join("saved.qdcr");
         save(&result, serde_json::json!({"note": "hi"}), &file).unwrap();
         let (back, extra) = load(&file).unwrap();

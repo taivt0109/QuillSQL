@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::compare::{self, DataComparison, TableResult};
+use super::compare::{self, DataComparison, SideKind, TableResult};
 use super::mapping::{self, ColumnPair, TablePair};
 use super::options::{DataOpt, DataOptions};
 use super::store::{self, RowKind, StoredRow};
@@ -170,16 +170,58 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
     // Row-level choices change the messages of every table, as in SQL Data Compare.
     let by_row = plans.iter().any(|p| p.rows.is_some_and(|r| r.iter().any(|k| !k.toggled.is_empty() || !k.included)));
     let (order, extra_fks) = dependency_order(&plans, target, opts, &mut warnings);
+    if result.kinds[1] == SideKind::Backup {
+        warnings.push(Warning {
+            severity: Severity::High,
+            object: String::new(),
+            message: "When the target data source is a backup, the SQL script does not take into account dependencies or foreign keys. If the script references multiple tables you are not recommended to run it against a live database.".into(),
+        });
+    }
+    if result.old_server
+        && let Some(first) = result.tables.first()
+    {
+        warnings.push(Warning {
+            severity: Severity::Low,
+            object: first.pair.target.to_string(),
+            message: "A future version of SQL Compare and SQL Data Compare will no longer support SQL Server 2008 and SQL Server 2008R2.".into(),
+        });
+    }
+    // Masked values read without UNMASK would be deployed as their masks.
+    if result.masked_reads {
+        for &i in &order {
+            let p = &plans[i];
+            if p.update || p.add {
+                for c in p.t.pair.columns.iter().filter(|c| c.masked) {
+                    warnings.push(Warning {
+                        severity: Severity::High,
+                        object: p.t.pair.target.to_string(),
+                        message: format!(
+                            "Column {} of table {} has a data mask applied and the current user does not have UNMASK permission. The deployment may contain invalid data.",
+                            c.source, p.t.pair.source
+                        ),
+                    });
+                }
+            }
+        }
+    }
 
-    // Header.
+    // Header: its wording depends on which side is a scripts folder.
     if opts.has(DataOpt::OutputCommentHeader) && !settings.source.is_empty() && !settings.target.is_empty() {
-        w.sql(&format!(
-            "/*\r\nRun this script on:\r\n\r\n{}    -  This database will be modified\r\n\r\nto synchronize it with:\r\n\r\n{}\r\n\r\nYou are recommended to back up your database before running this script\r\n\r\nScript created by QuillSQL {} at {}\r\n\r\n*/\r\n\t\t",
-            settings.target,
-            settings.source,
-            env!("CARGO_PKG_VERSION"),
-            now_text()
-        ));
+        let (dst, src) = (&settings.target, &settings.source);
+        let made = format!("Script created by QuillSQL {} at {}", env!("CARGO_PKG_VERSION"), now_text());
+        let advice = "You are recommended to back up your database before running this script";
+        w.sql(&match (result.kinds[0] == SideKind::Folder, result.kinds[1] == SideKind::Folder) {
+            (true, true) => format!(
+                "/*\r\nRun this script on a database with the same schema as:\r\n\r\n{dst} \u{2013} the database with this schema will be modified\r\n\r\nto synchronize its data with:\r\n\r\n{src} \u{2013} this scripts folder will not be modified\r\n\r\n{advice}\r\n\r\n{made}\r\n\r\n*/\r\n\t\t"
+            ),
+            (false, true) => format!(
+                "/*\r\nRun this script on a database with the same schema as:\r\n\r\n{dst} \u{2013} the database with this schema will be modified\r\n\r\nto synchronize its data with:\r\n\r\n{src} \u{2013} this database will not be modified\r\n\r\n{advice}\r\n\r\n{made}\r\n\r\n*/\r\n\t\t\t"
+            ),
+            (true, false) => format!(
+                "/*\r\nRun this script on:\r\n\r\n{dst} \u{2013} this database will be modified\r\n\r\nto synchronize its data with:\r\n\r\n{src} \u{2013} this scripts folder will not be modified\r\n\r\n{advice}\r\n\r\n{made}\r\n\r\n*/\r\n\t\t"
+            ),
+            (false, false) => format!("/*\r\nRun this script on:\r\n\r\n{dst}    -  This database will be modified\r\n\r\nto synchronize it with:\r\n\r\n{src}\r\n\r\n{advice}\r\n\r\n{made}\r\n\r\n*/\r\n\t\t"),
+        });
     }
     if opts.has(DataOpt::AddDatabaseUseStatement) && !settings.target_database.is_empty() {
         w.sql(&format!("USE {}", quote(&settings.target_database)));
@@ -216,8 +258,15 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
             return Vec::new();
         }
         let key = key_index(p);
-        // XML indexes depend on the clustered key and are not scripted here: such a table keeps it.
-        let has_xml = tg.indexes.iter().any(|i| i.kind == IndexKind::Xml);
+        let table = target.table(&p.t.pair.target.schema, &p.t.pair.target.name);
+        // The unique index on a FILESTREAM table's ROWGUIDCOL cannot be dropped while it has data.
+        let filestream_key = |i: &Index| {
+            i.columns.len() == 1
+                && (i.primary_key || i.unique_constraint)
+                && table.is_some_and(|t| {
+                    t.columns.iter().any(|c| c.filestream) && t.columns.iter().any(|c| c.name.eq_ignore_ascii_case(&i.columns[0].name) && c.rowguidcol && !c.nullable)
+                })
+        };
         tg.indexes
             .iter()
             .filter(|i| {
@@ -225,9 +274,19 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
                     && !i.disabled
                     && Some(&i.name) != key.as_ref()
                     && (i.kind == IndexKind::Clustered) == clustered
-                    && !(clustered && has_xml)
+                    && !filestream_key(i)
             })
             .collect()
+    };
+    // XML indexes hang on the clustered index: when one is dropped, every deployed table's
+    // primary XML indexes go first (their secondary ones with them) and come back after it.
+    let dropping_clustered = tables.iter().any(|p| !droppable(p, true).is_empty());
+    let xml_indexes = |p: &Plan, primary: bool| -> Vec<&Index> {
+        let tg = target_of(target, &p.t.pair.target);
+        if !dropping_clustered || !tg.is_table {
+            return Vec::new();
+        }
+        tg.indexes.iter().filter(|i| i.kind == IndexKind::Xml && i.xml.as_ref().is_none_or(|x| x.using_index.is_none()) == primary).collect()
     };
 
     // Disable: DML triggers, foreign keys, indexes, columnstore indexes.
@@ -261,6 +320,13 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
         }
     }
     for clustered in [false, true] {
+        if clustered {
+            for p in &tables {
+                for ix in xml_indexes(p, true) {
+                    w.sql(&ddl::drop_index(&p.t.pair.target.quoted(), ix));
+                }
+            }
+        }
         for p in &tables {
             for (n, ix) in droppable(p, clustered).into_iter().enumerate() {
                 if n == 0 {
@@ -330,7 +396,32 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
                 }
             }
         }
+        if clustered {
+            for primary in [true, false] {
+                for p in &tables {
+                    for ix in xml_indexes(p, primary) {
+                        for s in ddl::create_index(&p.t.pair.target.quoted(), ix) {
+                            w.sql(&s);
+                        }
+                    }
+                }
+            }
+        }
     }
+    // A dropped foreign key gets its extended properties back with it.
+    let fk_xprops = |w: &mut Writer, table: &ObjectName, fk: &ForeignKey| {
+        if !drop_indexes {
+            return;
+        }
+        for x in target.extended_properties.iter().filter(|x| {
+            x.class == "TABLE"
+                && x.schema.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&table.schema))
+                && x.object.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(&table.name))
+                && x.minor_name.as_deref() == Some(fk.name.as_str())
+        }) {
+            w.sql(&ddl::add_xprop(x, &ddl::xprop_levels(x, str::to_string)));
+        }
+    };
     if fk_mode {
         for (i, p) in tables.iter().enumerate() {
             let table = &p.t.pair.target;
@@ -343,12 +434,14 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
                     for s in fk_on(table, fk, drop_indexes, opts) {
                         w.sql(&s);
                     }
+                    fk_xprops(&mut w, table, fk);
                 }
             }
             for (other, fk) in extra_fks[order[i]].iter().filter(|(_, fk)| !fk.disabled) {
                 for s in fk_on(other, fk, drop_indexes, opts) {
                     w.sql(&s);
                 }
+                fk_xprops(&mut w, other, fk);
             }
         }
     }
@@ -382,7 +475,8 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
         w.go();
     }
     if opts.has(DataOpt::ReseedIdentity) {
-        for p in &plans {
+        // Only the deployed tables are reseeded.
+        for p in &tables {
             let t = p.t;
             let tg = target.table(&t.pair.target.schema, &t.pair.target.name);
             let increment = tg
@@ -414,6 +508,11 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
     let mut seen = HashSet::new();
     warnings.retain(|x| seen.insert((x.object.clone(), x.message.clone())));
     Ok(DeploymentScript { sql: w.text, warnings, batches: w.batches })
+}
+
+/// The High warning SQL Data Compare raises for rows deployed by a non-unique comparison key.
+fn repeated_warning(table: &ObjectName, text: String) -> Warning {
+    Warning { severity: Severity::High, object: table.to_string(), message: text }
 }
 
 fn trigger_sql(table: &ObjectName, tr: &Trigger, is_table: bool, verb: &str) -> String {
@@ -510,8 +609,10 @@ fn hint(target: &Database, table: &ObjectName, transactions: bool) -> &'static s
 }
 
 /// The WHERE condition for a row of the target: the key, or every comparable column when keys
-/// repeat, then the table's filter.
-fn where_sql(p: &TablePair, repeated: bool, values: &[Value], warnings: &mut Vec<Warning>) -> String {
+/// repeat, then the table's filter. As SQL Data Compare writes it, a string literal of a deleted
+/// row is N'' (and cast) when the source column needs it and the cast takes the target column's
+/// collation and type; for an updated row the two columns swap roles.
+fn where_sql(p: &TablePair, repeated: bool, values: &[Value], update: bool, warnings: &mut Vec<Warning>) -> String {
     let mut parts = Vec::new();
     let mut inexact = false;
     let cols: Vec<usize> = if repeated { (0..p.columns.len()).collect() } else { p.key.clone() };
@@ -526,14 +627,22 @@ fn where_sql(p: &TablePair, repeated: bool, values: &[Value], warnings: &mut Vec
         let part = match &values[c] {
             Value::Null => format!("{name} IS NULL"),
             v @ Value::Clr(..) if matches!(col.target_type.name.as_str(), "geometry" | "geography") => format!("{name}.STEquals({})=1", v.sql(&lit)),
-            Value::Str(s) if Literal { source: &col.source_type, ..literal_ctx(col, false, "") }.source_needs_n() && !matches!(col.target_type.name.as_str(), "nchar" | "nvarchar" | "ntext" | "sysname") && col.graph.is_none() => {
-                let size = col.target_type.length.map(|l| if l < 0 { "max".to_string() } else { l.to_string() }).unwrap_or_else(|| "max".into());
-                let coll = col.target_collation.as_deref().unwrap_or("DATABASE_DEFAULT");
-                format!("{name} = cast({} COLLATE {coll} as {}({size}))", sql_string(s, true), col.target_type.name)
-            }
             Value::Str(s) if col.graph.is_none() => {
-                let n = Literal { source: &col.source_type, ..literal_ctx(col, false, "") }.source_needs_n();
-                format!("{name} = {}", sql_string(s, n))
+                // (decides N'' and the cast, whose Unicode-ness skips the cast, gives collation and type)
+                let (cast_by, unicode_by, cast_to, cast_collation) = if update {
+                    (&col.target_type, &col.source_type, &col.source_type, col.source_collation.as_deref())
+                } else {
+                    (&col.source_type, &col.target_type, &col.target_type, col.target_collation.as_deref())
+                };
+                let by_collation = if update { col.target_collation.as_deref() } else { col.source_collation.as_deref() };
+                let n = Literal { source: cast_by, source_collation: by_collation, ..literal_ctx(col, false, "") }.source_needs_n();
+                if n && !matches!(unicode_by.name.as_str(), "nchar" | "nvarchar" | "ntext" | "sysname" | "xml" | "sql_variant") {
+                    let size = cast_to.length.map(|l| if l <= 0 { "max".to_string() } else { l.to_string() }).unwrap_or_else(|| "max".into());
+                    let coll = cast_collation.unwrap_or("DATABASE_DEFAULT");
+                    format!("{name} = cast({} COLLATE {coll} as {}({size}))", sql_string(s, true), cast_to.name)
+                } else {
+                    format!("{name} = {}", sql_string(s, n))
+                }
             }
             v => format!("{name} = {}", v.sql(&lit)),
         };
@@ -599,11 +708,12 @@ fn write_deletes(w: &mut Writer, p: &Plan, target: &Database, by_row: bool, warn
                 w.print(&format!("Delete {total} {} from {name}{suffix}", rows_word(total)));
             }
             if repeated {
+                warnings.push(repeated_warning(name, format!("Delete {total} {} from {name}{suffix}", rows_word(total))));
                 w.sql("SET ROWCOUNT 1");
             }
         }
         n += 1;
-        w.sql(&format!("{prefix}{}", where_sql(&t.pair, repeated, &row.target, warnings)));
+        w.sql(&format!("{prefix}{}", where_sql(&t.pair, repeated, &row.target, false, warnings)));
         w.end_statement();
         Ok(())
     })?;
@@ -644,7 +754,15 @@ fn write_updates(w: &mut Writer, p: &Plan, target: &Database, opts: &DataOptions
     }
     let needs_reinsert = |row: &StoredRow| tg.edge || identity.is_some_and(|c| row.source.get(c) != row.target.get(c));
     let suffix = if repeated { " with non-unique comparison key" } else { "" };
-    let message = |w: &mut Writer, reinsert: bool| {
+    let message = |w: &mut Writer, reinsert: bool, warnings: &mut Vec<Warning>| {
+        if repeated {
+            let text = if reinsert {
+                format!("Delete and re-insert {total} {} in {name} due to identity row modification{suffix}", rows_word(total))
+            } else {
+                format!("Update {total} {} in {name}{suffix}", rows_word(total))
+            };
+            warnings.push(repeated_warning(name, text));
+        }
         if !by_row && all_updatable {
             let text = if reinsert && tg.edge {
                 format!("Delete and re-insert {total} {} in {name} due to table being a SQL Graph EDGE table{suffix}", rows_word(total))
@@ -674,11 +792,11 @@ fn write_updates(w: &mut Writer, p: &Plan, target: &Database, opts: &DataOptions
                 return Ok(());
             }
             if !header {
-                message(w, true);
+                message(w, true, warnings);
                 header = true;
             }
             if needs_reinsert(&row) {
-                w.sql(&format!("DELETE FROM {name}{h} WHERE {}", where_sql(pair, repeated, &row.target, warnings)));
+                w.sql(&format!("DELETE FROM {name}{h} WHERE {}", where_sql(pair, repeated, &row.target, true, warnings)));
                 w.end_statement();
                 deleted += 1;
             }
@@ -694,7 +812,7 @@ fn write_updates(w: &mut Writer, p: &Plan, target: &Database, opts: &DataOptions
             return Ok(());
         }
         if !header {
-            message(w, false);
+            message(w, false, warnings);
             header = true;
         }
         if must_reinsert && needs_reinsert(&row) {
@@ -706,7 +824,7 @@ fn write_updates(w: &mut Writer, p: &Plan, target: &Database, opts: &DataOptions
             fetch.complete(pair, &mut source)?;
             let list: Vec<String> =
                 sets.iter().map(|&c| format!("{}={}", quote(&pair.columns[c].target), source[c].sql(&literal_ctx(&pair.columns[c], clr_as_text, &target_name)))).collect();
-            w.sql(&format!("UPDATE {name}{h} SET {} WHERE {}", list.join(", "), where_sql(pair, repeated, &row.target, warnings)));
+            w.sql(&format!("UPDATE {name}{h} SET {} WHERE {}", list.join(", "), where_sql(pair, repeated, &row.target, true, warnings)));
             updated += 1;
         }
         w.end_statement();
@@ -787,6 +905,7 @@ fn write_inserts(w: &mut Writer, p: &Plan, target: &Database, opts: &DataOptions
                 w.sql(&format!("SET IDENTITY_INSERT {name} ON"));
             }
             if repeated {
+                warnings.push(repeated_warning(name, format!("Add {total} {} to {name}{suffix}", rows_word(total))));
                 w.sql("SET ROWCOUNT 1");
             }
         }
@@ -1114,7 +1233,7 @@ mod tests {
             result(pairs.next().unwrap(), p0, o0, [0, 1, 1, 0], vec![0, 1, 0]),
             result(pairs.next().unwrap(), p1, o1, [0, 0, 1, 1], vec![0, 0, 0, 0]),
         ];
-        (DataComparison { session, tables, only_in_1: vec![], only_in_2: vec![], ddl_triggers: vec![] }, db)
+        (DataComparison { session, tables, only_in_1: vec![], only_in_2: vec![], ddl_triggers: vec![], excluded: vec![], kinds: Default::default(), masked_reads: false, old_server: false }, db)
     }
 
     #[test]
@@ -1171,6 +1290,84 @@ COMMIT TRANSACTION\r\nGO\r\n";
     }
 
     #[test]
+    fn headers_and_warnings() {
+        let (mut result, db) = example();
+        let settings = SyncSettings::new("DEV.Shop", "PROD.Shop", "Shop");
+        result.kinds = [SideKind::Folder, SideKind::Live];
+        let script = generate(&result, &db, &DataOptions::default_set(), &settings).unwrap();
+        assert!(script.sql.starts_with("/*\r\nRun this script on:\r\n\r\nPROD.Shop \u{2013} this database will be modified\r\n\r\nto synchronize its data with:\r\n\r\nDEV.Shop \u{2013} this scripts folder will not be modified\r\n"));
+        result.kinds = [SideKind::Live, SideKind::Folder];
+        let script = generate(&result, &db, &DataOptions::default_set(), &settings).unwrap();
+        assert!(script.sql.contains("DEV.Shop \u{2013} this database will not be modified\r\n"));
+        assert!(script.sql.contains("*/\r\n\t\t\t"));
+
+        result.kinds = [SideKind::Live, SideKind::Backup];
+        result.old_server = true;
+        result.masked_reads = true;
+        result.tables[0].pair.columns[1].masked = true;
+        result.tables[0].repeated_keys = true;
+        let script = generate(&result, &db, &DataOptions::default_set(), &settings).unwrap();
+        let has = |sev: Severity, text: &str| script.warnings.iter().any(|w| w.severity == sev && w.message == text);
+        assert!(has(Severity::High, "When the target data source is a backup, the SQL script does not take into account dependencies or foreign keys. If the script references multiple tables you are not recommended to run it against a live database."));
+        assert!(has(Severity::Low, "A future version of SQL Compare and SQL Data Compare will no longer support SQL Server 2008 and SQL Server 2008R2."));
+        assert!(has(Severity::High, "Column Name of table [dbo].[Customers] has a data mask applied and the current user does not have UNMASK permission. The deployment may contain invalid data."));
+        assert!(has(Severity::High, "Update 1 row in [dbo].[Customers] with non-unique comparison key"), "{:?}", script.warnings);
+        assert!(has(Severity::High, "Add 1 row to [dbo].[Customers] with non-unique comparison key"));
+
+        // Only deployed tables are reseeded.
+        let (mut result, db) = example();
+        for t in &mut result.tables {
+            t.identity_current = (Some(10), Some(3));
+        }
+        let mut only = SyncSettings::new("a.b", "c.d", "d");
+        only.tables = Some(vec![ObjectName::new("dbo", "Customers")]);
+        let script = generate(&result, &db, &DataOptions::default_set().with(DataOpt::ReseedIdentity), &only).unwrap();
+        assert!(script.sql.contains("DBCC CHECKIDENT(N'[dbo].[Customers]', RESEED, 10)"));
+        assert!(!script.sql.contains("[dbo].[Orders]', RESEED"), "{}", script.sql);
+    }
+
+    #[test]
+    fn drop_constraints_and_indexes() {
+        use crate::catalog::{ExtendedProperty, XmlIndex, XmlIndexKind};
+        let (result, mut db) = example();
+        let c = &mut db.tables[0];
+        c.indexes[0].kind = IndexKind::Nonclustered;
+        let mut g = col("G", "uniqueidentifier");
+        g.rowguidcol = true;
+        g.nullable = false;
+        let mut f = col("F", "varbinary");
+        f.filestream = true;
+        c.columns.extend([g, f, col("X", "xml")]);
+        let ix = |name: &str, kind: IndexKind, column: &str| Index { name: name.into(), kind, columns: vec![IndexColumn { name: column.into(), descending: false }], ..Default::default() };
+        c.indexes.push(Index { unique_constraint: true, unique: true, ..ix("UQ_G", IndexKind::Nonclustered, "G") });
+        c.indexes.push(ix("CX_Name", IndexKind::Clustered, "Name"));
+        c.indexes.push(Index { xml: Some(XmlIndex::default()), ..ix("PX", IndexKind::Xml, "X") });
+        c.indexes.push(Index {
+            xml: Some(XmlIndex { kind: XmlIndexKind::Secondary, secondary_type: Some("PATH".into()), using_index: Some("PX".into()), ..Default::default() }),
+            ..ix("SX", IndexKind::Xml, "X")
+        });
+        db.extended_properties.push(ExtendedProperty {
+            class: "TABLE".into(),
+            schema: Some("dbo".into()),
+            object: Some("Orders".into()),
+            minor_type: Some("CONSTRAINT".into()),
+            minor_name: Some("FK_Orders_Customers".into()),
+            name: "MS_Description".into(),
+            value: Some("to customers".into()),
+        });
+        let opts = DataOptions::default_set().with(DataOpt::DropConstraintsAndIndexes);
+        let sql = generate(&result, &db, &opts, &SyncSettings::new("a.b", "c.d", "d")).unwrap().sql;
+        assert!(!sql.contains("UQ_G"), "the FILESTREAM ROWGUIDCOL index stays: {sql}");
+        let at = |s: &str| sql.find(s).unwrap_or_else(|| panic!("{s} missing from {sql}"));
+        assert!(at("DROP INDEX [PX] ON [dbo].[Customers]") < at("DROP INDEX [CX_Name] ON [dbo].[Customers]"));
+        assert!(!sql.contains("DROP INDEX [SX]"), "secondary XML indexes go with the primary one");
+        let create_cx = at("CREATE CLUSTERED INDEX [CX_Name]");
+        let create_px = at("CREATE PRIMARY XML INDEX [PX]");
+        assert!(create_cx < create_px && create_px < at("XML INDEX [SX]"));
+        assert!(at("ADD CONSTRAINT [FK_Orders_Customers]") < at("EXEC sp_addextendedproperty N'MS_Description', N'to customers', 'SCHEMA', N'dbo', 'TABLE', N'Orders', 'CONSTRAINT', N'FK_Orders_Customers'"));
+    }
+
+    #[test]
     fn cycles_are_reported() {
         let fk = |name: &str, to: &str| ForeignKey { name: name.into(), columns: vec!["R".into()], referenced_table: ObjectName::new("dbo", to), referenced_columns: vec!["Id".into()], ..Default::default() };
         let a = table("A", vec![col("Id", "int"), col("R", "int")], vec![fk("FK_A_B", "B")]);
@@ -1198,12 +1395,51 @@ COMMIT TRANSACTION\r\nGO\r\n";
                 }
             })
             .collect();
-        let result = DataComparison { session, tables, only_in_1: vec![], only_in_2: vec![], ddl_triggers: vec![] };
+        let result = DataComparison { session, tables, only_in_1: vec![], only_in_2: vec![], ddl_triggers: vec![], excluded: vec![], kinds: Default::default(), masked_reads: false, old_server: false };
         let script = generate(&result, &db, &DataOptions::default_set(), &SyncSettings::new("a.b", "c.d", "d")).unwrap();
         let mut circular: Vec<&str> = script.warnings.iter().map(|w| w.message.as_str()).filter(|m| m.starts_with("Circular")).collect();
         circular.sort();
         assert_eq!(circular, ["Circular dependency for the table or view [dbo].[A]", "Circular dependency for the table or view [dbo].[B]"]);
         assert_eq!(script.sql.matches("INSERT INTO").count(), 2);
+    }
+
+    #[test]
+    fn where_literals_by_side() {
+        let sized = |n: &str, l: i32| crate::catalog::DataType { name: n.into(), length: Some(l), ..Default::default() };
+        let c = ColumnPair {
+            source: "K".into(),
+            target: "K".into(),
+            source_type: sized("varchar", 20),
+            target_type: sized("varchar", 10),
+            read_only: false,
+            identity: false,
+            case_insensitive: true,
+            nullable: false,
+            source_collation: Some("Japanese_CI_AS".into()),
+            target_collation: Some("Latin1_General_CI_AS".into()),
+            source_identity: false,
+            graph: None,
+            masked: false,
+        };
+        let p = TablePair {
+            source: ObjectName::new("dbo", "T"),
+            target: ObjectName::new("dbo", "T"),
+            columns: vec![c],
+            key: vec![0],
+            key_name: None,
+            target_key_name: None,
+            where1: None,
+            where2: None,
+            problem: None,
+            is_view: false,
+            notes: vec![],
+            excluded: None,
+            target_missing: false,
+        };
+        let v = [Value::Str("a".into())];
+        let mut w = Vec::new();
+        assert_eq!(where_sql(&p, false, &v, false, &mut w), "[K] = cast(N'a' COLLATE Latin1_General_CI_AS as varchar(10))");
+        assert_eq!(where_sql(&p, false, &v, true, &mut w), "[K] = 'a'", "an updated row: the target column decides");
     }
 
     #[test]
