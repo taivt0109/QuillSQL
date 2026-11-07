@@ -310,8 +310,18 @@ fn grant_sql(p: &Permission, on: &str) -> String {
 }
 
 /// `EXEC sp_addextendedproperty N'name', N'value', 'SCHEMA', N'dbo', 'TABLE', N'T', NULL, NULL`.
+/// A value that is not a string goes through a variable of its type first
+/// (`DECLARE @xp int` / `SELECT @xp=3`); binary values are written in lower case.
 pub fn xprop_sql(p: &ExtendedProperty) -> String {
-    let value = p.value.as_deref().map(literal).unwrap_or_else(|| "NULL".into());
+    let binary = p.value_type.as_deref().is_some_and(|t| t.to_ascii_lowercase().ends_with("binary"));
+    let p = &ExtendedProperty { value: p.value.as_ref().map(|v| if binary { v.to_ascii_lowercase() } else { v.clone() }), ..p.clone() };
+    let variable = crate::schema::ddl::xprop_variable(p);
+    let value = match (p.value.as_deref(), p.value_type.as_deref()) {
+        (None, _) => "NULL".into(),
+        _ if !variable.is_empty() => "@xp".into(),
+        (Some(v), Some(t)) if t.eq_ignore_ascii_case("varchar") => format!("'{}'", v.replace('\'', "''")),
+        (Some(v), _) => literal(v),
+    };
     let mut args = vec![literal(&p.name), value];
     match p.class.as_str() {
         "DATABASE" => args.extend(["NULL", "NULL", "NULL", "NULL", "NULL", "NULL"].map(String::from)),
@@ -339,7 +349,20 @@ pub fn xprop_sql(p: &ExtendedProperty) -> String {
             }
         }
     }
-    format!("EXEC sp_addextendedproperty {}", args.join(", "))
+    format!("{variable}EXEC sp_addextendedproperty {}", args.join(", "))
+}
+
+/// `ALTER AUTHORIZATION ON [s].[o] TO [owner]` (`ON TYPE :: [s].[t]` for types) for an object
+/// with an explicit owner, unless IgnoreSchemaObjectAuthorization.
+pub fn authorization(class: Option<&str>, schema: &str, name: &str, owner: Option<&str>, o: &Options) -> Option<String> {
+    let owner = owner.filter(|_| !o.has(Opt::IgnoreSchemaObjectAuthorization))?;
+    let class = class.map(|c| format!("{c} :: ")).unwrap_or_default();
+    Some(format!("ALTER AUTHORIZATION ON {class}{} TO {}", qname(schema, name), quote(owner)))
+}
+
+/// The grants every database gives public: not written.
+fn public_default(p: &Permission) -> bool {
+    p.grantee == "public" && p.state == "GRANT" && matches!(p.permission.as_str(), "VIEW ANY COLUMN ENCRYPTION KEY DEFINITION" | "VIEW ANY COLUMN MASTER KEY DEFINITION")
 }
 
 fn xprops(out: &mut Out, db: &Database, class: &str, schema: &str, object: Option<&str>, o: &Options) {
@@ -393,7 +416,7 @@ fn triggers(out: &mut Out, list: &[Trigger], schema: &str, on: &str, o: &Options
         if tr.encrypted || tr.definition.is_empty() {
             continue;
         }
-        out.set_options(&ModuleSettings::default());
+        out.set_options(&tr.settings);
         out.module(&trigger_sql(&tr.definition, schema, &tr.name, on));
         for (event, order) in &tr.order {
             out.batch(&format!(
@@ -417,6 +440,10 @@ fn title(s: &str) -> String {
 pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String {
     let name = qname(&t.schema, &t.name);
     let mut out = Out::default();
+    // The history table of a system-versioned table goes first, in the same file.
+    if let Some(h) = t.temporal.as_ref().and_then(|tv| db.tables.iter().find(|x| x.history_table && x.object_name() == tv.history_table)) {
+        out.s.push_str(&table(db, h, o, default_fg));
+    }
     let mut lines: Vec<String> = t.columns.iter().filter(|c| !is_graph_internal(c)).map(column_sql).collect();
     if let Some(tv) = &t.temporal
         && !tv.period_start.is_empty()
@@ -460,6 +487,29 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
         }
     }
     let mut s = format!("CREATE TABLE {name}\n(\n{}\n)", lines.join(",\n"));
+    if let Some(ft) = &t.file_table {
+        // A FileTable's columns, keys and defaults are fixed.
+        s = format!("CREATE TABLE {name} AS FILETABLE");
+        if let Some(fg) = &t.storage.data_space {
+            s.push_str(&format!(" ON {}", quote(fg)));
+        }
+        if let Some(fg) = &t.filestream_filegroup {
+            s.push_str(&format!(" FILESTREAM_ON {}", quote(fg)));
+        }
+        s.push_str(&format!("\nWITH\n(\n\tFILETABLE_DIRECTORY = {}, FILETABLE_COLLATE_FILENAME = {}", literal(&ft.directory), ft.filename_collation));
+        if let Some(pk) = &ft.primary_key {
+            s.push_str(&format!(", FILETABLE_PRIMARY_KEY_CONSTRAINT_NAME = {}", quote(pk)));
+        }
+        s.push_str("\n)");
+        out.batch(&s);
+        if let Some(a) = authorization(None, &t.schema, &t.name, t.owner.as_deref(), o) {
+            out.batch(&a);
+        }
+        triggers(&mut out, &t.triggers, &t.schema, &name, o);
+        permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), o);
+        xprops(&mut out, db, "TABLE", &t.schema, Some(&t.name), o);
+        return out.s;
+    }
     if let Some(g) = &t.graph {
         s.push_str(&format!(" AS {g}"));
     }
@@ -501,6 +551,12 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
         s.push_str(&format!("\nWITH\n(\n{}\n)", with.join(",\n")));
     }
     out.batch(&s);
+    if t.remote_data_archive {
+        out.batch(&format!("ALTER TABLE {name} SET (REMOTE_DATA_ARCHIVE = ON (MIGRATION_STATE = PAUSED))"));
+    }
+    if let Some(a) = authorization(None, &t.schema, &t.name, t.owner.as_deref(), o) {
+        out.batch(&a);
+    }
     if t.lock_escalation != "TABLE" && !t.lock_escalation.is_empty() {
         out.batch(&format!("ALTER TABLE {name} SET (LOCK_ESCALATION = {})", t.lock_escalation));
     }
@@ -548,14 +604,14 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
             out.batch(&format!("ALTER TABLE {name} NOCHECK CONSTRAINT {}", quote(n)));
         }
     }
-    // Defaults and rules bound with sp_bindefault / sp_bindrule.
+    // Rules and defaults bound with sp_bindrule / sp_bindefault, in that order.
     for c in &t.columns {
         let column = literal(&format!("{name}.{}", quote(&c.name)));
-        if let Some(d) = &c.bound_default {
-            out.batch(&format!("EXEC sp_bindefault {}, {column}", literal(d)));
-        }
         if let Some(r) = &c.bound_rule {
             out.batch(&format!("EXEC sp_bindrule {}, {column}", literal(r)));
+        }
+        if let Some(d) = &c.bound_default {
+            out.batch(&format!("EXEC sp_bindefault {}, {column}", literal(d)));
         }
     }
     if let Some(ct) = &t.change_tracking {
@@ -570,6 +626,9 @@ pub fn table(db: &Database, t: &Table, o: &Options, default_fg: &str) -> String 
     }
     permissions(&mut out, db, "OBJECT", &t.schema, Some(&t.name), o);
     xprops(&mut out, db, "TABLE", &t.schema, Some(&t.name), o);
+    if t.large_value_types_out_of_row {
+        out.batch(&crate::schema::ddl::large_values_out_of_row(&name, true));
+    }
     out.s
 }
 
@@ -614,6 +673,9 @@ pub fn view(db: &Database, v: &View, o: &Options, default_fg: &str) -> String {
         out.set_options(&v.settings);
         out.module(&module_sql(&v.definition, "CREATE", &name));
     }
+    if let Some(a) = authorization(None, &v.schema, &v.name, v.owner.as_deref(), o) {
+        out.batch(&a);
+    }
     let mut ixs: Vec<&Index> = v.indexes.iter().collect();
     ixs.sort_by_key(|i| (i.kind != IndexKind::Clustered, i.name.clone()));
     for ix in ixs {
@@ -633,6 +695,9 @@ pub fn routine(db: &Database, r: &Routine, o: &Options) -> String {
     } else if !r.definition.is_empty() {
         out.set_options(&r.settings);
         out.module(&module_sql(&r.definition, "CREATE", &name));
+    }
+    if let Some(a) = authorization(None, &r.schema, &r.name, r.owner.as_deref(), o) {
+        out.batch(&a);
     }
     permissions(&mut out, db, "OBJECT", &r.schema, Some(&r.name), o);
     let class = if matches!(r.kind, RoutineKind::Procedure | RoutineKind::ClrProcedure) { "PROCEDURE" } else { "FUNCTION" };
@@ -671,8 +736,19 @@ pub fn user_type(db: &Database, t: &UserType, o: &Options) -> String {
             out.batch(&s);
         }
     }
+    if let Some(a) = authorization(Some("TYPE"), &t.schema, &t.name, t.owner.as_deref(), o) {
+        out.batch(&a);
+    }
     permissions(&mut out, db, "TYPE", &t.schema, Some(&t.name), o);
     xprops(&mut out, db, "TYPE", &t.schema, Some(&t.name), o);
+    if !o.has(Opt::IgnoreBindings) {
+        if let Some(r) = &t.bound_rule {
+            out.batch(&format!("EXEC sp_bindrule {}, {}", literal(r), literal(&name)));
+        }
+        if let Some(d) = &t.bound_default {
+            out.batch(&format!("EXEC sp_bindefault {}, {}", literal(d), literal(&name)));
+        }
+    }
     out.s
 }
 
@@ -693,6 +769,9 @@ pub fn sequence(db: &Database, s: &Sequence, o: &Options) -> String {
             (true, None) => "CACHE".to_string(),
         }
     ));
+    if let Some(a) = authorization(None, &s.schema, &s.name, s.owner.as_deref(), o) {
+        out.batch(&a);
+    }
     permissions(&mut out, db, "OBJECT", &s.schema, Some(&s.name), o);
     xprops(&mut out, db, "SEQUENCE", &s.schema, Some(&s.name), o);
     out.s
@@ -701,6 +780,9 @@ pub fn sequence(db: &Database, s: &Sequence, o: &Options) -> String {
 pub fn synonym(db: &Database, s: &Synonym, o: &Options) -> String {
     let mut out = Out::default();
     out.batch(&format!("CREATE SYNONYM {} FOR {}", qname(&s.schema, &s.name), s.base_object));
+    if let Some(a) = authorization(None, &s.schema, &s.name, s.owner.as_deref(), o) {
+        out.batch(&a);
+    }
     permissions(&mut out, db, "OBJECT", &s.schema, Some(&s.name), o);
     xprops(&mut out, db, "SYNONYM", &s.schema, Some(&s.name), o);
     out.s
@@ -732,7 +814,7 @@ fn database_permissions(out: &mut Out, db: &Database, grantee: &str, o: &Options
     if o.has(Opt::IgnorePermissions) {
         return;
     }
-    let mut list: Vec<&Permission> = db.permissions.iter().filter(|p| p.class == "DATABASE" && p.grantee == grantee).collect();
+    let mut list: Vec<&Permission> = db.permissions.iter().filter(|p| p.class == "DATABASE" && p.grantee == grantee && !public_default(p)).collect();
     list.sort_by_key(|p| (state_order(&p.state), p.permission.clone()));
     for p in list {
         out.line(&grant_sql(p, ""));
@@ -750,13 +832,40 @@ pub fn role(db: &Database, p: &Principal, o: &Options) -> String {
     }
     members(&mut out, db, &p.name);
     database_permissions(&mut out, db, &p.name, o);
+    principal_xprops(&mut out, db, &p.name, o);
     out.s
 }
 
-/// A fixed role's file holds only its members.
-pub fn fixed_role(db: &Database, role: &str) -> String {
+/// Extended properties of a user or role (level 0 USER). They follow the database
+/// permissions, which end without `GO`, in the same batch.
+fn principal_xprops(out: &mut Out, db: &Database, name: &str, o: &Options) {
+    if o.has(Opt::IgnoreExtendedProperties) {
+        return;
+    }
+    for p in db.extended_properties.iter().filter(|p| p.class == "USER" && p.schema.is_none() && p.object.as_deref() == Some(name)) {
+        out.batch(&xprop_sql(p));
+    }
+}
+
+/// A fixed role's file (public, db_datareader...) holds its members and database permissions.
+pub fn fixed_role(db: &Database, role: &str, o: &Options) -> String {
     let mut out = Out::default();
     members(&mut out, db, role);
+    database_permissions(&mut out, db, role, o);
+    out.s
+}
+
+/// guest's file holds only its database permissions, after an empty batch where the other
+/// users have CREATE USER.
+pub fn guest(db: &Database, o: &Options) -> String {
+    let mut text = Out::default();
+    database_permissions(&mut text, db, "guest", o);
+    if text.s.is_empty() {
+        return String::new();
+    }
+    let mut out = Out::default();
+    out.batch("");
+    out.s.push_str(&text.s);
     out.s
 }
 
@@ -785,6 +894,7 @@ pub fn user(db: &Database, p: &Principal, o: &Options) -> String {
         }
     }
     database_permissions(&mut out, db, &p.name, o);
+    principal_xprops(&mut out, db, &p.name, o);
     out.s
 }
 

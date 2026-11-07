@@ -132,7 +132,13 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
         }
     }
     for p in &db.security_policies {
-        add(key(ObjectType::SecurityPolicy, &p.schema, &p.name), vec![d::create_security_policy(p)], grants(db, "OBJECT", Some(&p.schema), &p.name, o));
+        // SQL Compare leaves a blank line after the policy when its authorization follows.
+        let mut v = vec![d::create_security_policy(p)];
+        if let Some(a) = script::authorization(None, &p.schema, &p.name, p.owner.as_deref(), o) {
+            v[0].push_str("\r\n");
+            v.push(a);
+        }
+        add(key(ObjectType::SecurityPolicy, &p.schema, &p.name), v, grants(db, "OBJECT", Some(&p.schema), &p.name, o));
     }
     for x in &db.external_data_sources {
         add(key(ObjectType::ExternalDataSource, "", &x.name), vec![d::create_external_data_source(x)], Vec::new());
@@ -141,7 +147,9 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
         add(key(ObjectType::ExternalFileFormat, "", &x.name), vec![d::create_external_file_format(x)], Vec::new());
     }
     for x in &db.external_tables {
-        add(key(ObjectType::ExternalTable, &x.schema, &x.name), vec![d::create_external_table(x)], grants(db, "OBJECT", Some(&x.schema), &x.name, o));
+        let mut v = vec![d::create_external_table(x)];
+        v.extend(script::authorization(None, &x.schema, &x.name, x.owner.as_deref(), o));
+        add(key(ObjectType::ExternalTable, &x.schema, &x.name), v, grants(db, "OBJECT", Some(&x.schema), &x.name, o));
     }
     out.extend(images);
     out

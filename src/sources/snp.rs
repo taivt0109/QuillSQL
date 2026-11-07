@@ -187,6 +187,7 @@ struct RawProp {
     names: [Option<String>; 3],
     name: String,
     value: Option<String>,
+    value_type: Option<String>,
 }
 
 #[derive(Default)]
@@ -212,6 +213,8 @@ struct RawField {
     bound_default: Option<String>,
     bound_rule: Option<String>,
     sensitivity: Option<Sensitivity>,
+    /// Object id of the DEFAULT constraint (0 if none).
+    default_id: i32,
 }
 
 #[derive(Default)]
@@ -242,6 +245,12 @@ struct RawTable {
     is_edge: bool,
     statistics: Vec<Statistic>,
     edge_constraints: Vec<EdgeConstraint>,
+    owner: Option<String>,
+    large_values_out_of_row: bool,
+    remote_data_archive: bool,
+    file_table: Option<FileTable>,
+    /// Object ids of the keys, foreign keys and checks, by name.
+    constraint_ids: Vec<(String, i32)>,
 }
 
 struct RawTrigger {
@@ -301,11 +310,13 @@ struct Cur<'a> {
     type_perms: Vec<(String, String, Vec<RawPerm>)>,
     /// History tables, which are written inside their system-versioned table.
     histories: Vec<RawTable>,
+    /// Object ids of the constraints met while reading a table: (name, id).
+    constraint_ids: Vec<(String, i32)>,
 }
 
 impl<'a> Cur<'a> {
     fn new(b: &'a [u8]) -> Self {
-        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new(), type_perms: Vec::new(), histories: Vec::new() }
+        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new(), type_perms: Vec::new(), histories: Vec::new(), constraint_ids: Vec::new() }
     }
 
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
@@ -527,7 +538,7 @@ impl<'a> Cur<'a> {
         let v = self.f32()?;
         let types = [self.str()?, self.str()?, self.str()?];
         let names = [self.str()?, self.str()?, self.str()?];
-        let value = self.prop_value(v)?;
+        let (value, value_type) = self.prop_value(v)?;
         let name = self.s()?;
         if v >= 11.45 {
             self.ss()?;
@@ -535,20 +546,21 @@ impl<'a> Cur<'a> {
         if v >= 22.0 {
             self.sss(2)?;
         }
-        Ok(RawProp { types, names, name, value })
+        Ok(RawProp { types, names, name, value, value_type })
     }
 
-    /// A sql_variant value, as text.
-    fn prop_value(&mut self, v: f32) -> R<Option<String>> {
+    /// A sql_variant value, as text, and its base type (recorded from version 9.1).
+    fn prop_value(&mut self, v: f32) -> R<(Option<String>, Option<String>)> {
+        let mut base = None;
         if v >= 9.1 {
             self.i32()?;
             self.i32()?;
             self.i32()?;
-            self.str()?;
+            base = self.str()?.filter(|t| !t.is_empty()).map(|t| t.to_ascii_lowercase());
             self.i8()?;
         }
         let at = self.p;
-        Ok(match self.u8()? {
+        let value = match self.u8()? {
             0 => None,
             1 | 14 => self.str()?,
             2 => Some(self.i32()?.to_string()),
@@ -571,7 +583,9 @@ impl<'a> Cur<'a> {
                 self.str()?
             }
             t => return Err(format!("bad extended property value tag {t} at offset {at}")),
-        })
+        };
+        let value_type = base.filter(|_| value.is_some());
+        Ok((value, value_type))
     }
 
     /// EXECUTE AS: 0 CALLER, 1 OWNER, 2 SELF, 3 GUEST, 4 a user name.
@@ -685,7 +699,7 @@ impl Cur<'_> {
         f.bound_default = self.str()?.filter(|x| !x.is_empty());
         f.default_name = self.s()?;
         if v >= 4.0 {
-            self.i32()?;
+            f.default_id = self.i32()?;
         }
         if v >= 11.0 {
             f.default_system_named = self.bool()?;
@@ -780,7 +794,8 @@ impl Cur<'_> {
         let filegroup = self.str()?;
         let fill_factor = self.u8()?;
         if v >= 10.2 {
-            self.i32()?;
+            let id = self.i32()?;
+            self.constraint_ids.push((name.clone(), id));
         }
         let system_named = v >= 10.3 && self.bool()?;
         if v >= 11.45 {
@@ -968,7 +983,8 @@ impl Cur<'_> {
             fk.referenced_columns.push(self.s()?);
         }
         if v >= 10.2 {
-            self.i32()?;
+            let id = self.i32()?;
+            self.constraint_ids.push((fk.name.clone(), id));
         }
         if v >= 10.3 {
             fk.system_named = self.bool()?;
@@ -986,7 +1002,8 @@ impl Cur<'_> {
         let v = self.f32()?;
         let mut ck = CheckConstraint { name: self.s()?, not_for_replication: self.bool()?, disabled: self.bool()?, ..Default::default() };
         if v >= 4.0 {
-            self.i32()?;
+            let id = self.i32()?;
+            self.constraint_ids.push((ck.name.clone(), id));
         }
         ck.definition = self.s()?;
         if v > 1.0 {
@@ -1013,8 +1030,7 @@ impl Cur<'_> {
         let v = self.f32()?;
         let qualified = self.s()?;
         let text_id = self.i32()?;
-        self.bool()?; // quoted identifier
-        self.bool()?; // ansi nulls
+        let settings = ModuleSettings { quoted_identifier: self.bool()?, ansi_nulls: self.bool()? };
         let (update, insert, delete) = (self.bool()?, self.bool()?, self.bool()?);
         self.bool()?; // after
         let instead_of = self.bool()?;
@@ -1045,15 +1061,17 @@ impl Cur<'_> {
                 }
             }
             t.encrypted = self.bool()?;
-            if v >= 7.2 {
-                self.execute_as()?;
-            } else {
-                self.str()?;
+            t.execute_as = if v >= 7.2 { self.execute_as()? } else { self.str()? };
+            let mut binding = [String::new(), String::new(), String::new()];
+            for b in &mut binding {
+                *b = self.s()?;
             }
-            for _ in 0..3 {
-                self.str()?;
+            if self.bool()? {
+                t.clr_method = Some(binding.iter().filter(|b| !b.is_empty()).map(|b| objects::bracket(b)).collect::<Vec<_>>().join("."));
             }
-            self.bool()?; // CLR
+        }
+        if t.clr_method.is_none() {
+            t.settings = settings;
         }
         if v >= 4.1 {
             t.disabled = self.bool()?;
@@ -1081,12 +1099,14 @@ impl Cur<'_> {
         self.eprops()?;
         self.i32()?;
         t.perms = self.perms()?;
+        let ids_from = self.constraint_ids.len();
         let stats_from = self.stats.len();
         t.indexes = self.coll(Cur::index)?.into_iter().flatten().collect();
         t.statistics = self.stats.split_off(stats_from);
         t.statistics.sort_by(|a, b| a.name.cmp(&b.name));
         t.foreign_keys = self.coll(Cur::foreign_key)?;
         t.checks = self.coll(Cur::check_constraint)?;
+        t.constraint_ids = self.constraint_ids.split_off(ids_from);
         t.triggers = self.coll(Cur::trigger)?;
         let fulltext = self.bool()?;
         self.bool()?;
@@ -1126,7 +1146,7 @@ impl Cur<'_> {
             t.compression = self.compression()?;
         }
         if v >= 7.2 {
-            self.str()?;
+            t.owner = self.str()?.filter(|o| !o.is_empty());
         }
         if v >= 7.5 {
             t.change_tracking = self.u8()?;
@@ -1145,7 +1165,7 @@ impl Cur<'_> {
             self.strs()?;
         }
         if v >= 11.35 {
-            self.u8()?;
+            t.remote_data_archive = self.u8()? != 0;
         }
         if v >= 11.45 {
             self.sss(3)?;
@@ -1180,7 +1200,7 @@ impl Cur<'_> {
             self.histories.push(history);
         }
         if v >= 13.62 {
-            self.bool()?;
+            t.large_values_out_of_row = self.bool()?;
         }
         if v >= 13.7 {
             t.edge_constraints = self.coll(Cur::edge_constraint)?;
@@ -1211,18 +1231,31 @@ impl Cur<'_> {
     fn table_item(&mut self) -> R<RawTable> {
         let at = self.p;
         let kind = self.u8()?;
-        let t = self.table()?;
+        let mut t = self.table()?;
         match kind {
             0 => {}
             1 => {
                 // FileTable: directory, filename collation, primary key, system object ids.
-                self.str()?;
-                self.str()?;
+                let mut ft = FileTable { directory: self.s()?, filename_collation: self.s()?, primary_key: None };
                 if self.bool()? {
-                    self.index()?;
+                    let from = self.constraint_ids.len();
+                    ft.primary_key = self.index()?.map(|ix| ix.name);
+                    self.constraint_ids.truncate(from);
                 }
                 let n = self.count()?;
-                self.take(n.saturating_mul(4))?;
+                let system: Vec<i32> = self.list(n, Cur::i32)?;
+                // The system-defined constraints and defaults are not part of the model.
+                let ids = std::mem::take(&mut t.constraint_ids);
+                let is_system = |name: &str| ids.iter().any(|(n, id)| n == name && *id != 0 && system.contains(id));
+                t.indexes.retain(|ix| !is_system(&ix.name));
+                t.foreign_keys.retain(|fk| !is_system(&fk.name));
+                t.checks.retain(|ck| !is_system(&ck.name));
+                for c in &mut t.columns {
+                    if c.default_id != 0 && system.contains(&c.default_id) {
+                        c.default_name.clear();
+                    }
+                }
+                t.file_table = Some(ft);
             }
             k => return Err(format!("unknown table kind {k} at offset {at}")),
         }
@@ -1280,7 +1313,7 @@ impl Cur<'_> {
             r.null_on_null_input = self.bool()? && (clr || function_type == 4);
         }
         if v >= 7.0 {
-            self.str()?;
+            r.owner = self.str()?.filter(|o| !o.is_empty());
         }
         if v >= 7.3 {
             r.execute_as = self.execute_as()?;
@@ -1352,7 +1385,7 @@ impl Cur<'_> {
             self.bool()?;
         }
         if v >= 7.0 {
-            self.str()?;
+            r.owner = self.str()?.filter(|o| !o.is_empty());
         }
         if v >= 7.3 {
             self.strs()?;
@@ -1409,7 +1442,7 @@ impl Cur<'_> {
             }
         }
         if v >= 7.1 {
-            self.str()?;
+            view.owner = self.str()?.filter(|o| !o.is_empty());
         }
         if v >= 10.2 {
             self.str()?;
@@ -1435,8 +1468,8 @@ impl Cur<'_> {
         let (length, precision, scale) = (self.i32()?, self.i32()?, self.i32()?);
         let sql_type = self.i32()?;
         let base = self.s()?;
-        self.str()?;
-        self.str()?;
+        ty.bound_rule = self.str()?.filter(|x| !x.is_empty()).map(|x| requote(&x));
+        ty.bound_default = self.str()?.filter(|x| !x.is_empty()).map(|x| requote(&x));
         for _ in 0..3 {
             self.strs()?;
         }
@@ -1473,7 +1506,7 @@ impl Cur<'_> {
             ty.base_type = Some(system_type(&base, length, precision, scale));
         }
         if v >= 7.2 {
-            self.str()?;
+            ty.owner = self.str()?.filter(|o| !o.is_empty());
         }
         if v >= 11.45 {
             self.sss(2)?;
@@ -1492,7 +1525,7 @@ impl Cur<'_> {
         self.eprops()?;
         let perms = self.perms()?;
         if v >= 7.0 {
-            self.str()?;
+            syn.owner = self.str()?.filter(|o| !o.is_empty());
         }
         if v >= 11.45 {
             self.sss(2)?;
@@ -1533,7 +1566,7 @@ impl Cur<'_> {
             self.str()?;
         }
         self.bool()?;
-        self.str()?;
+        sq.owner = self.str()?.filter(|o| !o.is_empty());
         if v >= 11.45 {
             self.sss(2)?;
         }
@@ -1700,6 +1733,10 @@ impl Snap {
                 },
                 statistics,
                 edge_constraints,
+                owner: t.owner,
+                large_value_types_out_of_row: t.large_values_out_of_row,
+                remote_data_archive: t.remote_data_archive,
+                file_table: t.file_table,
                 ..Default::default()
             };
             if table.graph.is_some() {
@@ -1873,7 +1910,7 @@ impl Snap {
             for (action, statement) in perms {
                 // CONNECT comes with CREATE USER: only DENY and WITH GRANT OPTION are kept.
                 let Some(state) = state(i32::from(*statement)) else { continue };
-                if action.eq_ignore_ascii_case("CONNECT") && state == "GRANT" {
+                if action.eq_ignore_ascii_case("CONNECT") && state == "GRANT" && !grantee.eq_ignore_ascii_case("guest") {
                     continue;
                 }
                 permissions.push(Permission {
@@ -1983,7 +2020,7 @@ fn extended_properties(props: &[RawProp]) -> Vec<ExtendedProperty> {
     let mut out: Vec<ExtendedProperty> = Vec::new();
     for raw in props {
         let up = |i: usize| raw.types[i].as_deref().map(str::to_ascii_uppercase);
-        let mut p = ExtendedProperty { name: raw.name.clone(), value: raw.value.clone(), ..Default::default() };
+        let mut p = ExtendedProperty { name: raw.name.clone(), value: raw.value.clone(), value_type: raw.value_type.clone(), ..Default::default() };
         match (up(0).as_deref(), up(1).as_deref()) {
             (None, _) => p.class = "DATABASE".into(),
             (Some("SCHEMA"), None) => {
@@ -1991,7 +2028,7 @@ fn extended_properties(props: &[RawProp]) -> Vec<ExtendedProperty> {
                 p.schema = raw.names[0].clone();
             }
             // Database-wide objects are named at level 0.
-            (Some(level0 @ ("ASSEMBLY" | "MESSAGE TYPE" | "CONTRACT" | "SERVICE" | "REMOTE SERVICE BINDING" | "ROUTE" | "PARTITION FUNCTION" | "PARTITION SCHEME" | "TRIGGER")), None) => {
+            (Some(level0 @ ("USER" | "ASSEMBLY" | "MESSAGE TYPE" | "CONTRACT" | "SERVICE" | "REMOTE SERVICE BINDING" | "ROUTE" | "PARTITION FUNCTION" | "PARTITION SCHEME" | "TRIGGER")), None) => {
                 p.class = level0.into();
                 p.object = raw.names[0].clone();
             }
@@ -2004,10 +2041,9 @@ fn extended_properties(props: &[RawProp]) -> Vec<ExtendedProperty> {
                 .into();
                 p.schema = raw.names[0].clone();
                 p.object = raw.names[1].clone();
-                if p.class != "TYPE" {
-                    p.minor_type = up(2);
-                    p.minor_name = raw.names[2].clone().filter(|_| p.minor_type.is_some());
-                }
+                // Table-type columns are level 2 of their TYPE.
+                p.minor_type = up(2);
+                p.minor_name = raw.names[2].clone().filter(|_| p.minor_type.is_some());
             }
             _ => continue,
         }

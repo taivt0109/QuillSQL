@@ -611,7 +611,7 @@ impl W<'_> {
         self.i32(id);
         self.s(&p.schema);
         self.s(&p.name);
-        self.str(None);
+        self.str(p.owner.as_deref());
         self.bool(p.enabled);
         self.bool(p.schema_bound);
         self.bool(p.not_for_replication);
@@ -701,7 +701,7 @@ impl W<'_> {
             self.i32(d);
         }
         self.str(sharding.as_deref());
-        self.str(None);
+        self.str(t.owner.as_deref());
         self.no_ss(1);
         self.perms_on("OBJECT", Some(&t.schema), Some(&t.name));
         self.eprops("TABLE", &t.schema, &t.name);
@@ -734,7 +734,7 @@ fn private_key_code(p: &str) -> i32 {
 }
 
 /// .NET `Guid` bytes of `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`: the first three groups little-endian.
-fn guid_bytes(s: &str) -> [u8; 16] {
+pub(super) fn guid_bytes(s: &str) -> [u8; 16] {
     let hex: String = s.chars().filter(char::is_ascii_hexdigit).collect();
     let mut b: [u8; 16] = clr::from_hex(&hex).and_then(|v| v.try_into().ok()).unwrap_or_default();
     b[..4].reverse();

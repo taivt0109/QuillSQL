@@ -13,3 +13,6 @@ pub mod snp;
 pub mod snp_write;
 pub mod sqlproj;
 pub mod script;
+
+#[cfg(test)]
+mod followup_tests;
