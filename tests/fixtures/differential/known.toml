@@ -127,24 +127,6 @@ finding = "schema-deploy H2"
 reason = "V2 (SELECT * FROM V1) is not refreshed after V1 is altered"
 
 [[known]]
-scenario = "schema-staticdata"
-oracle = "check"
-finding = "sources-cli H4"
-reason = "/include:StaticData does nothing: no data comparison, exit 63 instead of 0, lookup rows not deployed"
-
-[[known]]
-scenario = "schema-staticdata"
-oracle = "converge-quill"
-finding = "sources-cli H4"
-reason = "/include:StaticData does nothing: no data comparison, exit 63 instead of 0, lookup rows not deployed"
-
-[[known]]
-scenario = "schema-staticdata"
-oracle = "exit"
-finding = "sources-cli H4"
-reason = "/include:StaticData does nothing: no data comparison, exit 63 instead of 0, lookup rows not deployed"
-
-[[known]]
 scenario = "schema-columnstore"
 oracle = "check"
 finding = "new"
@@ -217,12 +199,6 @@ finding = "new"
 reason = "same as schema-triggers: bracketed trigger header written by Redgate makes quill report the table different"
 
 [[known]]
-scenario = "data-views-backup"
-oracle = "diffset"
-finding = "data H1"
-reason = "indexed view is compared when database 1 is a backup; Redgate excludes views from non-live comparisons"
-
-[[known]]
 scenario = "data-mot-backup"
 oracle = "check"
 finding = "data H2"
@@ -257,12 +233,6 @@ scenario = "data-mot-backup"
 oracle = "outcome"
 finding = "data H2"
 reason = "Redgate's backup reader crashes on this backup (FormatException in its log reader), so nothing can be compared; quill reads it and leaves the memory-optimized table uncompared"
-
-[[known]]
-scenario = "data-mot-backup"
-oracle = "warnings"
-finding = "new"
-reason = "quill prints 'not compared: no primary key or unique index' warnings Redgate does not print"
 
 [[known]]
 scenario = "data-where-scripts"
@@ -385,94 +355,10 @@ finding = "data H7, sources-cli H3"
 reason = "DeselectAll + SelectItem is ignored: table B is compared and deployed"
 
 [[known]]
-scenario = "data-lob-backup"
-oracle = "check"
-finding = "data H8"
-reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
-
-[[known]]
-scenario = "data-lob-backup"
-oracle = "converge-quill"
-finding = "data H8"
-reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
-
-[[known]]
-scenario = "data-lob-backup"
-oracle = "exit"
-finding = "data H8"
-reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
-
-[[known]]
-scenario = "data-lob-backup"
-oracle = "outcome"
-finding = "data H8"
-reason = "deploying from a backup stops with 'a large value of Data needs a connection to database 1' (exit 1)"
-
-[[known]]
-scenario = "data-scripts-no-datafile"
-oracle = "check"
-finding = "sources-cli H1"
-reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
-
-[[known]]
-scenario = "data-scripts-no-datafile"
-oracle = "converge-redgate"
-finding = "sources-cli H1"
-reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
-
-[[known]]
-scenario = "data-scripts-no-datafile"
-oracle = "diffset"
-finding = "sources-cli H1"
-reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
-
-[[known]]
-scenario = "data-scripts-no-datafile"
-oracle = "outcome"
-finding = "sources-cli H1"
-reason = "a table with no data script in the folder is compared as empty and its target rows are deleted; Redgate leaves it out"
-
-[[known]]
-scenario = "data-binary-key"
-oracle = "check"
-finding = "new"
-reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
-
-[[known]]
-scenario = "data-binary-key"
-oracle = "converge-quill"
-finding = "new"
-reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
-
-[[known]]
 scenario = "data-binary-key"
 oracle = "diffset"
 finding = "new"
-reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
-
-[[known]]
-scenario = "data-binary-key"
-oracle = "outcome"
-finding = "new"
-reason = "quill pairs varbinary keys 0x0102 and 0x010200 (equal under SQL Server's trailing-zero rule) and leaves the target bytes; Redgate compares bytes exactly (and also fails to pair 0xFF, deleting and re-inserting it)"
-
-[[known]]
-scenario = "data-unicode"
-oracle = "check"
-finding = "new"
-reason = "quill compares nvarchar by code points; Redgate uses the column collation, so e+combining acute = é and two different emoji (supplementary characters) are equal for Redgate"
-
-[[known]]
-scenario = "data-unicode"
-oracle = "converge-redgate"
-finding = "new"
-reason = "quill compares nvarchar by code points; Redgate uses the column collation, so e+combining acute = é and two different emoji (supplementary characters) are equal for Redgate"
-
-[[known]]
-scenario = "data-unicode"
-oracle = "diffset"
-finding = "new"
-reason = "quill compares nvarchar by code points; Redgate uses the column collation, so e+combining acute = é and two different emoji (supplementary characters) are equal for Redgate"
+reason = "Redgate fails to pair the equal key 0xFF (deletes and re-inserts it), so its counts differ; quill pairs it"
 
 [[known]]
 scenario = "data-type-pairs"
@@ -486,68 +372,3 @@ oracle = "diffset"
 finding = "AUDIT2-BRIEF deviation"
 reason = "documented deviation: date/datetime pairs are compared by value; Redgate reports datetime vs datetime2 (and the other cross-type rows) as different"
 
-[[known]]
-scenario = "data-missing-from-2-as-include"
-oracle = "converge-quill"
-finding = "new"
-reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
-
-[[known]]
-scenario = "data-missing-from-2-as-include"
-oracle = "converge-redgate"
-finding = "new"
-reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
-
-[[known]]
-scenario = "data-missing-from-2-as-include"
-oracle = "diffset"
-finding = "new"
-reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
-
-[[known]]
-scenario = "data-missing-from-2-as-include"
-oracle = "exit"
-finding = "new"
-reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
-
-[[known]]
-scenario = "data-missing-from-2-as-include"
-oracle = "outcome"
-finding = "new"
-reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
-
-[[known]]
-scenario = "data-missing-from-2-as-include"
-oracle = "warnings"
-finding = "new"
-reason = "quill rejects MissingFrom2AsInclude ('Unrecognised option') and exits 63; Redgate lists the table only in 1 but its own deployment fails because the table does not exist (exit 126)"
-
-[[known]]
-scenario = "data-no-key"
-oracle = "warnings"
-finding = "new"
-reason = "quill prints 'not compared: no primary key or unique index' warnings (plain and High); Redgate prints none"
-
-[[known]]
-scenario = "data-views-scripts"
-oracle = "warnings"
-finding = "new"
-reason = "quill prints key / unmatched-column warnings for the view from a scripts folder; Redgate prints none"
-
-[[known]]
-scenario = "data-collation-mismatch"
-oracle = "warnings"
-finding = "new"
-reason = "quill warns (High) that key collations vary; Redgate prints no warning"
-
-[[known]]
-scenario = "data-fk-cycle"
-oracle = "warnings"
-finding = "new"
-reason = "quill warns (High) about a circular dependency; Redgate prints no warning"
-
-[[known]]
-scenario = "data-temporal"
-oracle = "warnings"
-finding = "new"
-reason = "quill prints 'Excluded ValidFrom because it is GENERATED ALWAYS AS $AsRowStart' with an unfilled placeholder; Redgate prints nothing"

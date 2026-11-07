@@ -47,6 +47,7 @@ data_options! {
     IncludeViews = Mapping false "Include views";
     CaseSensitiveObjectDefinition = Mapping false "Use case-sensitive object definition";
     IncludeGeneratedAlwaysColumns = Mapping false "Include generated always columns";
+    MissingFrom2AsInclude = Mapping false "Compare tables missing from database 2 as empty";
 
     CompressTemporaryFiles = Comparison false "Compress temporary files";
     ForceBinaryCollation = Comparison false "Force binary collation (case-sensitive)";
@@ -94,6 +95,7 @@ const ALIASES: &[(&str, DataOpt)] = &[
     ("OutputCommentHeader", DataOpt::OutputCommentHeader),
     ("IncludeTimestamps", DataOpt::IncludeTimestamps),
     ("IncludeIdentities", DataOpt::IncludeIdentities),
+    ("mf2ai", DataOpt::MissingFrom2AsInclude),
 ];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -224,7 +226,7 @@ mod tests {
 
     #[test]
     fn options_tab() {
-        assert_eq!(ALL.len(), 25);
+        assert_eq!(ALL.len(), 26);
         let d = DataOptions::default_set();
         let on: Vec<&str> = d.iter().map(DataOpt::name).collect();
         assert_eq!(on, ["IgnoreSpaces", "IncludeIdentities", "IncludeTimestamps", "DisableKeys", "OutputCommentHeader"]);

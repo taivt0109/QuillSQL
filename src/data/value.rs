@@ -3,7 +3,9 @@
 //! Keys are ordered the way both servers are asked to order them (see `compare`): strings by
 //! code point after the server has trimmed trailing spaces (and folded case, accents, kana and
 //! width as the collation ignores them), uniqueidentifier in SQL Server's byte order, binary
-//! with trailing zero bytes ignored, datetimeoffset by its UTC instant. The merge relies on that
+//! with trailing zero bytes ignored and then by length (the server is asked for `DATALENGTH` as a
+//! tie-break, so 0x0102 and 0x010200 are different keys, as SQL Data Compare treats them),
+//! datetimeoffset by its UTC instant. The merge relies on that
 //! agreement and stops with an error if a stream is ever out of order.
 
 use std::cmp::Ordering;
@@ -481,7 +483,8 @@ pub fn cmp_key(a: &Value, b: &Value) -> Ordering {
         (Value::Null, _) => Ordering::Less,
         (_, Value::Null) => Ordering::Greater,
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
-        (Value::Bytes(x), Value::Bytes(y)) | (Value::Clr(x, _), Value::Clr(y, _)) => trim_zeros(x).cmp(trim_zeros(y)),
+        (Value::Bytes(x), Value::Bytes(y)) => trim_zeros(x).cmp(trim_zeros(y)).then_with(|| x.len().cmp(&y.len())),
+        (Value::Clr(x, _), Value::Clr(y, _)) => trim_zeros(x).cmp(trim_zeros(y)),
         (Value::Guid(x), Value::Guid(y)) => cmp_guid(x, y),
         (Value::Date(x), Value::Date(y)) => x.cmp(y),
         (Value::Time(x), Value::Time(y)) => x.cmp(y),
@@ -595,11 +598,21 @@ pub struct Equality {
     pub real: bool,
     /// Which side is an xml column.
     pub xml: (bool, bool),
+    /// The Windows locale of database 1's collation (0 = none), for text that is not ASCII.
+    pub locale: u32,
 }
 
 impl Equality {
     fn strings(&self, a: &str, b: &str) -> bool {
-        if self.binary || !self.fold.any() { a == b } else { self.fold.apply(a) == self.fold.apply(b) }
+        if self.binary || !self.fold.any() {
+            return a == b;
+        }
+        if !(a.is_ascii() && b.is_ascii())
+            && let Some(equal) = super::collation::equal(self.locale, self.fold, a, b)
+        {
+            return equal;
+        }
+        self.fold.apply(a) == self.fold.apply(b)
     }
 }
 
@@ -742,7 +755,8 @@ mod tests {
         assert!(same(&Value::Str("ＡＢＣ".into()), &Value::Str("abc".into()), eq), "width-insensitive without _WS");
         assert!(!same(&Value::Str("ＡＢＣ".into()), &Value::Str("abc".into()), Equality { fold: Fold::of(Some("Japanese_CI_AS_KS_WS")), ..eq }));
         assert!(same(&Value::Str("ひらがな".into()), &Value::Str("ヒラガナ".into()), eq), "kana-insensitive without _KS");
-        assert_eq!(cmp_key(&Value::Bytes(vec![1, 0]), &Value::Bytes(vec![1])), Ordering::Equal);
+        assert_eq!(cmp_key(&Value::Bytes(vec![1, 0]), &Value::Bytes(vec![1])), Ordering::Greater, "trailing zeros break the tie by length");
+        assert_eq!(cmp_key(&Value::Bytes(vec![1, 0]), &Value::Bytes(vec![1, 1])), Ordering::Less);
         assert_eq!(cmp_key(&Value::Bytes(vec![1, 0, 0]), &Value::Bytes(vec![2])), Ordering::Less);
         assert_eq!(cmp_key(&Value::Null, &Value::Int(0)), Ordering::Less);
         let (from, to) = Fold::of(Some("Latin1_General_CI_AI")).table();

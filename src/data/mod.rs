@@ -2,11 +2,13 @@
 //! the differing rows, then scripts the changes.
 
 mod backup_rows;
+mod collation;
 pub mod compare;
 pub mod mapping;
 pub mod options;
 pub mod report;
 pub mod saved;
+pub mod staticdata;
 pub mod store;
 pub mod sync;
 pub mod value;

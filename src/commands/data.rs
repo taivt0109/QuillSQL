@@ -125,8 +125,9 @@ struct Rules {
 }
 
 impl Rules {
-    fn new(args: &Args, case_sensitive: bool) -> Result<Rules, ArgError> {
-        let mut r = Rules { include: Vec::new(), exclude: Vec::new(), kinds: [false, true, true, true], identical_allowed: false };
+    /// `start`: the row kinds before the switches (the project's, or the default).
+    fn new(args: &Args, case_sensitive: bool, start: [bool; 4]) -> Result<Rules, ArgError> {
+        let mut r = Rules { include: Vec::new(), exclude: Vec::new(), kinds: start, identical_allowed: false };
         let mut kinds_given = false;
         for (list, is_include) in [(args.all("include"), true), (args.all("exclude"), false)] {
             for spec in list {
@@ -178,12 +179,18 @@ impl Rules {
     fn includes(&self, p: &TablePair) -> bool {
         !self.exclude.iter().any(|r| Self::matches(r, p)) && (self.include.is_empty() || self.include.iter().any(|r| Self::matches(r, p)))
     }
+
+    /// An `/include` rule with a pattern names the pair.
+    fn names(&self, p: &TablePair) -> bool {
+        !self.exclude.iter().any(|r| Self::matches(r, p)) && self.include.iter().any(|r| r.1.is_some() && Self::matches(r, p))
+    }
 }
 
-/// `/comparisonkeys`, `/includeColumns`, `/excludeColumns` as per-table overrides. Returns the
-/// overrides and, for each `/comparisonkeys` index, the table and index name to check.
-fn overrides(args: &Args, db1: &Database, case_sensitive: bool) -> Result<(DataMappings, Vec<(crate::catalog::ObjectName, String)>), ArgError> {
-    let mut m = DataMappings::default();
+/// `/comparisonkeys`, `/includeColumns`, `/excludeColumns` applied to the mappings (the project's,
+/// if any) of the pairs they match, tables and views alike: only the key or the columns change.
+/// Returns, for each `/comparisonkeys` index, the table and index name to check.
+fn overrides(args: &Args, db1: &Database, pairs: &[TablePair], options: &DataOptions, m: &mut DataMappings) -> Result<Vec<(crate::catalog::ObjectName, String)>, ArgError> {
+    let case_sensitive = options.has(DataOpt::CaseSensitiveObjectDefinition);
     let mut keys = Vec::new();
     let split = |s: &String, what: &str| -> Result<(Regex, String), ArgError> {
         let (t, rest) = s.split_once(':').ok_or_else(|| {
@@ -194,25 +201,34 @@ fn overrides(args: &Args, db1: &Database, case_sensitive: bool) -> Result<(DataM
         })?;
         Ok((regex(t, case_sensitive)?, rest.to_string()))
     };
-    let entry = |m: &mut DataMappings, table: &crate::catalog::Table| -> usize {
-        let name = table.object_name();
-        if let Some(i) = m.tables.iter().position(|t| t.source == name) {
+    let entry = |m: &mut DataMappings, name: &crate::catalog::ObjectName| -> usize {
+        if let Some(i) = m.tables.iter().position(|t| crate::data::mapping::same_object(&t.source, name, options)) {
             return i;
         }
-        m.tables.push(TableOverride { source: name, ..Default::default() });
+        m.tables.push(TableOverride { source: name.clone(), ..Default::default() });
         m.tables.len() - 1
     };
-    let matches = |re: &Regex, t: &crate::catalog::Table| re.is_match(&t.object_name().to_string());
+    // The database 1 columns of a pair's source table or view.
+    let columns = |n: &crate::catalog::ObjectName| -> Vec<String> {
+        let same = |s: &str, x: &str| s.eq_ignore_ascii_case(x);
+        db1.tables
+            .iter()
+            .find(|t| same(&t.schema, &n.schema) && same(&t.name, &n.name))
+            .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+            .or_else(|| db1.views.iter().find(|v| same(&v.schema, &n.schema) && same(&v.name, &n.name)).map(|v| v.columns.iter().map(|c| c.name.clone()).collect()))
+            .unwrap_or_default()
+    };
+    let matching = |re: &Regex| -> Vec<crate::catalog::ObjectName> { pairs.iter().filter(|p| re.is_match(&p.source.to_string())).map(|p| p.source.clone()).collect() };
     for spec in args.all("comparisonkeys") {
         let (re, key) = split(spec, "comparisonkeys")?;
-        for t in db1.tables.iter().filter(|t| matches(&re, t)) {
-            let i = entry(&mut m, t);
+        for t in matching(&re) {
+            let i = entry(m, &t);
             if key.starts_with('(') && key.ends_with(')') {
                 m.tables[i].key = key[1..key.len() - 1].split(',').map(|c| c.trim().trim_matches(['[', ']']).to_string()).collect();
             } else {
                 let name = key.trim_matches(['[', ']']).to_string();
                 m.tables[i].key = vec![format!("index:{name}")];
-                keys.push((t.object_name(), name));
+                keys.push((t.clone(), name));
             }
         }
     }
@@ -220,25 +236,25 @@ fn overrides(args: &Args, db1: &Database, case_sensitive: bool) -> Result<(DataM
         for spec in args.all(switch) {
             let (re, cols) = split(spec, switch)?;
             let col_res: Vec<Regex> = cols.split(',').map(|c| regex(c.trim(), case_sensitive)).collect::<Result<_, _>>()?;
-            for t in db1.tables.iter().filter(|t| matches(&re, t)) {
-                let i = entry(&mut m, t);
-                for c in &t.columns {
-                    let hit = col_res.iter().any(|r| r.is_match(&c.name));
+            for t in matching(&re) {
+                let i = entry(m, &t);
+                for c in columns(&t) {
+                    let hit = col_res.iter().any(|r| r.is_match(&c));
+                    let excluded = m.tables[i].excluded_columns.iter().any(|x| x.eq_ignore_ascii_case(&c));
                     if include {
-                        let excluded = m.tables[i].excluded_columns.contains(&c.name);
                         if hit && excluded {
-                            m.tables[i].excluded_columns.retain(|x| x != &c.name);
+                            m.tables[i].excluded_columns.retain(|x| !x.eq_ignore_ascii_case(&c));
                         } else if !hit && !excluded {
-                            m.tables[i].excluded_columns.push(c.name.clone());
+                            m.tables[i].excluded_columns.push(c.clone());
                         }
-                    } else if hit && !m.tables[i].excluded_columns.contains(&c.name) {
-                        m.tables[i].excluded_columns.push(c.name.clone());
+                    } else if hit && !excluded {
+                        m.tables[i].excluded_columns.push(c.clone());
                     }
                 }
             }
         }
     }
-    Ok((m, keys))
+    Ok(keys)
 }
 
 fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
@@ -276,7 +292,8 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         None => resolved.options,
     };
     let case_sensitive = options.has(DataOpt::CaseSensitiveObjectDefinition);
-    let rules = Rules::new(args, case_sensitive)?;
+    let selection = project.as_ref().map(ProjectSelection::of).unwrap_or_default();
+    let rules = Rules::new(args, case_sensitive, selection.row_kinds)?;
     if rules.kinds[RowKind::Identical as usize] {
         options = options.with(DataOpt::IncludeIdenticalRecords);
     }
@@ -337,22 +354,10 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     };
     let (db1, label1) = model(&side1)?;
     let (db2, label2) = model(&side2)?;
-    let (mut user, keys) = overrides(args, &db1, case_sensitive)?;
-    if let Some(p) = &project {
-        user.schemas.extend(p.data_mappings.schemas.iter().cloned());
-        for t in &p.data_mappings.tables {
-            match user.tables.iter_mut().find(|u| u.source == t.source) {
-                Some(u) => {
-                    if u.target.is_none() {
-                        u.target = t.target.clone();
-                    }
-                    u.columns.extend(t.columns.iter().cloned());
-                    u.excluded |= t.excluded;
-                }
-                None => user.tables.push(t.clone()),
-            }
-        }
-    }
+    // The project's mappings first; the switches then change only keys and columns.
+    let mut user = project.as_ref().map(|p| p.data_mappings.clone()).unwrap_or_default();
+    let (pairs, _, _) = crate::data::mapping::map_tables(&db1, &db2, &options, &user);
+    let keys = overrides(args, &db1, &pairs, &options, &mut user)?;
     // A /comparisonkeys index must pair on both sides.
     let (pairs, _, _) = crate::data::mapping::map_tables(&db1, &db2, &options, &user);
     for (table, index) in &keys {
@@ -365,7 +370,16 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         }
     }
     let deselected: Vec<crate::catalog::ObjectName> = project.iter().flat_map(|p| p.deselected.iter().map(|d| crate::catalog::ObjectName::new(&d.schema, &d.name))).collect();
-    let result = compare::compare_sources(side1.rows(), side2.rows(), &db1, &db2, &options, &user, |p| rules.includes(p) && !deselected.contains(&p.source), parallel, |p, r| {
+    // Without a project, a scripts-folder table with no data script is compared only when an
+    // /include pattern names it (else its target rows would all look extra).
+    let no_data = |p: &TablePair| match &side1 {
+        Opened::Folder(f) if project.is_none() && !p.is_view => !f.files.iter().any(|(n, _)| n.schema.eq_ignore_ascii_case(&p.source.schema) && n.name.eq_ignore_ascii_case(&p.source.name)),
+        _ => false,
+    };
+    let wanted = |p: &TablePair| {
+        rules.includes(p) && !deselected.contains(&p.source) && (!no_data(p) || rules.names(p)) && (selection.include_new_tables || selection.selected.contains(&p.source))
+    };
+    let result = compare::compare_sources(side1.rows(), side2.rows(), &db1, &db2, &options, &user, wanted, parallel, |p, r| {
         if verbose {
             eprintln!("Compared {} ({} rows differ)", p.source, r.count(RowKind::Different) + r.count(RowKind::OnlyIn1) + r.count(RowKind::OnlyIn2));
         }
@@ -381,16 +395,19 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             console::log("OK");
         }
     }
-    for t in &result.tables {
-        for n in t.pair.notes.iter().filter(|n| n.not_compared() || verbose) {
-            console::warn(&n.text);
-        }
-        if let Some(problem) = &t.pair.problem {
-            console::warn(&format!("{} is not compared: {problem}", t.pair.source));
+    // SQLDataCompare.exe prints no mapping or deployment warnings; they are shown with /verbose.
+    if verbose {
+        for p in result.tables.iter().map(|t| &t.pair).chain(&result.excluded) {
+            for n in &p.notes {
+                console::warn(&n.text);
+            }
+            if let Some(problem) = &p.problem {
+                console::warn(&format!("{} is not compared: {problem}", p.source));
+            }
         }
     }
     if let Some(dir) = args.get("export") {
-        export(&result, &rules, Path::new(dir), &db1.name, &db2.name).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{dir}: {e}")))?;
+        export(&result, &rules, Path::new(dir), &db1.name, &db2.name, [side1.spec(), side2.spec()]).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{dir}: {e}")))?;
     }
     let failed: Vec<&TableResult> = result.tables.iter().filter(|t| t.error.is_some() && t.pair.problem.is_none()).collect();
     for t in &failed {
@@ -420,7 +437,12 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         };
         common::add_backup(args, project.as_ref().map(|p| &p.backup), live2, &mut s)?;
         common::write_script(args, &s)?;
-        common::report_warnings(args, &s);
+        if verbose {
+            for w in &s.warnings {
+                let object = if w.object.is_empty() { String::new() } else { format!("{}: ", w.object) };
+                console::warn(&format!("({:?}) {object}{}", w.severity, w.message));
+            }
+        }
         common::check_warnings(args, &s)?;
         script = Some(s);
     }
@@ -442,7 +464,8 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             }
         } else if let Opened::Folder(f) = &mut side2 {
             // A scripts folder read without a server: its data scripts are written again.
-            let files = f.write_back(&result, rules.kinds).map_err(|e| ArgError::new(exit::IO_ERROR, e))?;
+            let kinds = rules.kinds;
+            let files = f.write_back(&result, &|_, k, _| kinds[k as usize]).map_err(|e| ArgError::new(exit::IO_ERROR, e))?;
             if !quiet {
                 console::log(&format!("Deployed the data of {} to {label2}: {} data script(s) written.", db1.name, files.len()));
             }
@@ -463,6 +486,41 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         return Ok(exit::EXECUTION_FAILED);
     }
     Ok(exit::SUCCESS)
+}
+
+/// A data project's table selection and row kinds (`includeNewTables`, `selected`, `rowKinds`).
+struct ProjectSelection {
+    include_new_tables: bool,
+    selected: Vec<crate::catalog::ObjectName>,
+    row_kinds: [bool; 4],
+}
+
+impl Default for ProjectSelection {
+    fn default() -> Self {
+        ProjectSelection { include_new_tables: true, selected: Vec::new(), row_kinds: [false, true, true, true] }
+    }
+}
+
+impl ProjectSelection {
+    /// Read through the project's JSON form, whose fields default when absent.
+    fn of(p: &crate::project::Project) -> ProjectSelection {
+        let v = serde_json::to_value(p).unwrap_or_default();
+        let mut s = ProjectSelection::default();
+        if let Some(b) = v.get("includeNewTables").and_then(serde_json::Value::as_bool) {
+            s.include_new_tables = b;
+        }
+        if let Some(list) = v.get("selected").and_then(serde_json::Value::as_array) {
+            let text = |x: &serde_json::Value, k: &str| x.get(k).and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+            s.selected = list.iter().map(|x| crate::catalog::ObjectName::new(&text(x, "schema"), &text(x, "name"))).collect();
+        }
+        if let Some(k) = v.get("rowKinds").and_then(|k| serde_json::from_value::<[bool; 4]>(k.clone()).ok()) {
+            s.row_kinds = k;
+        }
+        if p.options.iter().any(|o| o.eq_ignore_ascii_case("IncludeIdenticalRecords")) {
+            s.row_kinds[0] = true;
+        }
+        s
+    }
 }
 
 /// One side of a data comparison.
@@ -651,7 +709,9 @@ fn csv(field: &str) -> String {
 
 /// `Results Summary.csv` and one CSV per table with rows of an included kind, as SQL Data
 /// Compare writes them (UTF-8 with BOM, CRLF, every field quoted).
-fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &str) -> std::io::Result<()> {
+/// Key columns come first (in key order), then the others, as SQL Data Compare's results store
+/// holds them; values compared by hash are read again from the live database in `specs`.
+fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &str, specs: [Option<&ConnectionSpec>; 2]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let k = |kind: RowKind| rules.kinds[kind as usize];
     let mut head = vec![csv("Object Type"), csv("Object Owner"), csv("Object Name")];
@@ -694,8 +754,10 @@ fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &s
             continue;
         }
         let p = &t.pair;
+        let order: Vec<usize> = p.key.iter().copied().chain((0..p.columns.len()).filter(|i| !p.key.contains(i))).collect();
         let mut header = vec![csv("Type")];
-        for (i, c) in p.columns.iter().enumerate() {
+        for &i in &order {
+            let c = &p.columns[i];
             if p.key.contains(&i) {
                 header.push(csv(&format!("{}_k", c.source)));
             } else {
@@ -705,7 +767,16 @@ fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &s
         }
         let mut out = format!("\u{feff}{}\r\n", header.join(","));
         for kind in kinds {
-            for row in store::read_all(&t.path, &t.offsets[kind as usize])? {
+            for mut row in store::read_all(&t.path, &t.offsets[kind as usize])? {
+                for (n, values) in [(1u8, &mut row.source), (2u8, &mut row.target)] {
+                    for c in 0..values.len() {
+                        if let (Value::Large(..), Some(spec)) = (&values[c], specs[n as usize - 1])
+                            && let Ok(full) = compare::fetch_side_value(spec, p, n, c, values)
+                        {
+                            values[c] = full;
+                        }
+                    }
+                }
                 let label = match kind {
                     RowKind::Identical => "Same",
                     RowKind::Different => "Different",
@@ -713,7 +784,8 @@ fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &s
                     RowKind::OnlyIn2 => "In2",
                 };
                 let mut fields = vec![csv(label)];
-                for (i, c) in p.columns.iter().enumerate() {
+                for &i in &order {
+                    let c = &p.columns[i];
                     let side = |vals: &[Value], ty| vals.get(i).map(|v: &Value| v.csv_text(ty)).unwrap_or_default();
                     let (s, tv) = (side(&row.source, &c.source_type), side(&row.target, &c.target_type));
                     if p.key.contains(&i) {
@@ -737,13 +809,55 @@ fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &s
 }
 
 /// The same CSV files for the Compare window's Export: rows of the given kinds (`RowKind::ALL` order).
-pub fn export_csv(result: &DataComparison, kinds: [bool; 4], dir: &Path, db1: &str, db2: &str) -> std::io::Result<()> {
-    export(result, &Rules { include: Vec::new(), exclude: Vec::new(), kinds, identical_allowed: false }, dir, db1, db2)
+pub fn export_csv(result: &DataComparison, kinds: [bool; 4], dir: &Path, db1: &str, db2: &str, specs: [Option<&ConnectionSpec>; 2]) -> std::io::Result<()> {
+    export(result, &Rules { include: Vec::new(), exclude: Vec::new(), kinds, identical_allowed: false }, dir, db1, db2, specs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_puts_key_columns_first() {
+        use crate::data::store::{StoredRow, TableWriter};
+        let session = crate::data::store::Session::create().unwrap();
+        let db = Database {
+            tables: vec![crate::catalog::Table {
+                schema: "dbo".into(),
+                name: "T".into(),
+                columns: ["A", "K"].iter().map(|n| crate::catalog::Column { name: n.to_string(), data_type: crate::catalog::DataType { name: "int".into(), ..Default::default() }, ..Default::default() }).collect(),
+                indexes: vec![crate::catalog::Index {
+                    name: "PK".into(),
+                    primary_key: true,
+                    unique: true,
+                    columns: vec![crate::catalog::IndexColumn { name: "K".into(), descending: false }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let (pairs, _, _) = crate::data::mapping::map_tables(&db, &db, &DataOptions::default_set(), &DataMappings::default());
+        let path = session.table_path(0);
+        let mut w = TableWriter::create(&path, false).unwrap();
+        w.write(&StoredRow { kind: RowKind::OnlyIn1, source: vec![Value::Int(7), Value::Int(1)], target: vec![], differs: vec![] }).unwrap();
+        let t = TableResult {
+            pair: pairs.into_iter().next().unwrap(),
+            counts: [0, 0, 1, 0],
+            offsets: w.finish().unwrap(),
+            path,
+            error: None,
+            by_checksum: false,
+            repeated_keys: false,
+            identity_current: (None, None),
+            column_differences: vec![],
+        };
+        let dir = session.dir.join("csv");
+        let result = DataComparison { session, tables: vec![t], only_in_1: vec![], only_in_2: vec![], ddl_triggers: vec![], excluded: vec![], kinds: Default::default(), masked_reads: false, old_server: false };
+        export_csv(&result, [false, true, true, true], &dir, "a", "b", [None, None]).unwrap();
+        let text = std::fs::read_to_string(dir.join("dbo.T.csv")).unwrap();
+        assert_eq!(text, "\u{feff}\"Type\",\"K_k\",\"A_s\",\"A_t\"\r\n\"In1\",\"1\",\"7\",\"\"\r\n");
+    }
 
     #[test]
     fn summary_layout() {
@@ -760,6 +874,8 @@ mod tests {
             problem: None,
             is_view: false,
             notes: vec![],
+            excluded: None,
+            target_missing: false,
         };
         let table = |p: TablePair, counts: [u64; 4]| TableResult {
             pair: p,
@@ -778,6 +894,10 @@ mod tests {
             only_in_1: vec![],
             only_in_2: vec![],
             ddl_triggers: vec![],
+            excluded: vec![],
+            kinds: Default::default(),
+            masked_reads: false,
+            old_server: false,
         };
         let rules = Rules { include: vec![], exclude: vec![], kinds: [false, true, true, true], identical_allowed: false };
         let lines = summary(&result, &rules, "dev.Shop", "prod.Shop", 80);
