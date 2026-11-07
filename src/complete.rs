@@ -536,7 +536,7 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
     {
         let before = prev(o);
         let table = word(before) == "TABLE"
-            || (first == "CREATE" && before.and_then(&prev).is_some_and(|b| word(Some(b)) == "TABLE" || head[b].kind == Kind::Dot));
+            || (first == "CREATE" && before.and_then(prev).is_some_and(|b| word(Some(b)) == "TABLE" || head[b].kind == Kind::Dot));
         if table && matches!(first.as_str(), "CREATE" | "DECLARE") {
             return Some(Next::Types(Vec::new()));
         }
