@@ -89,6 +89,14 @@ pub enum Side<'a> {
 }
 
 impl<'a> Side<'a> {
+    /// The backup when there is one, else the live database.
+    pub fn of(backup: &'a Option<crate::sources::backup::Backup>, spec: &'a ConnectionSpec) -> Side<'a> {
+        match backup {
+            Some(b) => Side::Backup(b),
+            None => Side::Live(spec),
+        }
+    }
+
     fn live(self) -> Option<&'a ConnectionSpec> {
         match self {
             Side::Live(spec) => Some(spec),

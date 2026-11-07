@@ -20,7 +20,11 @@
 //!   `data_session_save` {session, path} / `data_session_load` {path} → session.
 //! - `snapshot` {source, path} writes a schema snapshot.
 //!
-//! A side is a live database, a snapshot (QuillSQL JSON or SQL Compare `.snp`), or a scripts
+//! - `backup_sets` {source} lists the backup sets of a backup side.
+//!
+//! A side is a live database, a snapshot (QuillSQL JSON or SQL Compare `.snp`), backup files
+//! (`type: "backup"`, `path` with the files separated by `;`, optional `backupSet` name,
+//! `password` with the files' passwords separated by `,`), or a scripts
 //! folder (`type: "scripts"`, `path`, optional source-control `revision`). Deploying to a
 //! scripts folder rewrites its files; `make_scripts` {project | source, path} writes one.
 
@@ -120,6 +124,20 @@ fn session(request: &Value) -> Result<u64, String> {
     request.get("session").and_then(Value::as_u64).ok_or_else(|| "'session' is missing".to_string())
 }
 
+/// The files and passwords of a backup side.
+fn backup_files(side: &SourceSpec) -> (Vec<std::path::PathBuf>, Vec<String>) {
+    let files = side.path.split(';').map(str::trim).filter(|f| !f.is_empty()).map(Into::into).collect();
+    let passwords = side.password.as_deref().filter(|p| !p.is_empty()).map(|p| p.split(',').map(str::to_string).collect()).unwrap_or_default();
+    (files, passwords)
+}
+
+fn open_backup(side: &SourceSpec, progress: &dyn Fn(&str)) -> Result<crate::sources::backup::Backup, String> {
+    progress(&format!("Reading backup {}", side.path));
+    let (files, passwords) = backup_files(side);
+    let set = (!side.backup_set.is_empty()).then_some(side.backup_set.as_str());
+    crate::sources::backup::open(&files, &passwords, set).map_err(|e| e.to_string())
+}
+
 /// `decrypt` follows DecryptPost2kEncryptedObjects; data compare never needs module text.
 fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<Database, String> {
     load_side_with_warnings(side, n, decrypt, progress).map(|(db, _)| db)
@@ -143,6 +161,9 @@ fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &d
         }
         let warnings = f.warnings.iter().cloned().chain(f.messages.iter().map(|m| m.text())).collect();
         return Ok((f.database, warnings));
+    }
+    if side.is_backup() {
+        return Ok((open_backup(side, progress)?.read_database().map_err(|e| e.to_string())?, Vec::new()));
     }
     if side.is_snapshot() {
         let bytes = std::fs::read(&side.path).map_err(|e| format!("{}: {e}", side.path))?;
@@ -170,6 +191,17 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
     let op = request.get("op").and_then(Value::as_str).unwrap_or_default();
     match op {
         "options" => Ok(option_definitions()),
+        "backup_sets" => {
+            let side: SourceSpec = field(request, "source")?;
+            let (files, passwords) = backup_files(&side);
+            let sets = crate::sources::backup::list_sets(&files, &passwords).map_err(|e| e.to_string())?;
+            let time = |t: Option<chrono::NaiveDateTime>| t.map(|t| t.to_string());
+            Ok(json!(sets.iter().map(|s| json!({
+                "name": s.name, "database": s.database, "server": s.server, "type": format!("{:?}", s.backup_type),
+                "start": time(s.start), "finish": time(s.finish), "firstLsn": s.first_lsn, "lastLsn": s.last_lsn,
+                "files": s.files(), "incomplete": s.incomplete, "encrypted": s.encrypted, "canHandle": s.can_handle() && !s.incomplete,
+            })).collect::<Vec<_>>()))
+        }
         "databases" => {
             let side: SourceSpec = field(request, "source")?;
             let mut spec = side.connection(1)?;
@@ -406,7 +438,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let project: Project = field(request, "project")?;
             let mut opts = data_options(&project)?;
             // Views and checksums need both sides live.
-            if project.source.is_snapshot() || project.target.is_snapshot() {
+            if [&project.source, &project.target].iter().any(|s| s.is_snapshot() || s.is_backup()) {
                 opts = opts.without(DataOpt::IncludeViews).without(DataOpt::UseChecksumComparison);
             }
             let db1 = load_side(&project.source, 1, false, progress)?;
@@ -447,7 +479,10 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let project: Project = field(request, "project")?;
             let opts = data_options(&project)?;
             // A scripts folder is loaded into a temporary database on the other side's server.
-            let host = [(&project.source, 1), (&project.target, 2)].into_iter().find(|(s, _)| !s.is_scripts() && !s.is_snapshot()).map(|(s, n)| s.connection(n)).transpose()?;
+            let host = [(&project.source, 1), (&project.target, 2)].into_iter().find(|(s, _)| !s.is_scripts() && !s.is_snapshot() && !s.is_backup()).map(|(s, n)| s.connection(n)).transpose()?;
+            let backups = [&project.source, &project.target].map(|s| s.is_backup().then(|| open_backup(s, progress)).transpose());
+            let [b1, b2] = backups;
+            let (b1, b2) = (b1?, b2?);
             let mut staged: [Option<crate::sources::staging::Staging>; 2] = [None, None];
             for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
                 if side.is_scripts() {
@@ -457,12 +492,21 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                     staged[k] = Some(crate::sources::staging::stage(std::path::Path::new(&side.path), revision, host)?);
                 }
             }
-            let spec = |k: usize, side: &SourceSpec| staged[k].as_ref().map(|s| Ok(s.spec.clone())).unwrap_or_else(|| side.connection(k as u8 + 1));
+            let spec = |k: usize, side: &SourceSpec| {
+                if side.is_backup() {
+                    return Ok(crate::db::ConnectionSpec::new("", &side.path, crate::db::Auth::Windows));
+                }
+                staged[k].as_ref().map(|s| Ok(s.spec.clone())).unwrap_or_else(|| side.connection(k as u8 + 1))
+            };
             let (s1, s2) = (spec(0, &project.source)?, spec(1, &project.target)?);
             progress(&format!("Reading {}", project.source.describe()));
-            let mut db1 = catalog::read_database_with(&s1, false)?;
+            let read = |b: &Option<crate::sources::backup::Backup>, s: &crate::db::ConnectionSpec| match b {
+                Some(b) => b.read_database().map_err(|e| e.to_string()),
+                None => catalog::read_database_with(s, false),
+            };
+            let mut db1 = read(&b1, &s1)?;
             progress(&format!("Reading {}", project.target.describe()));
-            let mut db2 = catalog::read_database_with(&s2, false)?;
+            let mut db2 = read(&b2, &s2)?;
             for (db, s) in [(&mut db1, &staged[0]), (&mut db2, &staged[1])] {
                 if let Some(s) = s {
                     db.name = s.folder.database.name.clone();
@@ -470,9 +514,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             }
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
-            let result = crate::data::compare::compare(
-                &s1,
-                &s2,
+            let result = crate::data::compare::compare_sides(
+                crate::data::compare::Side::of(&b1, &s1),
+                crate::data::compare::Side::of(&b2, &s2),
                 &db1,
                 &db2,
                 &opts,
