@@ -271,7 +271,7 @@ fn recovered_tables_and_rebuild_names() {
     server.create(b, &format!("{leftover}CREATE TABLE dbo.T (a int IDENTITY(1, 1) NOT NULL, b int NULL)\nGO\nINSERT INTO dbo.T (b) VALUES (1), (2)"));
     let s = converge(&server, a, b, &Options::default_set());
     assert!(s.sql.contains("CREATE TABLE [dbo].[RG_Recovery_4_T]"), "{}", s.sql);
-    assert!(s.warnings.iter().any(|w| w.object == "[dbo].[RG_Recovery_3_T]" && w.message.contains("recovered from a failed deployment")), "{:?}", s.warnings);
+    assert!(s.warnings.iter().any(|w| w.object == "[dbo].[RG_Recovery_3_T]" && w.message.contains("recovered from a failed QuillSQL Compare deployment")), "{:?}", s.warnings);
     assert_eq!(server.scalar(b, "SELECT COUNT(*) FROM dbo.T"), 2);
     server.drop(a);
     server.drop(b);
