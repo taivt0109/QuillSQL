@@ -408,6 +408,11 @@ impl Builder {
         let table = c.object(&self.schema_default())?;
         let Some(ti) = self.table_index(&table) else { return c.fail(MessageKind::ReferenceNotFound) };
         let mut f = FullTextIndex { change_tracking: "AUTO".into(), stoplist: "SYSTEM".into(), ..Default::default() };
+        // Columns written inline (InlineFulltextFields).
+        if c.is_punct("(") {
+            let (a, b) = c.group()?;
+            f.columns = fulltext_columns(c, a, b)?;
+        }
         c.expect("KEY")?;
         c.expect("INDEX")?;
         f.key_index = c.ident()?;
@@ -453,21 +458,7 @@ impl Builder {
             return Ok(());
         }
         let (a, b) = c.group()?;
-        let mut columns = Vec::new();
-        for (x, y) in c.split_commas(a, b) {
-            let mut s = c.sub(x, y);
-            let mut col = FullTextColumn { name: s.ident()?, ..Default::default() };
-            while !s.done() {
-                if s.eat_seq(&["TYPE", "COLUMN"]) {
-                    col.type_column = Some(s.ident()?);
-                } else if s.eat("LANGUAGE") {
-                    col.language = s.number()?.parse().unwrap_or(0);
-                } else {
-                    s.i += 1;
-                }
-            }
-            columns.push(col);
-        }
+        let columns = fulltext_columns(c, a, b)?;
         let Some(f) = self.db.tables[ti].fulltext_index.as_mut() else { return c.fail(MessageKind::ReferenceNotFound) };
         f.columns.extend(columns);
         f.columns.sort_by(|a, b| a.name.cmp(&b.name));
@@ -943,4 +934,25 @@ impl Builder {
         self.origin(ObjectType::Role, "", &name);
         Ok(())
     }
+}
+
+/// `name [TYPE COLUMN t] [LANGUAGE n], ...` between tokens `a` and `b`, sorted by name.
+fn fulltext_columns(c: &Cur, a: usize, b: usize) -> R<Vec<FullTextColumn>> {
+    let mut columns = Vec::new();
+    for (x, y) in c.split_commas(a, b) {
+        let mut s = c.sub(x, y);
+        let mut col = FullTextColumn { name: s.ident()?, ..Default::default() };
+        while !s.done() {
+            if s.eat_seq(&["TYPE", "COLUMN"]) {
+                col.type_column = Some(s.ident()?);
+            } else if s.eat("LANGUAGE") {
+                col.language = s.number()?.parse().unwrap_or(0);
+            } else {
+                s.i += 1;
+            }
+        }
+        columns.push(col);
+    }
+    columns.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(columns)
 }

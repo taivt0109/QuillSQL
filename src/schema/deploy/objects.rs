@@ -686,7 +686,7 @@ impl<'a> Planner<'a> {
     fn create_fulltext_index(&mut self, table: &ObjectName, f: &FullTextIndex) {
         let filegroups = !self.opts.has(Opt::IgnoreFileGroups) && self.has(Feature::Filegroups);
         let mut statements =
-            ddl_objects::create_fulltext_index(table, f, filegroups, self.opts.has(Opt::AddNoPopulation), self.has(Feature::SearchPropertyLists));
+            ddl_objects::create_fulltext_index(table, f, filegroups, self.opts.has(Opt::AddNoPopulation), self.has(Feature::SearchPropertyLists), self.opts.has(Opt::InlineFulltextFields));
         statements[0] = self.fulltext_index_test(table, Check::Create, &statements[0]);
         self.objects.fulltext_columns |= !f.columns.is_empty();
         if self.opts.has(Opt::NoTransactions) {

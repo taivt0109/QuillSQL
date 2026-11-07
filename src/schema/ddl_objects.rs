@@ -250,8 +250,9 @@ pub fn fulltext_column(c: &FullTextColumn) -> String {
 }
 
 /// CREATE FULLTEXT INDEX, then its columns and ENABLE. `filegroups` writes FILEGROUP;
-/// `no_population` is AddNoPopulation; `property_lists` whether the target has them.
-pub fn create_fulltext_index(table: &ObjectName, f: &FullTextIndex, filegroups: bool, no_population: bool, property_lists: bool) -> Vec<String> {
+/// `no_population` is AddNoPopulation; `property_lists` whether the target has them; `inline`
+/// (InlineFulltextFields) lists the columns in the CREATE instead of one ALTER … ADD each.
+pub fn create_fulltext_index(table: &ObjectName, f: &FullTextIndex, filegroups: bool, no_population: bool, property_lists: bool, inline: bool) -> Vec<String> {
     let t = table.quoted();
     let on = match f.filegroup.as_ref().filter(|_| filegroups) {
         Some(fg) => format!("({}, FILEGROUP {})", quote(&f.catalog), quote(fg)),
@@ -272,8 +273,13 @@ pub fn create_fulltext_index(table: &ObjectName, f: &FullTextIndex, filegroups: 
         with.push(format!("SEARCH PROPERTY LIST {}", quote(pl)));
     }
     let with = if with.is_empty() { String::new() } else { format!(" WITH {}", with.join(", ")) };
-    let mut out = vec![format!("CREATE FULLTEXT INDEX ON {t} KEY INDEX {} ON {on}{with}", quote(&f.key_index))];
-    for c in &f.columns {
+    let columns = if inline && !f.columns.is_empty() {
+        format!("\r\n(\r\n{}\r\n)", f.columns.iter().map(fulltext_column).collect::<Vec<_>>().join(",\r\n"))
+    } else {
+        String::new()
+    };
+    let mut out = vec![format!("CREATE FULLTEXT INDEX ON {t}{columns} KEY INDEX {} ON {on}{with}", quote(&f.key_index))];
+    for c in f.columns.iter().filter(|_| !inline) {
         out.push(format!("ALTER FULLTEXT INDEX ON {t} ADD ({})", fulltext_column(c)));
     }
     if !f.columns.is_empty() && !no_population {
@@ -763,13 +769,14 @@ pub fn create_external_table(x: &ExternalTable) -> String {
 
 // ---- Object definitions for display ----
 
-/// The statements for a table's statistics, full-text index and edge constraints.
-pub fn table_parts(t: &Table) -> Vec<String> {
+/// The statements for a table's statistics, full-text index and edge constraints;
+/// `inline_fulltext` is InlineFulltextFields.
+pub fn table_parts(t: &Table, inline_fulltext: bool) -> Vec<String> {
     let name = t.object_name();
     let mut out: Vec<String> = t.statistics.iter().map(|s| create_statistics(&name, s, true)).collect();
     out.extend(t.edge_constraints.iter().map(|e| add_edge_constraint(&name, e, false)));
     if let Some(f) = &t.fulltext_index {
-        out.extend(create_fulltext_index(&name, f, true, false, true));
+        out.extend(create_fulltext_index(&name, f, true, false, true, inline_fulltext));
     }
     for c in &t.columns {
         if let Some(s) = &c.sensitivity {

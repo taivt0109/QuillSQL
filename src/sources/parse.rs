@@ -3043,4 +3043,30 @@ CREATE TABLE Sales.[Order] (a int)\nGO\n",
             assert!(r.database.permissions.is_empty());
         }
     }
+
+    #[test]
+    fn fulltext_columns_inline_or_added() {
+        use crate::schema::ddl_objects::create_fulltext_index;
+        let f = FullTextIndex {
+            catalog: "Cat".into(),
+            key_index: "PK_Doc".into(),
+            change_tracking: "AUTO".into(),
+            stoplist: "SYSTEM".into(),
+            columns: vec![FullTextColumn { name: "Body".into(), language: 1033, ..Default::default() }, FullTextColumn { name: "Title".into(), language: 0, ..Default::default() }],
+            ..Default::default()
+        };
+        let t = ObjectName::new("dbo", "Doc");
+        let inline = create_fulltext_index(&t, &f, false, false, true, true);
+        assert_eq!(inline[0], "CREATE FULLTEXT INDEX ON [dbo].[Doc]\r\n(\r\n[Body] LANGUAGE 1033,\r\n[Title] LANGUAGE 0\r\n) KEY INDEX [PK_Doc] ON [Cat]");
+        assert_eq!(inline.len(), 2, "{inline:?}");
+        let added = create_fulltext_index(&t, &f, false, false, true, false);
+        assert_eq!(added.len(), 4, "{added:?}");
+        let table = "CREATE TABLE [dbo].[Doc] ([Id] [int] NOT NULL, [Body] [nvarchar] (max) NULL, [Title] [nvarchar] (50) NULL, CONSTRAINT [PK_Doc] PRIMARY KEY CLUSTERED ([Id]))\r\nGO\r\nCREATE FULLTEXT CATALOG [Cat]\r\nGO\r\n";
+        for script in [inline, added] {
+            let text = format!("{table}{}\r\nGO\r\n", script.join("\r\nGO\r\n"));
+            let r = read(&[("t.sql", text.as_str())]);
+            assert!(r.messages.is_empty(), "{:?}", r.messages);
+            assert_eq!(r.database.tables[0].fulltext_index.as_ref().map(|x| &x.columns), Some(&f.columns));
+        }
+    }
 }
