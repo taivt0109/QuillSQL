@@ -337,9 +337,12 @@ impl<'a> W<'a> {
         let histories: HashSet<ObjectName> = db.tables.iter().filter_map(|t| t.temporal.as_ref()).map(|h| h.history_table.clone()).collect();
         let tables: Vec<&Table> = db.tables.iter().filter(|t| !histories.contains(&t.object_name())).collect();
         self.coll(&tables, |w, t| {
-            w.u8(0); // ordinary table, not a FileTable
+            w.u8(u8::from(t.file_table.is_some()));
             let id = w.id();
             w.table(&TableRec { t, object_id: id, type_table: false });
+            if let Some(ft) = &t.file_table {
+                w.file_table(t, ft);
+            }
         });
         let functions: Vec<&Routine> = db.routines.iter().filter(|r| !is_procedure(r)).collect();
         let procedures: Vec<&Routine> = db.routines.iter().filter(|r| is_procedure(r)).collect();
@@ -513,18 +516,11 @@ impl<'a> W<'a> {
             for n in names {
                 self.str(n);
             }
-            // sql_variant facets: values are written as nvarchar.
-            self.i32(0);
-            self.i32(0);
             match &p.value {
-                Some(v) => {
-                    self.len(v.encode_utf16().count());
-                    self.s("nvarchar");
-                    self.i8(6);
-                    self.u8(1);
-                    self.s(v);
-                }
+                Some(v) => self.prop_value(v, p.value_type.as_deref().unwrap_or("nvarchar")),
                 None => {
+                    self.i32(0);
+                    self.i32(0);
                     self.i32(0);
                     self.str(None);
                     self.i8(0);
@@ -533,6 +529,116 @@ impl<'a> W<'a> {
             }
             self.s(&p.name);
             self.no_ss(3);
+        }
+    }
+
+    /// A sql_variant value: scale, precision and size of its base type, the type, then the
+    /// value in the encoding .NET gives the type. Values that do not parse as their type, and
+    /// the date and time types, are kept as text under their type.
+    fn prop_value(&mut self, v: &str, ty: &str) {
+        let ty = ty.to_ascii_lowercase();
+        let text = |w: &mut Self, code: i8, size: usize| {
+            w.i32(0);
+            w.i32(0);
+            w.len(size);
+            w.s(&ty);
+            w.i8(code);
+            w.u8(1);
+            w.s(v);
+        };
+        let head = |w: &mut Self, code: i8, precision: i32, size: i32| {
+            w.i32(0);
+            w.i32(precision);
+            w.i32(size);
+            w.s(&ty);
+            w.i8(code);
+        };
+        let binary = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")).and_then(crate::schema::clr::from_hex);
+        match ty.as_str() {
+            "int" if v.parse::<i32>().is_ok() => {
+                head(self, 14, 10, 4);
+                self.u8(2);
+                self.i32(v.parse().unwrap_or_default());
+            }
+            "bigint" if v.parse::<i64>().is_ok() => {
+                head(self, 13, 19, 8);
+                self.u8(3);
+                self.i64(v.parse().unwrap_or_default());
+            }
+            "smallint" if v.parse::<i16>().is_ok() => {
+                head(self, 15, 5, 2);
+                self.u8(9);
+                self.i16(v.parse().unwrap_or_default());
+            }
+            "tinyint" if v.parse::<u8>().is_ok() => {
+                head(self, 16, 3, 1);
+                self.u8(10);
+                self.u8(v.parse().unwrap_or_default());
+            }
+            "bit" if v == "0" || v == "1" => {
+                head(self, 19, 1, 1);
+                self.u8(4);
+                self.bool(v == "1");
+            }
+            "float" if v.parse::<f64>().is_ok() => {
+                head(self, 11, 53, 8);
+                self.u8(7);
+                self.f64(v.parse().unwrap_or_default());
+            }
+            "real" if v.parse::<f32>().is_ok() => {
+                head(self, 12, 24, 4);
+                self.u8(8);
+                self.f32(v.parse().unwrap_or_default());
+            }
+            "binary" | "varbinary" if binary.is_some() => {
+                let bytes = binary.unwrap_or_default();
+                head(self, if ty == "binary" { 1 } else { 2 }, 0, i32::try_from(bytes.len()).unwrap_or(i32::MAX));
+                self.u8(11);
+                self.len(bytes.len());
+                self.b.b.extend(bytes);
+            }
+            "decimal" | "numeric" | "money" | "smallmoney" => {
+                let digits = v.trim_start_matches('-');
+                let scale = digits.split_once('.').map_or(0, |(_, f)| f.len());
+                let code = match ty.as_str() {
+                    "decimal" => 9,
+                    "numeric" => 10,
+                    "money" => 17,
+                    _ => 18,
+                };
+                self.i32(i32::try_from(scale).unwrap_or(0));
+                self.i32(i32::try_from(digits.len() - usize::from(scale > 0)).unwrap_or(0));
+                self.i32(17);
+                self.s(&ty);
+                self.i8(code);
+                self.u8(14);
+                self.s(v);
+            }
+            "uniqueidentifier" if v.chars().filter(char::is_ascii_hexdigit).count() == 32 => {
+                head(self, 21, 0, 16);
+                self.u8(12);
+                self.b.b.extend(objects::guid_bytes(v));
+            }
+            "char" => text(self, 3, v.len()),
+            "varchar" => text(self, 4, v.len()),
+            "nchar" => text(self, 5, v.encode_utf16().count()),
+            "datetime" => text(self, 7, 8),
+            "smalldatetime" => text(self, 8, 4),
+            "date" => text(self, 27, 3),
+            "time" => text(self, 28, 5),
+            "datetimeoffset" => text(self, 29, 10),
+            "datetime2" => text(self, 30, 8),
+            "nvarchar" | "sysname" => text(self, 6, v.encode_utf16().count()),
+            // A value that does not parse as its type: text.
+            _ => {
+                self.i32(0);
+                self.i32(0);
+                self.len(v.encode_utf16().count());
+                self.s("nvarchar");
+                self.i8(6);
+                self.u8(1);
+                self.s(v);
+            }
         }
     }
 
@@ -640,7 +746,7 @@ impl<'a> W<'a> {
         self.bool(false); // system object
         self.str(t.filestream_filegroup.as_deref());
         self.compression(&t.storage);
-        self.str(None); // authorization
+        self.str(t.owner.as_deref().filter(|_| !rec.type_table));
         self.u8(match &t.change_tracking {
             None => 0,
             Some(c) if c.track_columns_updated => 2,
@@ -655,7 +761,7 @@ impl<'a> W<'a> {
         self.bool(t.memory_optimized);
         self.u8(u8::from(t.durability.as_deref() == Some("SCHEMA_ONLY")));
         self.i32(0); // natively compiled procedures
-        self.u8(0); // remote data archive
+        self.u8(u8::from(t.remote_data_archive));
         self.no_ss(3);
         self.i64(t.modified.as_deref().map_or(0, crate::sources::snp::objects::text_ticks_ms)); // last modified
         let temporal_type = if t.history_table {
@@ -691,9 +797,32 @@ impl<'a> W<'a> {
             }
             None => self.bool(false),
         }
-        self.bool(false); // large value types out of row
+        self.bool(t.large_value_types_out_of_row);
         self.coll(&t.edge_constraints, W::edge_constraint);
         self.i32(0); // ALTER TABLE SET script sources
+    }
+
+    /// The FileTable tail of a table item: directory, filename collation, the system-defined
+    /// primary key (by name; the model keeps no other part of it) and no system object ids.
+    fn file_table(&mut self, t: &Table, ft: &FileTable) {
+        self.s(&ft.directory);
+        self.s(&ft.filename_collation);
+        self.bool(ft.primary_key.is_some());
+        if let Some(name) = &ft.primary_key {
+            let pk = Index {
+                name: name.clone(),
+                kind: IndexKind::Nonclustered,
+                primary_key: true,
+                unique: true,
+                columns: vec![IndexColumn { name: "path_locator".into(), descending: false }],
+                allow_row_locks: true,
+                allow_page_locks: true,
+                storage: Storage { data_space: t.storage.data_space.clone(), ..Default::default() },
+                ..Default::default()
+            };
+            self.index(t, &pk, false);
+        }
+        self.i32(0);
     }
 
     /// Indexes, then statistics, which SQL Compare keeps in the same list.
@@ -1042,11 +1171,12 @@ impl<'a> W<'a> {
         let cs = self.cs;
         let id = self.id();
         self.text(id, trigger_text(&tr.definition, schema, &tr.name, parent), tr.encrypted);
+        let clr = tr.clr_method.is_some();
         self.f32(VERSION);
         self.s(&format!("{}.{}", quote(schema), quote(&tr.name)));
         self.i32(id);
-        self.bool(true); // quoted identifier
-        self.bool(true); // ansi nulls
+        self.bool(tr.settings.quoted_identifier && !clr);
+        self.bool(tr.settings.ansi_nulls && !clr);
         let on = |e: &str| tr.events.iter().any(|x| x.eq_ignore_ascii_case(e));
         self.bool(on("UPDATE"));
         self.bool(on("INSERT"));
@@ -1059,11 +1189,9 @@ impl<'a> W<'a> {
             self.bool(order(e, o));
         }
         self.bool(tr.encrypted);
-        self.i32(0); // EXECUTE AS CALLER
-        for _ in 0..3 {
-            self.str(None);
-        }
-        self.bool(false); // CLR
+        self.execute_as(tr.execute_as.as_deref());
+        self.clr_binding(tr.clr_method.as_deref());
+        self.bool(clr);
         self.bool(tr.disabled);
         self.bool(tr.not_for_replication);
         self.no_ss(5);
@@ -1110,7 +1238,7 @@ impl<'a> W<'a> {
         self.returns(r.returns.as_deref());
         self.bool(false); // system object
         self.bool(r.null_on_null_input);
-        self.str(None); // authorization
+        self.str(r.owner.as_deref());
         self.execute_as(r.execute_as.as_deref());
         self.no_ss(2);
         self.i64(r.modified.as_deref().map_or(0, crate::sources::snp::objects::text_ticks_ms)); // last modified
@@ -1168,7 +1296,7 @@ impl<'a> W<'a> {
         self.i32(0);
         self.clr_binding(r.clr_method.as_deref());
         self.params(&r.parameters);
-        self.str(None); // authorization
+        self.str(r.owner.as_deref());
         self.i32(0); // schema-bound tables
         self.i32(0); // numbered procedures
         self.no_ss(2);
@@ -1211,7 +1339,7 @@ impl<'a> W<'a> {
         self.bool(v.encrypted);
         self.bool(false); // system object
         self.bool(false); // no full-text index
-        self.str(None); // authorization
+        self.str(v.owner.as_deref());
         self.str(None); // search property list
         self.references(&v.schema, &v.name);
         self.no_ss(2);
@@ -1248,8 +1376,8 @@ impl<'a> W<'a> {
                 self.str(None);
             }
         }
-        self.s(""); // bound rule
-        self.s(""); // bound default
+        self.s(t.bound_rule.as_deref().unwrap_or(""));
+        self.s(t.bound_default.as_deref().unwrap_or(""));
         let me = ObjectName::new(&t.schema, &t.name);
         let tables: Vec<String> = db
             .tables
@@ -1281,7 +1409,7 @@ impl<'a> W<'a> {
             self.table(&TableRec { t: &table, object_id: id, type_table: true });
         }
         self.perms("TYPE", &t.schema, Some(&t.name));
-        self.str(None); // authorization
+        self.str(t.owner.as_deref());
         self.no_ss(2);
         self.i32(0); // user types used
     }
@@ -1295,7 +1423,7 @@ impl<'a> W<'a> {
         self.s(&s.base_object);
         self.eprops("SYNONYM", &s.schema, &s.name);
         self.perms("OBJECT", &s.schema, Some(&s.name));
-        self.str(None);
+        self.str(s.owner.as_deref());
         self.no_ss(2);
     }
 
@@ -1323,7 +1451,7 @@ impl<'a> W<'a> {
         self.u8(u8::try_from(ty.scale).unwrap_or(0));
         self.s(&s.start); // current value
         self.bool(false); // exhausted
-        self.str(None);
+        self.str(s.owner.as_deref());
         self.no_ss(2);
     }
 
@@ -1358,7 +1486,7 @@ impl<'a> W<'a> {
         self.str(p.certificate.as_deref());
         self.str(p.asymmetric_key.as_deref());
         self.str(p.default_schema.as_deref());
-        self.no_eprops();
+        self.principal_eprops(&p.name);
         self.no_perms();
         self.db_perms(&p.name, connect);
         self.no_ss(1);
@@ -1393,9 +1521,16 @@ impl<'a> W<'a> {
         self.strs(&members);
         self.no_perms();
         self.db_perms(name, false);
-        self.no_eprops();
+        self.principal_eprops(name);
         self.no_ss(2);
         self.i32(-1); // no member script sources
+    }
+
+    /// Extended properties of a user or role (level 0 USER).
+    fn principal_eprops(&mut self, name: &str) {
+        let db = self.db;
+        let props: Vec<&ExtendedProperty> = db.extended_properties.iter().filter(|p| p.class == "USER" && p.schema.is_none() && p.object.as_deref() == Some(name)).collect();
+        self.eprops_of(&props);
     }
 
     fn schemas(&mut self) {

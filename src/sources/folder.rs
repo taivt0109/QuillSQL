@@ -607,9 +607,9 @@ pub fn default_path(info: &FolderInfo, key: &ObjectKey) -> PathBuf {
     Path::new(&prefix).join(format!("{stem}.sql"))
 }
 
-/// Roles that are part of every database; their files only list members.
-const FIXED_ROLES: [&str; 9] =
-    ["db_owner", "db_accessadmin", "db_securityadmin", "db_ddladmin", "db_backupoperator", "db_datareader", "db_datawriter", "db_denydatareader", "db_denydatawriter"];
+/// Roles that are part of every database; their files list members and database permissions.
+const FIXED_ROLES: [&str; 10] =
+    ["public", "db_owner", "db_accessadmin", "db_securityadmin", "db_ddladmin", "db_backupoperator", "db_datareader", "db_datawriter", "db_denydatareader", "db_denydatawriter"];
 
 /// Every object of `db` with its file content.
 pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(ObjectKey, String)> {
@@ -624,7 +624,7 @@ pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(Obj
         out.push((key(ObjectType::Role, "", &p.name), script::role(db, p, o)));
     }
     for r in FIXED_ROLES {
-        let text = script::fixed_role(db, r);
+        let text = script::fixed_role(db, r, o);
         if !text.is_empty() {
             out.push((key(ObjectType::Role, "", r), text));
         }
@@ -632,6 +632,10 @@ pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(Obj
     if !o.has(crate::schema::Opt::IgnoreUsers) {
         for p in db.principals.iter().filter(|p| !p.is_role()) {
             out.push((key(ObjectType::User, "", &p.name), script::user(db, p, o)));
+        }
+        let guest = script::guest(db, o);
+        if !guest.is_empty() {
+            out.push((key(ObjectType::User, "", "guest"), guest));
         }
     }
     for t in &db.types {

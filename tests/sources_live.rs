@@ -9,6 +9,11 @@ use quillsql::db::{self, Auth, ConnectionSpec};
 use quillsql::schema::{self, DiffKind, Mappings, Opt, Options, deploy};
 use quillsql::sources::{folder, parse};
 
+mod common {
+    pub mod followup;
+}
+use common::followup;
+
 struct Server {
     host: String,
     auth: Auth,
@@ -119,6 +124,34 @@ fn makescripts_reads_back_identical() {
         let _ = std::fs::remove_dir_all(&again);
         let _ = std::fs::remove_dir_all(&inline);
         server.drop(name);
+    }
+}
+
+/// Owners, table options, typed extended properties, trigger settings, type bindings and
+/// permissions, history tables, principal properties, public/guest grants and fixed-role members
+/// come back from a snapshot and from a scripts folder.
+#[test]
+fn followup_fields_round_trip_through_snapshots_and_scripts_folders() {
+    let Some(server) = server() else { return };
+    let name = "QD_fixsourcesfollowup_RT";
+    server.create(name, followup::FOLLOWUP);
+    let live = server.read(name);
+    server.drop(name);
+    let opts = Options::default_set();
+    let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
+    assert_identical(&snp, &live, &opts, "snapshot");
+    assert_identical(&live, &snp, &opts, "snapshot, the other way");
+    followup::assert_same_features(&snp, &live, "snapshot");
+    for inline in [false, true] {
+        let dir = temp(&format!("followup-{inline}"));
+        let o = if inline { opts.clone().with(Opt::InlineTableObjects) } else { opts.clone() };
+        folder::write_all(&live, &dir, &o).unwrap();
+        let f = folder::read(&dir).unwrap();
+        assert!(f.messages.is_empty(), "{:?}", f.messages);
+        assert_identical(&f.database, &live, &opts, "scripts folder");
+        assert_identical(&live, &f.database, &opts, "scripts folder, the other way");
+        followup::assert_same_features(&f.database, &live, "scripts folder");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -373,7 +406,14 @@ fn sql_compare_reads_our_snapshots_as_identical() {
         CREATE ASYMMETRIC KEY QuillAsym WITH ALGORITHM = RSA_2048 ENCRYPTION BY PASSWORD = 'Str0ng!Pass1';
         GRANT CONTROL ON CERTIFICATE::QuillCert TO KeyUser;";
     let changed = format!("{SHOP}\nGO\n{SHOP_CHANGES}");
-    for (name, script) in [("QD_sources_RgShop", SHOP), ("QD_sources_RgChanged", changed.as_str()), ("QD_sources_RgBindings", BINDINGS), ("QD_sources_RgObjects", objects.as_str()), ("QD_sources_RgKeys", keys)] {
+    for (name, script) in [
+        ("QD_sources_RgShop", SHOP),
+        ("QD_sources_RgChanged", changed.as_str()),
+        ("QD_sources_RgBindings", BINDINGS),
+        ("QD_sources_RgObjects", objects.as_str()),
+        ("QD_sources_RgKeys", keys),
+        ("QD_fixsourcesfollowup_RgSnap", followup::FOLLOWUP),
+    ] {
         server.create(name, script);
         let file = temp(name).with_extension("snp");
         std::fs::write(&file, quillsql::sources::snp_write::write(&server.read(name))).unwrap();
@@ -385,6 +425,28 @@ fn sql_compare_reads_our_snapshots_as_identical() {
         let out = cmd.output().unwrap();
         server.drop(name);
         let _ = std::fs::remove_file(&file);
+        // 63: the databases are identical.
+        assert_eq!(out.status.code(), Some(63), "{name}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+/// SQL Compare reads our scripts folders of the fixtures as identical to their databases.
+#[test]
+fn sql_compare_reads_our_scripts_folders_as_identical() {
+    let Some(server) = server() else { return };
+    let Ok(exe) = std::env::var("QUILL_TEST_SQLCOMPARE") else { return };
+    for (name, script) in [("QD_fixsourcesfollowup_RgShop", SHOP), ("QD_fixsourcesfollowup_RgFolder", followup::FOLLOWUP)] {
+        server.create(name, script);
+        let dir = temp(name);
+        folder::write_all(&server.read(name), &dir, &Options::default_set()).unwrap();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg(format!("/scripts1:{}", dir.display())).arg(format!("/server2:{}", server.host)).arg(format!("/database2:{}", unique(name)));
+        if let Auth::Sql { user, password } = &server.auth {
+            cmd.arg(format!("/username2:{user}")).arg(format!("/password2:{password}"));
+        }
+        let out = cmd.output().unwrap();
+        server.drop(name);
+        let _ = std::fs::remove_dir_all(&dir);
         // 63: the databases are identical.
         assert_eq!(out.status.code(), Some(63), "{name}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }

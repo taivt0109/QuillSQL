@@ -76,6 +76,9 @@ mod st {
     pub const TRIGGER_INSTEAD_OF: i64 = 0x2;
     pub const POLICY_ENABLED: i64 = 0x100;
     pub const POLICY_SCHEMA_BOUND: i64 = 0x100000;
+    pub const LARGE_VALUES_OUT_OF_ROW: i64 = 0x0200_0000;
+    /// status2.
+    pub const FILETABLE: i64 = 0x2;
 }
 
 /// Column status bits (syscolpars).
@@ -109,6 +112,10 @@ mod rc {
     pub const OBJECT_TO_TYPE: i64 = 43;
     pub const SCHEMA_OWNER: i64 = 50;
     pub const ROLE_OWNER: i64 = 51;
+    /// A user-defined type's explicit owner.
+    pub const TYPE_OWNER: i64 = 44;
+    /// Multi-object reference: a table to its Stretch remote database.
+    pub const STRETCH_REMOTE_DATABASE: i64 = 27;
     pub const CONSTRAINT_TO_INDEX: i64 = 93;
     pub const TEMPORAL_HISTORY: i64 = 112;
     pub const ASSEMBLY_REFERENCE: i64 = 10;
@@ -346,6 +353,11 @@ impl Builder<'_> {
         self.principals.get(&id).cloned()
     }
 
+    /// The explicit owner of a schema object (ALTER AUTHORIZATION; sys.objects.principal_id).
+    fn object_owner(&self, id: i32) -> Option<String> {
+        self.owner_ref(rc::OBJECT_OWNER, id as i64)
+    }
+
     fn schemas(&mut self) {
         let mut list: Vec<(i32, String)> = self.schema_names.iter().map(|(&k, v)| (k, v.clone())).collect();
         list.sort_by_key(|a| self.key(&a.1));
@@ -384,6 +396,7 @@ impl Builder<'_> {
         for t in rows {
             let schema = self.schema_names.get(&(t.int("schid") as i32)).cloned().unwrap_or_default();
             let mut ty = UserType { schema, name: t.str("name"), nullable: t.int("status") & 1 == 0, ..Default::default() };
+            ty.owner = self.single_ref(rc::TYPE_OWNER, t.int("id"), 0).and_then(|r| self.principal(r.int("indepid")));
             match t.int("xtype") {
                 243 => {
                     ty.kind = UserTypeKind::Table;
@@ -405,7 +418,13 @@ impl Builder<'_> {
                         }
                     }
                 }
-                x => ty.base_type = Some(self.data_type(x, x, t.int("length"), t.int("prec"), t.int("scale"))),
+                x => {
+                    ty.base_type = Some(self.data_type(x, x, t.int("length"), t.int("prec"), t.int("scale")));
+                    // sp_bindefault / sp_bindrule on the type.
+                    let bound = |c: &str| Some(t.int(c) as i32).filter(|&id| id != 0).and_then(|id| self.name_of(id)).map(|n| n.quoted());
+                    ty.bound_default = bound("dflt");
+                    ty.bound_rule = bound("chk");
+                }
             }
             types.push(ty);
         }
@@ -438,6 +457,11 @@ impl Builder<'_> {
                     _ => "TABLE",
                 }
                 .into(),
+                owner: self.object_owner(o.id),
+                large_value_types_out_of_row: o.flag(st::LARGE_VALUES_OUT_OF_ROW),
+                // The FileTable's directory and collation are not in a base table read here.
+                file_table: (o.status2 & st::FILETABLE != 0).then(FileTable::default),
+                remote_data_archive: self.multi.get(&rc::STRETCH_REMOTE_DATABASE).is_some_and(|v| v.iter().any(|r| r.int("depid") == o.id as i64)),
                 ..Default::default()
             };
             let heap = if self.single_ref(rc::INDEX_TO_DATA_SPACE, o.id as i64, 1).is_some() { 1 } else { 0 };
@@ -485,7 +509,7 @@ impl Builder<'_> {
         }
         for o in self.sorted_objects(&["V"]) {
             self.owners.insert(o.id, Owner::View(self.db.views.len()));
-            self.db.views.push(View { schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(), name: o.name.clone(), ..Default::default() });
+            self.db.views.push(View { schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(), name: o.name.clone(), owner: self.object_owner(o.id), ..Default::default() });
         }
     }
 
@@ -886,6 +910,7 @@ impl Builder<'_> {
                 execute_as: self.execute_as(o.id),
                 native_compilation: native,
                 null_on_null_input: clr.is_some() && o.flag(0x200000),
+                owner: self.object_owner(o.id),
                 clr_method: clr,
                 parameters,
                 returns,
@@ -989,7 +1014,7 @@ impl Builder<'_> {
                 cycle: o.flag(st::SEQ_CYCLE),
                 cached: o.flag(st::SEQ_CACHED),
                 cache_size: if o.flag(st::SEQ_CACHED) && o.intprop != 0 { Some(o.intprop) } else { None },
-                ..Default::default()
+                owner: self.object_owner(o.id),
             });
         }
     }
@@ -997,7 +1022,7 @@ impl Builder<'_> {
     fn synonyms(&mut self) {
         for o in self.sorted_objects(&["SN"]) {
             let base = self.value(vc::SYNONYM_BASE, o.id as i64, 0, 0).and_then(|r| text_of(r.get("value"))).unwrap_or_default();
-            self.db.synonyms.push(Synonym { schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(), name: o.name.clone(), base_object: base, ..Default::default() });
+            self.db.synonyms.push(Synonym { schema: self.schema_names.get(&o.schema).cloned().unwrap_or_default(), name: o.name.clone(), base_object: base, owner: self.object_owner(o.id) });
         }
     }
 
@@ -1131,7 +1156,7 @@ impl Builder<'_> {
                 schema_bound: o.flag(st::POLICY_SCHEMA_BOUND),
                 not_for_replication: o.flag(st::NOT_FOR_REPLICATION),
                 predicates,
-                ..Default::default()
+                owner: self.object_owner(o.id),
             });
         }
     }
@@ -1603,14 +1628,30 @@ impl Builder<'_> {
         rows.sort_by_key(|r| (r.int("class"), r.int("id"), r.int("subid"), r.str("name")));
         for r in rows {
             let (class, major, minor) = (r.int("class"), r.int("id") as i32, r.int("subid"));
-            let value = match r.get("value") {
-                Value::Variant(v) => Some(v.text.clone()),
-                Value::Null => None,
-                v => text_of(v),
+            let (value, value_type) = match r.get("value") {
+                Value::Variant(v) => (Some(v.text.clone()), Some(v.base_type.clone())),
+                Value::Null => (None, None),
+                v => (text_of(v), None),
             };
-            let mut p = ExtendedProperty { name: r.str("name"), value, ..Default::default() };
+            let mut p = ExtendedProperty { name: r.str("name"), value, value_type, ..Default::default() };
             match class {
                 0 => p.class = "DATABASE".into(),
+                // Users and roles.
+                4 => {
+                    let Some(name) = self.principal(major as i64) else { continue };
+                    p.class = "USER".into();
+                    p.object = Some(name);
+                }
+                // Table-type columns.
+                8 => {
+                    let Some(t) = self.types.get(&(major as i64)) else { continue };
+                    let Some(table) = self.single_ref(rc::TYPE_TO_TABLE, major as i64, 0).map(|r| r.int("indepid")) else { continue };
+                    p.class = "TYPE".into();
+                    p.schema = self.schema_names.get(&(t.int("schid") as i32)).cloned();
+                    p.object = Some(t.str("name"));
+                    p.minor_type = Some("COLUMN".into());
+                    p.minor_name = Some(self.column_name(table, minor));
+                }
                 3 => {
                     p.class = "SCHEMA".into();
                     p.schema = self.schema_names.get(&major).cloned();
@@ -1782,7 +1823,8 @@ impl Builder<'_> {
             }
             let code = r.str("type").trim().to_string();
             // CONNECT comes with CREATE USER: only its absence, a DENY or WITH GRANT OPTION shows.
-            if class == 0 && code == "CO" && state == "G" {
+            // guest has no CREATE USER: its CONNECT is a permission.
+            if class == 0 && code == "CO" && state == "G" && grantee != "guest" {
                 continue;
             }
             let mut p = Permission {
