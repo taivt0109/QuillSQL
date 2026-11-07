@@ -948,8 +948,8 @@ impl<'a> Planner<'a> {
                 if self.dropped.contains(&dep) {
                     continue;
                 }
-                // Brought back as it is, it may no longer fit what it is bound to.
-                if !chosen {
+                // Brought back as it is, it may no longer fit the table or module it is bound to.
+                if !chosen && (self.tgt.table(&n.schema, &n.name).is_some() || self.target_module(&n).is_some()) {
                     self.warn(warn::rebind_might_fail(&dep.to_string()));
                 }
                 self.drop_module(&dep, t);
