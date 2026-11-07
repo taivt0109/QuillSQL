@@ -18,7 +18,6 @@ pub(super) fn xml_key(x: &str) -> String {
     let mut out = String::with_capacity(x.len());
     let mut pending = String::new();
     let mut after_tag = false;
-    let mut in_tag = false;
     for c in x.chars() {
         if c.is_whitespace() && after_tag {
             pending.push(c);
@@ -28,26 +27,11 @@ pub(super) fn xml_key(x: &str) -> String {
             out.push_str(&pending);
         }
         pending.clear();
-        // Space before the end of a tag (`<b x="1" />`) is not significant either.
-        if c == '>' && in_tag {
-            let empty = out.ends_with('/');
-            if empty {
-                out.pop();
-            }
-            out.truncate(out.trim_end().len());
-            if empty {
-                out.push('/');
-            }
-        }
         out.push(c);
         after_tag = c == '>';
-        in_tag = match c {
-            '<' => true,
-            '>' => false,
-            _ => in_tag,
-        };
     }
-    out
+    // `<a />` and `<a/>` are the same element.
+    out.replace(" />", "/>").replace(" >", ">")
 }
 
 impl Comparer<'_> {
@@ -61,6 +45,7 @@ impl Comparer<'_> {
     /// Permissions on a securable that has no schema (`class` CERTIFICATE, SERVICE…).
     fn grants(&self, d: &mut Diffs, class: &str, a: &str, b: &str) {
         self.permissions(d, class, "", Some(a), "", Some(b));
+        self.xprops(d, class, None, a, b);
     }
 
     fn names(&self, a: &[String], b: &[String]) -> bool {
@@ -76,8 +61,8 @@ impl Comparer<'_> {
         let (db1, db2, o) = (self.db1, self.db2, self.opts);
         self.objects(ObjectType::Assembly, &db1.assemblies, &db2.assemblies, |a| (&NO_SCHEMA, &a.name), Comparer::assembly);
         self.objects(ObjectType::XmlSchemaCollection, &db1.xml_schema_collections, &db2.xml_schema_collections, |x| (&x.schema, &x.name), Comparer::xml_schema_collection);
-        self.objects(ObjectType::Default, &db1.defaults, &db2.defaults, |x| (&x.schema, &x.name), Comparer::bindable);
-        self.objects(ObjectType::Rule, &db1.rules, &db2.rules, |x| (&x.schema, &x.name), Comparer::bindable);
+        self.objects(ObjectType::Default, &db1.defaults, &db2.defaults, |x| (&x.schema, &x.name), |c, a, b| c.bindable(a, b, "DEFAULT"));
+        self.objects(ObjectType::Rule, &db1.rules, &db2.rules, |x| (&x.schema, &x.name), |c, a, b| c.bindable(a, b, "RULE"));
         if !o.has(Opt::IgnoreTriggers) {
             self.objects(ObjectType::DdlTrigger, &db1.ddl_triggers, &db2.ddl_triggers, |t| (&NO_SCHEMA, &t.name), Comparer::ddl_trigger);
         }
@@ -138,14 +123,16 @@ impl Comparer<'_> {
             d.add("Schema", Some(a.definition.clone()), Some(b.definition.clone()));
         }
         self.permissions(&mut d, "XML SCHEMA COLLECTION", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
+        self.xprops(&mut d, "XML SCHEMA COLLECTION", Some(&a.schema), &a.name, &b.name);
         d.out
     }
 
-    fn bindable(&self, a: &BindableObject, b: &BindableObject) -> Vec<PropDiff> {
+    fn bindable(&self, a: &BindableObject, b: &BindableObject, class: &str) -> Vec<PropDiff> {
         let mut d = Diffs::default();
         // A statement terminator is not part of the definition.
         let text = |x: &str| x.trim_end().trim_end_matches(';').to_string();
         self.module_text(&mut d, &text(&a.definition), &text(&b.definition), false, false);
+        self.xprops(&mut d, class, Some(&a.schema), &a.name, &b.name);
         d.out
     }
 
@@ -166,6 +153,7 @@ impl Comparer<'_> {
                 self.settings(&mut d, &a.settings, &b.settings);
             }
         }
+        self.xprops(&mut d, "TRIGGER", None, &a.name, &b.name);
         d.out
     }
 
@@ -176,6 +164,7 @@ impl Comparer<'_> {
         if a.boundaries != b.boundaries {
             d.add("Boundary values", Some(a.boundaries.join(", ")), Some(b.boundaries.join(", ")));
         }
+        self.xprops(&mut d, "PARTITION FUNCTION", None, &a.name, &b.name);
         d.out
     }
 
@@ -196,6 +185,7 @@ impl Comparer<'_> {
         if ka != kb || (consider_next && pa != pb) {
             d.add("Filegroups", Some(a.filegroups.join(", ")), Some(b.filegroups.join(", ")));
         }
+        self.xprops(&mut d, "PARTITION SCHEME", None, &a.name, &b.name);
         d.out
     }
 
@@ -302,6 +292,7 @@ impl Comparer<'_> {
             }
         }
         self.permissions(&mut d, "OBJECT", &a.schema, Some(&a.name), &b.schema, Some(&b.name));
+        self.xprops(&mut d, "QUEUE", Some(&a.schema), &a.name, &b.name);
         d.out
     }
 
@@ -579,7 +570,10 @@ impl Comparer<'_> {
         d.opt_prop("Sensitivity classification label id", x.label_id.as_deref(), y.label_id.as_deref());
         d.opt_prop("Sensitivity classification information type", x.information_type.as_deref(), y.information_type.as_deref());
         d.opt_prop("Sensitivity classification information type id", x.information_type_id.as_deref(), y.information_type_id.as_deref());
-        d.opt_prop("Sensitivity classification rank", x.rank.as_deref(), y.rank.as_deref());
+        // Snapshots don't keep the rank.
+        if x.rank.is_some() && y.rank.is_some() {
+            d.opt_prop("Sensitivity classification rank", x.rank.as_deref(), y.rank.as_deref());
+        }
     }
 
     pub(super) fn clr_signature(&self, d: &mut Diffs, a: &Routine, b: &Routine) {
@@ -638,6 +632,28 @@ mod tests {
     fn xml_without_layout() {
         assert_eq!(xml_key("<a>\r\n  <b x=\"1\"/>\r\n</a>"), "<a><b x=\"1\"/></a>");
         assert_eq!(xml_key("<a> text </a>"), "<a> text </a>");
-        assert_eq!(xml_key("<a>\r\n  <b x=\"1\" />\r\n</a >"), "<a><b x=\"1\"/></a>");
+        // SQL Compare's snapshots write empty elements with a space before the slash.
+        assert_eq!(xml_key("<a><b x=\"1\" /></a>"), xml_key("<a><b x=\"1\"/></a>"));
+    }
+
+    #[test]
+    fn database_owner_is_reported_on_dbo_and_not_deployed() {
+        use crate::schema::{DiffKind, Mappings, Opt, Options, compare, deploy};
+        let db = |owner: &str| Database { name: "x".into(), owner: Some(owner.into()), ..Default::default() };
+        let (a, b) = (db("sa"), db("QuillOwner"));
+        assert!(compare(&a, &b, &Options::default_set(), &Mappings::default()).differences.iter().all(|d| d.kind == DiffKind::Equal));
+        let opts = Options::default_set().without(Opt::IgnoreUserProperties);
+        let c = compare(&a, &b, &opts, &Mappings::default());
+        let dbo: Vec<_> = c.differences.iter().filter(|d| d.kind != DiffKind::Equal).collect();
+        assert_eq!(dbo.len(), 1);
+        assert_eq!((dbo[0].object_type, dbo[0].name.name.as_str(), dbo[0].properties[0].source.as_deref()), (ObjectType::User, "dbo", Some("sa")));
+        let settings = deploy::ScriptSettings {
+            transaction_isolation_level: "SERIALIZABLE".into(),
+            source: "a".into(),
+            target: "b".into(),
+            target_database: "x".into(),
+            target_major_version: 16,
+        };
+        assert!(deploy::generate(&c, &a, &b, &opts, &Mappings::default(), &settings).unwrap().is_empty());
     }
 }

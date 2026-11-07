@@ -27,6 +27,8 @@ const FIXED_ROLES: [&str; 10] = [
     "db_denydatareader",
     "db_denydatawriter",
 ];
+pub(crate) mod objects;
+
 const BUILT_IN_USERS: [&str; 4] = ["dbo", "guest", "sys", "INFORMATION_SCHEMA"];
 /// Grantees whose permissions the live reader leaves out.
 const SYSTEM_GRANTEES: [&str; 3] = ["dbo", "sys", "INFORMATION_SCHEMA"];
@@ -75,16 +77,10 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     c.str()?; // migrations folder
 
     s.tables = c.member(Cur::table_item)?;
-    // History tables are nested in their system-versioned table.
-    let nested: Vec<RawTable> = s.tables.iter_mut().filter_map(|t| t.history_def.take().map(|h| *h)).collect();
-    for h in nested {
-        if !s.tables.iter().any(|t| t.schema == h.schema && t.name == h.name) {
-            s.tables.push(h);
-        }
-    }
+    s.tables.append(&mut c.histories);
     s.functions = c.member(Cur::function)?;
-    s.defaults = c.member(|c| c.default_or_rule(false))?;
-    s.rules = c.member(|c| c.default_or_rule(true))?;
+    s.more.defaults = c.member(|c| c.bindable(false))?;
+    s.more.rules = c.member(|c| c.bindable(true))?;
     s.users = c.member(Cur::user)?;
     s.roles = c.member(Cur::role)?;
     s.types = c.member(Cur::user_type)?;
@@ -98,50 +94,52 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     }
     c.bool()?; // full-text enabled
     c.bool()?; // remote data archive enabled
-    c.member(Cur::fulltext_catalog)?;
+    s.more.fulltext_catalogs = c.member(Cur::fulltext_catalog_full)?;
     s.case_sensitive = c.bool()?;
     if !c.null_member() {
         (s.texts, s.encrypted) = c.blob_store()?;
     }
+    // Assembly binaries and XML schema collection contents.
     if !c.null_member() {
-        s.assembly_blobs = c.blob_store()?.0;
+        s.more.assembly_blobs = c.blob_store()?.0;
     }
     if !c.null_member() {
-        s.xml_blobs = c.blob_store()?.0;
+        s.more.xml_blobs = c.blob_store()?.0;
     }
-    s.assemblies = c.member(Cur::assembly)?;
+    s.more.assemblies = c.member(Cur::assembly_full)?;
     if !c.null_member() {
-        s.assembly_references = c.dependencies()?;
+        c.dependencies()?;
     }
     s.synonyms = c.member(Cur::synonym)?;
-    s.xml_schema_collections = c.member(Cur::xml_schema_collection)?;
-    s.message_types = c.member(Cur::message_type)?;
-    s.contracts = c.member(Cur::contract)?;
-    s.queues = c.member(Cur::queue)?;
-    s.services = c.member(Cur::service)?;
-    s.routes = c.member(Cur::route)?;
-    s.event_notifications = c.member(Cur::event_notification)?;
-    s.partition_functions = c.member(Cur::partition_function)?;
-    s.partition_schemes = c.member(Cur::partition_scheme)?;
+    s.more.xml_collections = c.member(Cur::xml_collection_full)?;
+    s.more.message_types = c.member(Cur::message_type_full)?.into_iter().flatten().collect();
+    s.more.contracts = c.member(Cur::contract_full)?.into_iter().flatten().collect();
+    s.more.queues = c.member(Cur::queue_full)?.into_iter().flatten().collect();
+    s.more.services = c.member(Cur::service_full)?.into_iter().flatten().collect();
+    s.more.routes = c.member(Cur::route_full)?.into_iter().flatten().collect();
+    s.more.event_notifications = c.member(Cur::event_notification_full)?;
+    s.more.partition_functions = c.member(Cur::partition_function_full)?;
+    s.more.partition_schemes = c.member(Cur::partition_scheme_full)?;
     s.schemas = c.member(Cur::schema)?;
     c.member(Cur::trigger)?; // database-level list; DML triggers live in their table or view
-    s.ddl_triggers = c.member(Cur::ddl_trigger)?;
-    s.service_bindings = c.member(Cur::service_binding)?;
-    s.certificates = c.member(Cur::certificate)?;
-    s.symmetric_keys = c.member(Cur::symmetric_key)?;
-    s.asymmetric_keys = c.member(Cur::asymmetric_key)?;
-    c.member(Cur::fulltext_stoplist)?;
+    s.more.ddl_triggers = c.member(Cur::ddl_trigger_full)?;
+    s.more.bindings = c.member(Cur::service_binding_full)?;
+    s.more.certificates = c.member(Cur::certificate_full)?;
+    s.more.symmetric_keys = c.member(Cur::symmetric_key_full)?.into_iter().flatten().collect();
+    s.more.asymmetric_keys = c.member(Cur::asymmetric_key_full)?;
+    s.more.stoplists = c.member(Cur::stoplist_full)?;
     s.sequences = c.member(Cur::sequence)?;
-    c.member(Cur::search_property_list)?;
-    s.security_policies = c.member(Cur::security_policy)?;
-    c.coll(Cur::external_file_format)?;
-    c.coll(Cur::external_data_source)?;
-    c.coll(Cur::external_table)?;
-    c.coll(Cur::str)?; // database-scoped credentials
+    s.more.property_lists = c.member(Cur::property_list_full)?;
+    s.more.policies = c.member(Cur::security_policy_full)?;
+    s.more.file_formats = c.coll(Cur::file_format_full)?;
+    s.more.data_sources = c.coll(Cur::data_source_full)?;
+    s.more.external_tables = c.coll(Cur::external_table_full)?;
+    s.more.credentials = c.coll(Cur::s)?;
     if c.p != bytes.len() {
         return Err(format!("unexpected data at offset {} after the last snapshot member", c.p));
     }
     s.props = std::mem::take(&mut c.props);
+    s.type_perms = std::mem::take(&mut c.type_perms);
     Ok(s.build())
 }
 
@@ -158,40 +156,19 @@ struct Snap {
     functions: Vec<RawModule>,
     procedures: Vec<RawModule>,
     views: Vec<RawView>,
-    types: Vec<Raw<UserType>>,
+    types: Vec<UserType>,
     users: Vec<RawUser>,
     roles: Vec<RawRole>,
     schemas: Vec<RawSchema>,
     sequences: Vec<(Sequence, Vec<RawPerm>)>,
     synonyms: Vec<(Synonym, Vec<RawPerm>)>,
-    defaults: Vec<BindableObject>,
-    rules: Vec<BindableObject>,
-    ddl_triggers: Vec<RawDdlTrigger>,
-    message_types: Vec<Raw<MessageType>>,
-    contracts: Vec<Raw<Contract>>,
-    queues: Vec<Raw<Queue>>,
-    services: Vec<Raw<Service>>,
-    routes: Vec<Raw<Route>>,
-    service_bindings: Vec<Raw<ServiceBinding>>,
-    event_notifications: Vec<EventNotification>,
-    partition_functions: Vec<PartitionFunction>,
-    partition_schemes: Vec<PartitionScheme>,
-    /// XML schema collections with the id of their content in `xml_blobs`.
-    xml_schema_collections: Vec<(Raw<XmlSchemaCollection>, i32)>,
-    xml_blobs: HashMap<u64, Vec<u8>>,
-    assembly_blobs: HashMap<u64, Vec<u8>>,
-    /// Assemblies with the blob ids of their files.
-    assemblies: Vec<(Raw<Assembly>, Vec<u64>)>,
-    assembly_references: Vec<(u8, String, u8, String)>,
-    security_policies: Vec<Raw<SecurityPolicy>>,
-    certificates: Vec<Raw<Certificate>>,
-    symmetric_keys: Vec<Raw<SymmetricKey>>,
-    asymmetric_keys: Vec<Raw<AsymmetricKey>>,
     dependencies: Vec<(u8, String, u8, String)>,
     props: Vec<RawProp>,
     /// Comments blob store: module and default text by id.
     texts: HashMap<u64, Vec<u8>>,
     encrypted: HashSet<u64>,
+    more: objects::More,
+    type_perms: Vec<(String, String, Vec<RawPerm>)>,
 }
 
 struct RawPerm {
@@ -199,10 +176,10 @@ struct RawPerm {
     statement: i32,
     action: String,
     grantee: String,
-    /// Column-level: the columns it is on.
-    columns: Vec<String>,
     /// An old enum action: not modelled.
     skip: bool,
+    /// Column-level permissions: the columns.
+    columns: Vec<String>,
 }
 
 struct RawProp {
@@ -259,8 +236,6 @@ struct RawTable {
     change_tracking: u8,
     temporal_type: u8,
     history: Option<ObjectName>,
-    /// The history table's own record, nested in a system-versioned table.
-    history_def: Option<Box<RawTable>>,
     retention: Option<String>,
     is_node: bool,
     is_edge: bool,
@@ -279,45 +254,6 @@ struct RawModule {
     perms: Vec<RawPerm>,
 }
 
-/// An object with its permissions; `system` for the ones every database has.
-struct Raw<T> {
-    item: T,
-    perms: Vec<RawPerm>,
-    system: bool,
-}
-
-#[derive(Default)]
-struct RawParam {
-    name: String,
-    size: i32,
-    scale: i32,
-    precision: i32,
-    type_name: String,
-    type_schema: String,
-    default: Option<String>,
-    output: bool,
-}
-
-impl RawParam {
-    /// The type as written in DDL: `nvarchar(50)`, `[dbo].[Point]`.
-    fn type_sql(&self) -> String {
-        if is_user_schema(&self.type_schema) {
-            DataType { name: self.type_name.clone(), schema: Some(self.type_schema.clone()), ..Default::default() }.sql()
-        } else {
-            system_type(&self.type_name, self.size, self.precision, self.scale).sql()
-        }
-    }
-
-    fn parameter(&self) -> Parameter {
-        Parameter { name: self.name.clone(), data_type: self.type_sql(), output: self.output, default: self.default.clone() }
-    }
-}
-
-struct RawDdlTrigger {
-    trigger: DdlTrigger,
-    text_id: i32,
-}
-
 struct RawView {
     view: View,
     text_id: i32,
@@ -330,6 +266,8 @@ struct RawUser {
     login: Option<String>,
     user_type: i32,
     default_schema: Option<String>,
+    certificate: Option<String>,
+    asymmetric_key: Option<String>,
     db_perms: Vec<(String, u8)>,
 }
 
@@ -356,13 +294,17 @@ struct Cur<'a> {
     depth: u32,
     /// Every extended property met so far; they are attached by their level names, not their owner.
     props: Vec<RawProp>,
-    /// Statistics records met in the index collection being read.
+    /// Statistics met while reading a table's indexes.
     stats: Vec<Statistic>,
+    /// Permissions on user-defined types: (schema, name, perms).
+    type_perms: Vec<(String, String, Vec<RawPerm>)>,
+    /// History tables, which are written inside their system-versioned table.
+    histories: Vec<RawTable>,
 }
 
 impl<'a> Cur<'a> {
     fn new(b: &'a [u8]) -> Self {
-        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new() }
+        Cur { b, p: 0, depth: 0, props: Vec::new(), stats: Vec::new(), type_perms: Vec::new(), histories: Vec::new() }
     }
 
     fn take(&mut self, n: usize) -> R<&'a [u8]> {
@@ -552,7 +494,7 @@ impl<'a> Cur<'a> {
             let grantee = c.s()?;
             c.bool()?;
             let columns = if c.bool()? { c.strs()? } else { Vec::new() };
-            Ok(RawPerm { statement, action, grantee, columns, skip: v < 12.48 })
+            Ok(RawPerm { statement, action, grantee, skip: v < 12.48, columns })
         })
     }
 
@@ -794,11 +736,16 @@ impl Cur<'_> {
         }
         if v >= 13.44 {
             let sv = self.f32()?;
-            let mut s = Sensitivity::default();
-            for x in [&mut s.label, &mut s.label_id, &mut s.information_type, &mut s.information_type_id] {
-                *x = self.str()?.filter(|v| !v.is_empty());
+            let parts: Vec<Option<String>> = (0..4).map(|_| self.str().map(|s| s.filter(|x| !x.is_empty()))).collect::<R<_>>()?;
+            if parts.iter().any(Option::is_some) {
+                f.sensitivity = Some(Sensitivity {
+                    label: parts[0].clone(),
+                    label_id: parts[1].clone(),
+                    information_type: parts[2].clone(),
+                    information_type_id: parts[3].clone(),
+                    rank: None,
+                });
             }
-            f.sensitivity = (s != Sensitivity::default()).then_some(s);
             if sv >= 13.46 {
                 self.sss(5)?;
             }
@@ -891,11 +838,8 @@ impl Cur<'_> {
             1 => {
                 self.f32()?;
                 let filter = self.str()?.filter(|f| !f.is_empty());
-                // Statistics SQL Server makes itself are not kept.
-                if !ix.name.starts_with("_WA_Sys_") {
-                    let columns = cols.iter().map(|(_, (name, _, _))| name.clone()).collect();
-                    self.stats.push(Statistic { name: ix.name, columns, filter, no_recompute: ix.no_recompute, incremental: ix.incremental });
-                }
+                let columns = cols.into_iter().map(|(_, (name, _, _))| name).collect();
+                self.stats.push(Statistic { name: ix.name, columns, filter, no_recompute: ix.no_recompute, incremental: ix.incremental });
                 return Ok(None);
             }
             2 => {
@@ -1135,11 +1079,10 @@ impl Cur<'_> {
         self.eprops()?;
         self.i32()?;
         t.perms = self.perms()?;
-        let outer = std::mem::take(&mut self.stats);
+        let stats_from = self.stats.len();
         t.indexes = self.coll(Cur::index)?.into_iter().flatten().collect();
-        // The internal unique index of a graph table is not part of its definition.
-        t.indexes.retain(|ix| !ix.name.starts_with("GRAPH_UNIQUE_INDEX_"));
-        t.statistics = std::mem::replace(&mut self.stats, outer);
+        t.statistics = self.stats.split_off(stats_from);
+        t.statistics.sort_by(|a, b| a.name.cmp(&b.name));
         t.foreign_keys = self.coll(Cur::foreign_key)?;
         t.checks = self.coll(Cur::check_constraint)?;
         t.triggers = self.coll(Cur::trigger)?;
@@ -1231,13 +1174,15 @@ impl Cur<'_> {
             self.ss()?;
         }
         if v >= 13.18 && self.bool()? {
-            t.history_def = Some(Box::new(self.table()?));
+            let history = self.table()?;
+            self.histories.push(history);
         }
         if v >= 13.62 {
             self.bool()?;
         }
         if v >= 13.7 {
             t.edge_constraints = self.coll(Cur::edge_constraint)?;
+            t.edge_constraints.sort_by(|a, b| a.name.cmp(&b.name));
         }
         if v >= 21.0 {
             self.ss_list()?;
@@ -1252,9 +1197,9 @@ impl Cur<'_> {
         e.not_trusted = self.bool()?;
         let n = self.count()?;
         for _ in 0..n {
-            let from = two_part(&self.s()?).unwrap_or_default();
-            let to = two_part(&self.s()?).unwrap_or_default();
-            e.connections.push((from, to));
+            let from = self.s()?;
+            let to = self.s()?;
+            e.connections.push((two_part(&from).unwrap_or_default(), two_part(&to).unwrap_or_default()));
         }
         e.system_named = self.bool()?;
         self.sss(2)?;
@@ -1286,42 +1231,6 @@ impl Cur<'_> {
 // ------------------------------------------------------------------------------- programmability
 
 impl Cur<'_> {
-    fn param(&mut self) -> R<RawParam> {
-        let v = self.f32()?;
-        self.i32()?;
-        let mut p = RawParam { name: self.s()?, ..Default::default() };
-        if v >= 4.0 {
-            (p.size, p.scale, p.precision) = (self.i32()?, self.i32()?, self.i32()?);
-            p.type_name = self.s()?;
-            if v >= 6.0 {
-                p.type_schema = self.s()?;
-            }
-            let has_default = self.bool()?;
-            let default = self.str()?;
-            p.default = default.filter(|_| has_default);
-            p.output = self.bool()?;
-            self.bool()?; // XML document
-            if v < 13.7912 {
-                self.str()?;
-            }
-            self.str()?; // XML schema collection
-        }
-        if v >= 13.63 {
-            self.str()?;
-        }
-        Ok(p)
-    }
-
-    /// Parameters, then one (id, name) pair per parameter.
-    fn params(&mut self) -> R<Vec<RawParam>> {
-        let list = self.coll(Cur::param)?;
-        for _ in 0..list.len() {
-            self.i32()?;
-            self.str()?;
-        }
-        Ok(list)
-    }
-
     fn function(&mut self) -> R<RawModule> {
         let v = self.f32()?;
         let mut r = Routine { name: self.s()?, schema: self.s()?, ..Default::default() };
@@ -1346,21 +1255,27 @@ impl Cur<'_> {
             for b in &mut binding {
                 *b = self.s()?;
             }
-            let result_columns = if self.i32()? > 0 { self.coll(Cur::field)? } else { Vec::new() };
+            let mut result = Vec::new();
+            if self.i32()? > 0 {
+                result = self.coll(Cur::field)?;
+            }
             clr = self.bool()?;
-            let params = self.params()?;
-            let returns = if self.bool()? { Some(self.param()?) } else { None };
+            let params = self.params_full()?;
+            let returns = if self.bool()? { Some(self.param_full()?.0.data_type) } else { None };
             if clr || function_type == 4 {
-                r.parameters = params.iter().map(RawParam::parameter).collect();
-                r.returns = returns.filter(|_| result_columns.is_empty()).map(|p| p.type_sql());
-                r.result_columns = result_columns.iter().enumerate().map(|(i, f)| column(f, i + 1)).collect();
+                r.parameters = params.into_iter().map(|p| p.0).collect();
+                r.returns = returns;
+                r.result_columns = result.iter().enumerate().map(|(i, f)| column(f, i + 1)).collect();
+                for c in &mut r.result_columns {
+                    c.nullable = true;
+                }
             }
         }
         if v >= 4.1 {
-            self.bool()?; // system object
+            self.bool()?;
         }
         if v >= 4.2 {
-            r.null_on_null_input = self.bool()?;
+            r.null_on_null_input = self.bool()? && (clr || function_type == 4);
         }
         if v >= 7.0 {
             self.str()?;
@@ -1388,8 +1303,7 @@ impl Cur<'_> {
             (false, _) => RoutineKind::ScalarFunction,
         };
         if clr || function_type == 4 {
-            // Aggregates name only the assembly and the class.
-            r.clr_method = Some(clr_method(&binding));
+            r.clr_method = Some(binding.iter().filter(|b| !b.is_empty()).map(|b| objects::bracket(b)).collect::<Vec<_>>().join("."));
         } else {
             r.settings = settings;
         }
@@ -1427,9 +1341,9 @@ impl Cur<'_> {
                 clr = self.bool()?;
                 r.encrypted = self.bool()?;
             }
-            let params = self.params()?;
+            let params = self.params_full()?;
             if clr {
-                r.parameters = params.iter().map(RawParam::parameter).collect();
+                r.parameters = params.into_iter().map(|p| p.0).collect();
             }
         }
         if (5.3..6.2).contains(&v) {
@@ -1453,7 +1367,7 @@ impl Cur<'_> {
         }
         if clr {
             r.kind = RoutineKind::ClrProcedure;
-            r.clr_method = Some(clr_method(&binding));
+            r.clr_method = Some(binding.iter().filter(|b| !b.is_empty()).map(|b| objects::bracket(b)).collect::<Vec<_>>().join("."));
         } else {
             r.settings = settings;
         }
@@ -1467,7 +1381,10 @@ impl Cur<'_> {
         self.eprops()?;
         self.i32()?;
         let perms = self.perms()?;
+        let stats_from = self.stats.len();
         view.indexes = self.coll(Cur::index)?.into_iter().flatten().collect();
+        view.statistics = self.stats.split_off(stats_from);
+        view.statistics.sort_by(|a, b| a.name.cmp(&b.name));
         let triggers = self.coll(Cur::trigger)?;
         self.bool()?;
         // Output columns carry names only (no types), so they are left out.
@@ -1507,25 +1424,9 @@ impl Cur<'_> {
         Ok(RawView { view, text_id, perms, triggers })
     }
 
-    fn default_or_rule(&mut self, rule: bool) -> R<BindableObject> {
-        let v = self.f32()?;
-        let name = self.s()?;
-        let schema = self.s()?;
-        if (!rule && v > 1.0) || (rule && v >= 7.0) {
-            self.i32()?;
-        }
-        let definition = self.s()?;
-        self.eprops()?;
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(BindableObject { schema, name, definition })
-    }
-
-    fn user_type(&mut self) -> R<Raw<UserType>> {
+    fn user_type(&mut self) -> R<UserType> {
         let v = self.f32()?;
         let mut ty = UserType { name: self.s()?, schema: self.s()?, ..Default::default() };
-        let mut perms = Vec::new();
         self.eprops()?;
         self.bool()?;
         ty.nullable = self.bool()?;
@@ -1559,11 +1460,12 @@ impl Cur<'_> {
                 }
                 -2 => {
                     ty.kind = UserTypeKind::Clr;
-                    ty.clr_class = Some(format!("{}.{}", requote(&assembly), quote(&class)));
+                    ty.clr_class = Some(format!("{}.{}", objects::bracket(&assembly), objects::bracket(&class)));
                 }
                 _ => {}
             }
-            perms = self.perms()?;
+            let perms = self.perms()?;
+            self.type_perms.push((ty.schema.clone(), ty.name.clone(), perms));
         }
         if ty.kind == UserTypeKind::Alias {
             ty.base_type = Some(system_type(&base, length, precision, scale));
@@ -1577,7 +1479,7 @@ impl Cur<'_> {
         if v >= 13.21 {
             self.strs()?;
         }
-        Ok(Raw { item: ty, perms, system: false })
+        Ok(ty)
     }
 
     fn synonym(&mut self) -> R<(Synonym, Vec<RawPerm>)> {
@@ -1642,11 +1544,11 @@ impl Cur<'_> {
 impl Cur<'_> {
     fn user(&mut self) -> R<RawUser> {
         let v = self.f32()?;
-        let mut u = RawUser { name: self.s()?, login: self.str()?, user_type: 1, default_schema: None, db_perms: Vec::new() };
+        let mut u = RawUser { name: self.s()?, login: self.str()?, user_type: 1, default_schema: None, certificate: None, asymmetric_key: None, db_perms: Vec::new() };
         if v >= 4.0 {
             u.user_type = self.i32()?;
-            self.str()?;
-            self.str()?;
+            u.certificate = self.str()?.filter(|c| !c.is_empty());
+            u.asymmetric_key = self.str()?.filter(|k| !k.is_empty());
             u.default_schema = self.str()?;
         } else {
             self.bool()?;
@@ -1701,106 +1603,6 @@ impl Cur<'_> {
         Ok(RawSchema { name, owner, system_object, perms })
     }
 
-    fn certificate(&mut self) -> R<Raw<Certificate>> {
-        let v = self.f32()?;
-        let mut c = Certificate { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
-        c.private_key = key_encryption(self.i32()?).into();
-        c.active_for_dialog = self.bool()?;
-        c.issuer = self.s()?;
-        c.subject = self.s()?;
-        c.start_date = ticks_seconds(self.i64()?);
-        c.expiry_date = ticks_seconds(self.i64()?);
-        self.str()?; // serial number
-        let n = self.count()?;
-        c.thumbprint = hex(self.take(n)?);
-        let perms = self.perms()?;
-        self.two_ss(v)?;
-        Ok(Raw { item: c, perms, system: false })
-    }
-
-    fn symmetric_key(&mut self) -> R<Raw<SymmetricKey>> {
-        let v = self.f32()?;
-        let mut k = SymmetricKey { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
-        k.modify_date = ticks_seconds(self.i64()?);
-        k.create_date = ticks_seconds(self.i64()?);
-        k.key_guid = guid(self.bytes()?);
-        k.key_length = self.i32()?;
-        k.algorithm = match self.i32()? {
-            1 => "RC2",
-            2 => "RC4",
-            3 => "DES",
-            4 => "TRIPLE_DES",
-            5 => "DESX",
-            6 => "AES_128",
-            7 => "AES_192",
-            8 => "AES_256",
-            _ => "",
-        }
-        .into();
-        let perms = self.perms()?;
-        self.two_ss(v)?;
-        // The system key every database has after a master key.
-        let system = k.name == "##MS_DatabaseMasterKey##";
-        Ok(Raw { item: k, perms, system })
-    }
-
-    fn asymmetric_key(&mut self) -> R<Raw<AsymmetricKey>> {
-        let v = self.f32()?;
-        let mut k = AsymmetricKey { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
-        let n = self.count()?;
-        k.thumbprint = hex(self.take(n)?);
-        k.key_length = self.i32()?;
-        k.algorithm = match self.i32()? {
-            0 => "RSA_512",
-            1 => "RSA_1024",
-            2 => "RSA_2048",
-            _ => "",
-        }
-        .into();
-        if k.algorithm.is_empty() {
-            k.algorithm = format!("RSA_{}", k.key_length);
-        }
-        k.private_key = key_encryption(self.i32()?).into();
-        let perms = self.perms()?;
-        self.two_ss(v)?;
-        Ok(Raw { item: k, perms, system: false })
-    }
-
-    fn security_policy(&mut self) -> R<Raw<SecurityPolicy>> {
-        let v = self.f32()?;
-        self.i32()?;
-        let mut p = SecurityPolicy { schema: self.s()?, name: self.s()?, ..Default::default() };
-        self.str()?; // authorization
-        p.enabled = self.bool()?;
-        if v >= 23.0 {
-            p.schema_bound = self.bool()?;
-        }
-        p.not_for_replication = self.bool()?;
-        let n = self.count()?;
-        for _ in 0..n {
-            let mut q = SecurityPredicate { kind: "FILTER".into(), function: requote(&self.s()?), arguments: self.s()?, ..Default::default() };
-            q.table = two_part(&self.s()?).unwrap_or_default();
-            if v >= 11.36 {
-                if self.i32()? == 1 {
-                    q.kind = "BLOCK".into();
-                }
-                q.operation = match self.i32()? {
-                    1 => Some("AFTER INSERT"),
-                    2 => Some("AFTER UPDATE"),
-                    3 => Some("BEFORE UPDATE"),
-                    4 => Some("BEFORE DELETE"),
-                    _ => None,
-                }
-                .map(String::from);
-            }
-            p.predicates.push(q);
-        }
-        self.eprops()?;
-        let perms = self.perms()?;
-        self.two_ss(v)?;
-        Ok(Raw { item: p, perms, system: false })
-    }
-
     /// The trailing pair of script sources most objects have from version 11.45.
     fn two_ss(&mut self, v: f32) -> R<()> {
         if v >= 11.45 { self.sss(2) } else { Ok(()) }
@@ -1810,28 +1612,6 @@ impl Cur<'_> {
 // ------------------------------------------------------------------------------- skipped members
 
 impl Cur<'_> {
-    fn fulltext_catalog(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.bool()?;
-        if v >= 4.0 {
-            self.str()?;
-            if v <= 14.0 {
-                self.str()?;
-            }
-            self.bool()?;
-            if v <= 14.0 {
-                self.str()?;
-            }
-            self.bool()?;
-        }
-        self.strs()?;
-        if v >= 4.0 {
-            self.perms()?;
-        }
-        self.two_ss(v)
-    }
-
     /// Records written with a leading 0xFF and a version; legacy ones have neither.
     fn versioned_record(&mut self) -> R<bool> {
         if self.b.get(self.p) == Some(&0xFF) {
@@ -1843,403 +1623,6 @@ impl Cur<'_> {
         }
     }
 
-    fn assembly(&mut self) -> R<(Raw<Assembly>, Vec<u64>)> {
-        let versioned = self.versioned_record()?;
-        let mut a = Assembly { name: self.s()?, owner: self.str()?.filter(|o| !o.is_empty()), ..Default::default() };
-        self.i32()?;
-        self.bool()?; // case-sensitive
-        self.eprops()?;
-        self.take(16)?; // MVID
-        a.clr_name = self.s()?;
-        a.visible = self.bool()?;
-        let n = self.count()?;
-        let mut blobs = Vec::new();
-        for _ in 0..n {
-            let file_versioned = self.versioned_record()?;
-            a.files.push(AssemblyFile { name: self.s()?, content: String::new() });
-            blobs.push(self.u64()?);
-            self.i32()?; // length
-            if file_versioned {
-                self.ss()?;
-            }
-        }
-        a.permission_set = match self.i32()? {
-            2 => "EXTERNAL_ACCESS",
-            3 => "UNSAFE",
-            _ => "SAFE",
-        }
-        .into();
-        let mut perms = self.perms()?;
-        // SQL Compare drops EXECUTE on assemblies when it loads a snapshot.
-        perms.retain(|p| !p.action.eq_ignore_ascii_case("EXECUTE"));
-        if versioned {
-            self.sss(3)?;
-        }
-        Ok((Raw { item: a, perms, system: false }, blobs))
-    }
-
-    fn xml_schema_collection(&mut self) -> R<(Raw<XmlSchemaCollection>, i32)> {
-        let v = self.f32()?;
-        let mut x = XmlSchemaCollection { name: self.s()?, schema: self.s()?, ..Default::default() };
-        let id = self.i32()?;
-        self.bool()?; // case-sensitive
-        self.eprops()?;
-        let perms = self.perms()?;
-        if v <= 13.65 {
-            let n = self.count()?;
-            for _ in 0..n {
-                self.str()?;
-                self.str()?;
-            }
-            for _ in 0..3 {
-                self.strs()?;
-            }
-        }
-        if v >= 7.0 {
-            x.owner = self.str()?.filter(|o| !o.is_empty());
-        }
-        self.two_ss(v)?;
-        Ok((Raw { item: x, perms, system: false }, id))
-    }
-
-    fn message_type(&mut self) -> R<Raw<MessageType>> {
-        let v = self.f32()?;
-        let mut m = MessageType { name: self.s()?, owner: self.str()?, ..Default::default() };
-        let id = self.i32()?;
-        self.bool()?; // case-sensitive
-        let validation = self.i32()?;
-        m.xml_collection = self.str()?.filter(|x| !x.is_empty()).map(|x| requote(&x));
-        m.validation = match validation {
-            1 if m.xml_collection.is_some() => "VALID_XML",
-            1 => "WELL_FORMED_XML",
-            2 => "EMPTY",
-            _ => "NONE",
-        }
-        .into();
-        self.eprops()?;
-        let perms = self.perms()?;
-        let n = self.count_or_none()?;
-        for _ in 0..n {
-            self.str()?; // contracts using it
-        }
-        self.two_ss(v)?;
-        // The system message types have ids below 65536.
-        Ok(Raw { item: m, perms, system: id <= 65_535 })
-    }
-
-    fn contract(&mut self) -> R<Raw<Contract>> {
-        let v = self.f32()?;
-        let mut contract = Contract { name: self.s()?, owner: self.str()?, ..Default::default() };
-        self.i32()?;
-        self.eprops()?;
-        let system = self.bool()?;
-        self.bool()?; // case-sensitive
-        contract.messages = self.coll(|c| {
-            let message_type = unquote(&c.s()?);
-            let sent_by = match (c.bool()?, c.bool()?) {
-                (true, true) => "ANY",
-                (true, false) => "INITIATOR",
-                _ => "TARGET",
-            };
-            Ok(ContractMessage { message_type, sent_by: sent_by.into() })
-        })?;
-        contract.messages.sort_by(|a, b| sql_order(&a.message_type, &b.message_type));
-        let perms = self.perms()?;
-        let n = self.count_or_none()?;
-        for _ in 0..n {
-            self.str()?; // services using it
-        }
-        self.two_ss(v)?;
-        let system = system || contract.name == "DEFAULT" || contract.name.starts_with("http://schemas.microsoft.com/SQL/");
-        Ok(Raw { item: contract, perms, system })
-    }
-
-    fn event_notification(&mut self) -> R<EventNotification> {
-        let v = self.f32()?;
-        let mut en = EventNotification { name: self.s()?, ..Default::default() };
-        self.str()?; // owner
-        self.i32()?;
-        self.bool()?; // case-sensitive
-        en.service = self.s()?;
-        en.broker_instance = self.s()?;
-        en.fan_in = self.bool()?;
-        en.events = self.coll(Cur::i32)?.into_iter().filter_map(|e| super::snp_events::name(e).map(String::from)).collect();
-        en.events.sort();
-        self.eprops()?;
-        if v < 7.0 {
-            self.perms()?;
-        }
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(en)
-    }
-
-    fn queue(&mut self) -> R<Raw<Queue>> {
-        let v = self.f32()?;
-        let mut q = Queue { name: self.s()?, schema: self.s()?, ..Default::default() };
-        self.i32()?;
-        let system = self.bool()?;
-        self.bool()?; // case-sensitive
-        let max_readers = i32::from(self.i16()?);
-        let procedure = self.str()?.filter(|p| !p.is_empty());
-        let execute_as = if v >= 7.2 {
-            self.execute_as()?
-        } else {
-            let who = self.str()?;
-            self.bool()?;
-            who
-        };
-        let activation = self.bool()?;
-        self.bool()?; // receive enabled
-        q.enabled = self.bool()?; // enqueue enabled
-        q.retention = self.bool()?;
-        q.filegroup = self.str()?.filter(|f| !f.is_empty());
-        q.activation = procedure.map(|procedure| QueueActivation { enabled: activation, procedure, max_readers, execute_as });
-        self.eprops()?;
-        q.event_notifications = self.coll(Cur::event_notification)?;
-        for en in &mut q.event_notifications {
-            en.queue = Some(ObjectName::new(&q.schema, &q.name));
-        }
-        q.event_notifications.sort_by(|a, b| a.name.cmp(&b.name));
-        self.strs()?; // services
-        if v >= 7.0 {
-            q.owner = self.str()?.filter(|o| !o.is_empty());
-        }
-        let perms = if v >= 7.1 { self.perms()? } else { Vec::new() };
-        q.poison_message_handling = v < 11.2 || self.bool()?;
-        self.two_ss(v)?;
-        Ok(Raw { item: q, perms, system })
-    }
-
-    fn service(&mut self) -> R<Raw<Service>> {
-        let v = self.f32()?;
-        let mut s = Service { name: self.s()?, owner: self.str()?, ..Default::default() };
-        self.i32()?;
-        let system = self.bool()?;
-        self.bool()?; // case-sensitive
-        s.queue = two_part(&self.s()?).unwrap_or_default();
-        s.contracts = self.coll(Cur::contract)?.into_iter().map(|c| c.item.name).collect();
-        s.contracts.sort_by(|a, b| sql_order(a, b));
-        self.eprops()?;
-        let perms = self.perms()?;
-        if v >= 4.1 {
-            self.coll(Cur::event_notification)?;
-        }
-        self.two_ss(v)?;
-        let system = system || s.name.starts_with("http://schemas.microsoft.com/SQL/");
-        Ok(Raw { item: s, perms, system })
-    }
-
-    fn route(&mut self) -> R<Raw<Route>> {
-        let v = self.f32()?;
-        let mut r = Route { name: self.s()?, owner: self.str()?, ..Default::default() };
-        self.i32()?;
-        self.bool()?; // case-sensitive
-        let system = self.bool()?;
-        r.remote_service = self.str()?.filter(|x| !x.is_empty());
-        r.broker_instance = self.str()?.filter(|x| !x.is_empty());
-        r.address = self.s()?;
-        r.mirror_address = self.str()?.filter(|x| !x.is_empty());
-        let lifetime = self.i64()?;
-        r.expires = self.bool()?.then(|| ticks_text(lifetime));
-        self.eprops()?;
-        let perms = self.perms()?;
-        self.two_ss(v)?;
-        let system = system || r.name == "AutoCreatedLocal";
-        Ok(Raw { item: r, perms, system })
-    }
-
-    fn partition_function(&mut self) -> R<PartitionFunction> {
-        let v = self.f32()?;
-        let mut f = PartitionFunction { name: self.s()?, ..Default::default() };
-        self.str()?; // owner
-        self.i32()?;
-        self.bool()?; // case-sensitive
-        f.range_right = self.bool()?;
-        // The input type is the first parameter.
-        if let Some(p) = self.params()?.first() {
-            f.data_type = system_type(&p.type_name, p.size, p.precision, p.scale);
-        }
-        self.eprops()?;
-        if v < 7.0 {
-            self.perms()?;
-        }
-        if v < 13.78 {
-            self.strs()?;
-        }
-        let n = self.count()?;
-        for _ in 0..n {
-            let is_null = v >= 11.0 && self.bool()?;
-            let value = if is_null { None } else { self.str()? };
-            f.boundaries.push(boundary_literal(value.as_deref(), &f.data_type));
-        }
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(f)
-    }
-
-    fn partition_scheme(&mut self) -> R<PartitionScheme> {
-        let v = self.f32()?;
-        let mut s = PartitionScheme { name: self.s()?, ..Default::default() };
-        self.str()?; // owner
-        self.i32()?;
-        s.function = unquote(&self.s()?);
-        self.eprops()?;
-        if v < 7.0 {
-            self.perms()?;
-        }
-        self.f32()?;
-        let n = self.count()?;
-        for _ in 0..n {
-            self.f32()?;
-            s.filegroups.push(self.s()?);
-        }
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(s)
-    }
-
-    fn ddl_trigger(&mut self) -> R<RawDdlTrigger> {
-        let v = self.f32()?;
-        let mut t = DdlTrigger { name: self.s()?, ..Default::default() };
-        self.str()?; // schema
-        self.i32()?; // object id
-        self.bool()?; // case-sensitive
-        t.disabled = self.bool()?;
-        let clr = self.bool()?;
-        t.settings = ModuleSettings { quoted_identifier: self.bool()?, ansi_nulls: self.bool()? };
-        let text_id = self.i32()?;
-        t.events = if v >= 7.0 {
-            self.coll(Cur::i32)?.into_iter().filter_map(|e| super::snp_events::name(e).map(String::from)).collect()
-        } else {
-            let n = self.count_or_none()?;
-            self.list(n, Cur::s)?
-        };
-        t.events.sort();
-        let method = [self.s()?, self.s()?, self.s()?];
-        if clr {
-            t.clr_method = Some(method.iter().map(|p| quote(p)).collect::<Vec<_>>().join("."));
-        }
-        t.execute_as = if v >= 7.1 { self.execute_as()? } else { self.str()?.filter(|x| !x.is_empty()) };
-        self.eprops()?;
-        t.encrypted = self.bool()?;
-        if v >= 11.45 {
-            self.ss()?;
-        }
-        Ok(RawDdlTrigger { trigger: t, text_id })
-    }
-
-    fn service_binding(&mut self) -> R<Raw<ServiceBinding>> {
-        let v = self.f32()?;
-        let mut b = ServiceBinding { name: self.s()?, owner: self.str()?, ..Default::default() };
-        self.i32()?;
-        self.bool()?; // case-sensitive
-        b.remote_service = self.s()?;
-        b.user = self.s()?;
-        b.anonymous = self.bool()?;
-        self.eprops()?;
-        let perms = self.perms()?;
-        self.two_ss(v)?;
-        Ok(Raw { item: b, perms, system: false })
-    }
-
-    fn stopwords(&mut self) -> R<()> {
-        let n = self.count()?;
-        for _ in 0..n {
-            self.i32()?;
-            self.strs()?;
-        }
-        Ok(())
-    }
-
-    fn fulltext_stoplist(&mut self) -> R<()> {
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
-        self.f32()?;
-        let from_system = self.bool()?;
-        self.stopwords()?;
-        if from_system {
-            self.stopwords()?;
-        }
-        self.two_ss(v)
-    }
-
-    fn search_property_list(&mut self) -> R<()> {
-        self.perms()?;
-        let v = self.f32()?;
-        self.str()?;
-        self.str()?;
-        let n = self.count()?;
-        for _ in 0..n {
-            self.f32()?;
-            self.str()?;
-            self.str()?;
-            self.i32()?;
-            self.str()?;
-            self.i32()?;
-        }
-        self.i32()?; // a count with no items
-        self.two_ss(v)
-    }
-
-    fn external_file_format(&mut self) -> R<()> {
-        self.i32()?;
-        for _ in 0..6 {
-            self.str()?;
-        }
-        self.bool()?;
-        for _ in 0..4 {
-            self.str()?;
-        }
-        if self.u8()? != 0 {
-            self.i32()?;
-        }
-        self.ss()
-    }
-
-    fn external_data_source(&mut self) -> R<()> {
-        self.str()?;
-        self.str()?;
-        self.i32()?;
-        for _ in 0..5 {
-            self.str()?;
-        }
-        self.bool()?;
-        self.ss()
-    }
-
-    fn external_table(&mut self) -> R<()> {
-        self.i32()?;
-        self.str()?;
-        self.str()?;
-        self.bool()?;
-        self.coll(Cur::field)?;
-        for _ in 0..3 {
-            self.str()?;
-        }
-        self.i32()?;
-        if self.u8()? != 0 {
-            self.f64()?;
-        }
-        if self.u8()? != 0 {
-            self.i32()?;
-        }
-        self.str()?;
-        self.str()?;
-        if self.u8()? != 0 {
-            self.i32()?;
-        }
-        self.str()?;
-        self.str()?;
-        self.ss()?;
-        self.perms()?;
-        self.eprops()
-    }
 }
 
 // ------------------------------------------------------------------------------- model
@@ -2252,15 +1635,6 @@ impl Snap {
 
     fn is_encrypted(&self, id: i32) -> bool {
         self.encrypted.contains(&(id as i64 as u64))
-    }
-
-    fn ddl_trigger(&self, raw: RawDdlTrigger) -> DdlTrigger {
-        let mut t = raw.trigger;
-        t.encrypted |= self.is_encrypted(raw.text_id);
-        if !t.encrypted && t.clr_method.is_none() {
-            t.definition = self.text(raw.text_id);
-        }
-        t
     }
 
     fn trigger(&self, raw: RawTrigger) -> Trigger {
@@ -2281,18 +1655,15 @@ impl Snap {
             ..Default::default()
         };
         let mut permissions = Vec::new();
-        // Permissions ON <class>::[schema].[name], or ON <class>::[name] for securables without a schema.
-        let mut perms_on = |class: &str, schema: Option<&str>, name: &str, perms: &[RawPerm]| {
-            for mut p in perms.iter().flat_map(permission) {
-                p.class = class.into();
-                p.schema = schema.map(String::from);
-                p.object = Some(name.into());
-                permissions.push(p);
+        let mut object_perms = |schema: &str, name: &str, perms: &[RawPerm]| {
+            for p in perms {
+                permissions.extend(objects::grants(p, "OBJECT", Some(schema), name));
             }
         };
 
         for t in std::mem::take(&mut self.tables) {
-            perms_on("OBJECT", Some(&t.schema), &t.name, &t.perms);
+            object_perms(&t.schema, &t.name, &t.perms);
+            let (statistics, edge_constraints) = (t.statistics, t.edge_constraints);
             let triggers = t.triggers.into_iter().map(|tr| self.trigger(tr)).collect();
             let columns: Vec<Column> = t.columns.iter().enumerate().map(|(i, f)| column(f, i + 1)).collect();
             let mut table = Table {
@@ -2324,10 +1695,13 @@ impl Snap {
                     0 => None,
                     n => Some(ChangeTracking { track_columns_updated: n == 2 }),
                 },
-                statistics: t.statistics,
-                edge_constraints: t.edge_constraints,
+                statistics,
+                edge_constraints,
                 ..Default::default()
             };
+            if table.graph.is_some() {
+                crate::catalog::read::graph_indexes(&mut table);
+            }
             table.storage = Storage {
                 data_space: if t.partition_column.is_some() { t.partition_scheme.as_deref().map(unquote).or(t.filegroup) } else { t.filegroup },
                 partition_column: t.partition_column,
@@ -2355,7 +1729,7 @@ impl Snap {
 
         for v in std::mem::take(&mut self.views) {
             let mut view = v.view;
-            perms_on("OBJECT", Some(&view.schema), &view.name, &v.perms);
+            object_perms(&view.schema, &view.name, &v.perms);
             view.encrypted |= self.is_encrypted(v.text_id);
             if !view.encrypted {
                 view.definition = self.text(v.text_id);
@@ -2368,7 +1742,7 @@ impl Snap {
 
         for m in std::mem::take(&mut self.functions).into_iter().chain(std::mem::take(&mut self.procedures)) {
             let mut r = m.routine;
-            perms_on("OBJECT", Some(&r.schema), &r.name, &m.perms);
+            object_perms(&r.schema, &r.name, &m.perms);
             if r.clr_method.is_none() {
                 r.encrypted |= self.is_encrypted(m.text_id);
                 if !r.encrypted {
@@ -2379,85 +1753,21 @@ impl Snap {
         }
 
         for (sq, perms) in std::mem::take(&mut self.sequences) {
-            perms_on("OBJECT", Some(&sq.schema), &sq.name, &perms);
+            object_perms(&sq.schema, &sq.name, &perms);
             db.sequences.push(sq);
         }
-        for m in std::mem::take(&mut self.message_types).into_iter().filter(|x| !x.system) {
-            perms_on("MESSAGE TYPE", None, &m.item.name, &m.perms);
-            db.message_types.push(m.item);
-        }
-        for c in std::mem::take(&mut self.contracts).into_iter().filter(|x| !x.system) {
-            perms_on("CONTRACT", None, &c.item.name, &c.perms);
-            db.contracts.push(c.item);
-        }
-        for s in std::mem::take(&mut self.services).into_iter().filter(|x| !x.system) {
-            perms_on("SERVICE", None, &s.item.name, &s.perms);
-            db.services.push(s.item);
-        }
-        for r in std::mem::take(&mut self.routes).into_iter().filter(|x| !x.system) {
-            perms_on("ROUTE", None, &r.item.name, &r.perms);
-            db.routes.push(r.item);
-        }
-        for b in std::mem::take(&mut self.service_bindings) {
-            perms_on("REMOTE SERVICE BINDING", None, &b.item.name, &b.perms);
-            db.service_bindings.push(b.item);
-        }
-        let mut queues = Vec::new();
-        for q in std::mem::take(&mut self.queues).into_iter().filter(|x| !x.system) {
-            queues.push((q.item.schema.clone(), q.item.name.clone(), q.perms));
-            db.queues.push(q.item);
-        }
-        for (schema, name, perms) in &queues {
-            perms_on("OBJECT", Some(schema), name, perms);
-        }
-        db.event_notifications = std::mem::take(&mut self.event_notifications);
-        db.event_notifications.sort_by(|a, b| a.name.cmp(&b.name));
-        for (a, blobs) in std::mem::take(&mut self.assemblies) {
-            let mut item = a.item;
-            perms_on("ASSEMBLY", None, &item.name, &a.perms);
-            for (f, id) in item.files.iter_mut().zip(blobs) {
-                f.content = self.assembly_blobs.get(&id).map(|b| b.iter().map(|x| format!("{x:02X}")).collect()).unwrap_or_default();
-            }
-            let me = quote(&item.name);
-            item.references = self.assembly_references.iter().filter(|d| d.1 == me).map(|d| unquote(&d.3)).collect();
-            item.references.sort_by(|a, b| sql_order(a, b));
-            db.assemblies.push(item);
-        }
-        for c in std::mem::take(&mut self.certificates) {
-            perms_on("CERTIFICATE", None, &c.item.name, &c.perms);
-            db.certificates.push(c.item);
-        }
-        for k in std::mem::take(&mut self.symmetric_keys).into_iter().filter(|k| !k.system) {
-            perms_on("SYMMETRIC KEY", None, &k.item.name, &k.perms);
-            db.symmetric_keys.push(k.item);
-        }
-        for k in std::mem::take(&mut self.asymmetric_keys) {
-            perms_on("ASYMMETRIC KEY", None, &k.item.name, &k.perms);
-            db.asymmetric_keys.push(k.item);
-        }
-        for p in std::mem::take(&mut self.security_policies) {
-            perms_on("OBJECT", Some(&p.item.schema), &p.item.name, &p.perms);
-            db.security_policies.push(p.item);
-        }
-        for (x, id) in std::mem::take(&mut self.xml_schema_collections) {
-            let mut item = x.item;
-            perms_on("XML SCHEMA COLLECTION", Some(&item.schema), &item.name, &x.perms);
-            item.definition = self.xml_blobs.get(&(id as i64 as u64)).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
-            db.xml_schema_collections.push(item);
-        }
-        db.partition_functions = std::mem::take(&mut self.partition_functions);
-        db.partition_schemes = std::mem::take(&mut self.partition_schemes);
-        db.defaults = std::mem::take(&mut self.defaults);
-        db.rules = std::mem::take(&mut self.rules);
-        db.ddl_triggers = std::mem::take(&mut self.ddl_triggers).into_iter().map(|t| self.ddl_trigger(t)).collect();
         for (syn, perms) in std::mem::take(&mut self.synonyms) {
-            perms_on("OBJECT", Some(&syn.schema), &syn.name, &perms);
+            object_perms(&syn.schema, &syn.name, &perms);
             db.synonyms.push(syn);
         }
-        for t in std::mem::take(&mut self.types) {
-            perms_on("TYPE", Some(&t.item.schema), &t.item.name, &t.perms);
-            db.types.push(t.item);
+        db.types = std::mem::take(&mut self.types);
+        for (schema, name, perms) in std::mem::take(&mut self.type_perms) {
+            for p in &perms {
+                permissions.extend(objects::grants(p, "TYPE", Some(&schema), &name));
+            }
         }
+        let more = std::mem::take(&mut self.more);
+        more.build(&mut db, &mut permissions, &|id| (self.text(id), self.is_encrypted(id)));
         for ty in &mut db.types {
             ty.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             ty.check_constraints.sort_by(|a, b| a.name.cmp(&b.name));
@@ -2468,10 +1778,12 @@ impl Snap {
             if s.system_object && s.name != "dbo" {
                 continue;
             }
-            for mut p in s.perms.iter().flat_map(permission) {
-                p.class = "SCHEMA".into();
-                p.schema = Some(s.name.clone());
-                permissions.push(p);
+            for p in &s.perms {
+                if let Some(mut p) = permission(p) {
+                    p.class = "SCHEMA".into();
+                    p.schema = Some(s.name.clone());
+                    permissions.push(p);
+                }
             }
             db.schemas.push(Schema { name: s.name.clone(), owner: s.owner.clone() });
         }
@@ -2499,6 +1811,9 @@ impl Snap {
     fn principals(&self, db: &mut Database, permissions: &mut Vec<Permission>) {
         let named = |list: &[&str], name: &str| list.iter().any(|x| x.eq_ignore_ascii_case(name));
         for u in &self.users {
+            if u.name.eq_ignore_ascii_case("dbo") {
+                db.owner = u.login.clone().filter(|l| !l.is_empty());
+            }
             if named(&BUILT_IN_USERS, &u.name) || named(&FIXED_ROLES, &u.name) {
                 continue;
             }
@@ -2514,6 +1829,8 @@ impl Snap {
                 kind: kind.into(),
                 login: u.login.clone().filter(|l| !l.is_empty()),
                 default_schema: u.default_schema.clone().filter(|s| !s.is_empty()),
+                certificate: u.certificate.clone(),
+                asymmetric_key: u.asymmetric_key.clone(),
                 no_connect: !u.db_perms.iter().any(|(a, _)| a.eq_ignore_ascii_case("CONNECT")),
                 ..Default::default()
             });
@@ -2522,13 +1839,13 @@ impl Snap {
             if named(&FIXED_ROLES, &r.name) || named(&BUILT_IN_USERS, &r.name) {
                 continue;
             }
-            // An application role's owner field holds its default schema.
+            // An application role keeps its default schema where a role has its owner.
             let owner = r.owner.clone().filter(|o| !o.is_empty());
             db.principals.push(Principal {
                 name: r.name.clone(),
                 kind: if r.app_role { "APPLICATION_ROLE" } else { "DATABASE_ROLE" }.into(),
-                owner: owner.clone().filter(|_| !r.app_role),
-                default_schema: owner.filter(|_| r.app_role),
+                owner: if r.app_role { None } else { owner.clone() },
+                default_schema: if r.app_role { owner } else { None },
                 ..Default::default()
             });
         }
@@ -2648,19 +1965,11 @@ fn state(statement: i32) -> Option<&'static str> {
 }
 
 /// An object or schema permission without its securable.
-/// The model's permissions for a stored one: one per column for a column-level permission.
-fn permission(p: &RawPerm) -> Vec<Permission> {
-    let Some(state) = state(p.statement).filter(|_| !p.skip && !SYSTEM_GRANTEES.iter().any(|g| g.eq_ignore_ascii_case(&p.grantee))) else {
-        return Vec::new();
-    };
-    let one = |column: Option<&String>| Permission {
-        grantee: p.grantee.clone(),
-        permission: p.action.clone(),
-        state: state.into(),
-        column: column.cloned(),
-        ..Default::default()
-    };
-    if p.columns.is_empty() { vec![one(None)] } else { p.columns.iter().map(|c| one(Some(c))).collect() }
+fn permission(p: &RawPerm) -> Option<Permission> {
+    if p.skip || SYSTEM_GRANTEES.iter().any(|g| g.eq_ignore_ascii_case(&p.grantee)) {
+        return None;
+    }
+    Some(Permission { grantee: p.grantee.clone(), permission: p.action.clone(), state: state(p.statement)?.into(), ..Default::default() })
 }
 
 /// Properties named by sp_addextendedproperty levels, in the live reader's classes.
@@ -2675,11 +1984,15 @@ fn extended_properties(props: &[RawProp]) -> Vec<ExtendedProperty> {
                 p.class = "SCHEMA".into();
                 p.schema = raw.names[0].clone();
             }
+            // Database-wide objects are named at level 0.
+            (Some(level0 @ ("ASSEMBLY" | "MESSAGE TYPE" | "CONTRACT" | "SERVICE" | "REMOTE SERVICE BINDING" | "ROUTE" | "PARTITION FUNCTION" | "PARTITION SCHEME" | "TRIGGER")), None) => {
+                p.class = level0.into();
+                p.object = raw.names[0].clone();
+            }
             (Some("SCHEMA"), Some(level1)) => {
                 p.class = match level1 {
-                    "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "SYNONYM" | "TYPE" => level1,
+                    "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "SYNONYM" | "TYPE" | "DEFAULT" | "RULE" | "QUEUE" | "XML SCHEMA COLLECTION" => level1,
                     "AGGREGATE" => "FUNCTION",
-                    "DEFAULT" | "RULE" => "OBJECT",
                     _ => continue,
                 }
                 .into();
@@ -2761,13 +2074,6 @@ fn column(f: &RawField, ordinal: usize) -> Column {
         bound_rule: f.bound_rule.as_deref().map(requote),
         sensitivity: f.sensitivity.clone(),
     }
-}
-
-/// `[assembly].[class].[method]` from a binding; the assembly is stored quoted.
-fn clr_method(binding: &[String; 3]) -> String {
-    let assembly = &binding[0];
-    let assembly = if assembly.starts_with('[') && assembly.ends_with(']') { unquote(assembly) } else { assembly.clone() };
-    std::iter::once(assembly.as_str()).chain(binding[1..].iter().map(String::as_str)).filter(|b| !b.is_empty()).map(quote).collect::<Vec<_>>().join(".")
 }
 
 fn is_user_schema(schema: &str) -> bool {
@@ -2910,7 +2216,7 @@ fn decimal(b: [u8; 16]) -> String {
 }
 
 /// .NET `Guid.ToByteArray` order, as SQL Server prints it.
-fn guid(b: [u8; 16]) -> String {
+pub(crate) fn guid(b: [u8; 16]) -> String {
     let d1 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     let d2 = u16::from_le_bytes([b[4], b[5]]);
     let d3 = u16::from_le_bytes([b[6], b[7]]);
@@ -2925,49 +2231,7 @@ fn oa_date(days: f64) -> String {
         return days.to_string();
     }
     // Days from 1970-01-01 to 1899-12-30 is -25569.
-    civil(ms as i64 - 25_569 * 86_400_000)
-}
-
-/// A partition boundary stored as text, as the T-SQL literal the model keeps.
-fn boundary_literal(value: Option<&str>, t: &DataType) -> String {
-    let Some(v) = value else { return "NULL".into() };
-    match t.name.as_str() {
-        "char" | "varchar" | "nchar" | "nvarchar" | "sysname" | "date" | "datetime" | "smalldatetime" | "datetime2" | "time" | "datetimeoffset" => {
-            format!("N'{}'", v.replace('\'', "''"))
-        }
-        "uniqueidentifier" => format!("'{{{}}}'", v.trim_matches(['{', '}']).to_ascii_uppercase()),
-        _ => v.to_string(),
-    }
-}
-
-/// How a certificate's or key's private key is protected, as sys.certificates codes it.
-fn key_encryption(code: i32) -> &'static str {
-    match code {
-        1 => "MK",
-        2 => "PW",
-        3 => "SK",
-        _ => "NA",
-    }
-}
-
-/// `0x` and upper-case hex.
-fn hex(b: &[u8]) -> String {
-    std::iter::once("0x".to_string()).chain(b.iter().map(|x| format!("{x:02X}"))).collect()
-}
-
-/// A .NET `DateTime` as `yyyy-MM-dd HH:mm:ss`.
-fn ticks_seconds(ticks: i64) -> String {
-    ticks_text(ticks)[..19].to_string()
-}
-
-/// A .NET `DateTime` (100 ns ticks from 0001-01-01) as `yyyy-MM-dd HH:mm:ss.fff`.
-fn ticks_text(ticks: i64) -> String {
-    // 0001-01-01 is 719162 days before 1970-01-01.
-    civil(ticks / 10_000 - 719_162 * 86_400_000)
-}
-
-/// Milliseconds from 1970-01-01 as `yyyy-MM-dd HH:mm:ss.fff`.
-fn civil(ms: i64) -> String {
+    let ms = ms as i64 - 25_569 * 86_400_000;
     let (day, ms) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
     // Civil date from a day number (H. Hinnant).
     let z = day + 719_468;
@@ -3072,9 +2336,9 @@ mod tests {
         let mut c = Cur::new(&bytes);
         let perms = c.perms().unwrap();
         assert_eq!(perms.len(), 2);
-        assert_eq!(permission(&perms[0])[0].grant_sql(), "DENY DELETE TO [Reporting]");
-        let column = permission(&perms[1]);
-        assert_eq!((column.len(), column[0].column.as_deref()), (1, Some("Name")));
+        assert_eq!(permission(&perms[0]).unwrap().grant_sql(), "DENY DELETE TO [Reporting]");
+        assert_eq!(perms[1].columns, vec!["Name"]);
+        assert_eq!(objects::grants(&perms[1], "OBJECT", Some("dbo"), "T")[0].column.as_deref(), Some("Name"));
         c.ss().unwrap();
         c.ss().unwrap();
         assert_eq!(c.p, bytes.len());

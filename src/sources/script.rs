@@ -319,6 +319,11 @@ pub fn xprop_sql(p: &ExtendedProperty) -> String {
             args.push(literal(p.schema.as_deref().unwrap_or_default()));
             args.extend(["NULL", "NULL", "NULL", "NULL"].map(String::from));
         }
+        class if p.schema.is_none() => {
+            args.push(format!("'{class}'"));
+            args.push(literal(p.object.as_deref().unwrap_or_default()));
+            args.extend(["NULL", "NULL", "NULL", "NULL"].map(String::from));
+        }
         class => {
             args.push("'SCHEMA'".into());
             args.push(literal(p.schema.as_deref().unwrap_or_default()));

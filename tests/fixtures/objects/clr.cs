@@ -1,6 +1,6 @@
 // Source of clr.hex, the CLR assembly the objects live tests deploy (built with
 // csc /target:library /out:QuillClr.dll clr.cs, then written out as hex; clr2.hex is the same
-// with "Hi " and value + 2).
+// with "Hi " and value + 2; clr3.hex adds a public AddTwo method).
 using System;
 using System.Data.SqlTypes;
 using System.IO;

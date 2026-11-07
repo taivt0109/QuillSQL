@@ -169,7 +169,8 @@ impl Reader {
                     CAST(SERVERPROPERTY('EngineEdition') AS int),
                     DB_NAME(),
                     CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS nvarchar(128)),
-                    (SELECT CAST(compatibility_level AS int) FROM sys.databases WHERE database_id = DB_ID())",
+                    (SELECT CAST(compatibility_level AS int) FROM sys.databases WHERE database_id = DB_ID()),
+                    (SELECT SUSER_SNAME(owner_sid) FROM sys.databases WHERE database_id = DB_ID())",
         )
         .await?;
         let row = rows.first().ok_or("the server returned no version information")?;
@@ -182,6 +183,7 @@ impl Reader {
         self.db.name = s(row, 3);
         self.db.collation = s(row, 4);
         self.db.compatibility_level = i(row, 5) as u32;
+        self.db.owner = text(row, 6);
         Ok(())
     }
 
@@ -203,7 +205,7 @@ impl Reader {
         let rows = db::query(
             conn,
             "SELECT o.object_id, RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name, o.parent_object_id FROM sys.objects AS o
-             WHERE o.type NOT IN ('S', 'IT', 'SQ')",
+             WHERE o.type NOT IN ('S', 'IT')",
         )
         .await?;
         for r in &rows {
@@ -988,9 +990,19 @@ impl Reader {
                                   WHEN 6 THEN (SELECT SCHEMA_NAME(t.schema_id) + NCHAR(1) + t.name FROM sys.types AS t WHERE t.user_type_id = ep.major_id)
                                   WHEN 7 THEN (SELECT x.name COLLATE DATABASE_DEFAULT FROM sys.indexes AS x WHERE x.object_id = ep.major_id AND x.index_id = ep.minor_id)
                                   WHEN 2 THEN (SELECT p.name COLLATE DATABASE_DEFAULT FROM sys.parameters AS p WHERE p.object_id = ep.major_id AND p.parameter_id = ep.minor_id)
-                                  WHEN 1 THEN CASE WHEN ep.minor_id > 0 THEN COL_NAME(ep.major_id, ep.minor_id) END END
+                                  WHEN 1 THEN CASE WHEN ep.minor_id > 0 THEN COL_NAME(ep.major_id, ep.minor_id)
+                                                   ELSE (SELECT tr.name COLLATE DATABASE_DEFAULT FROM sys.triggers AS tr WHERE tr.object_id = ep.major_id AND tr.parent_class = 0) END
+                                  WHEN 5 THEN (SELECT a.name COLLATE DATABASE_DEFAULT FROM sys.assemblies AS a WHERE a.assembly_id = ep.major_id)
+                                  WHEN 10 THEN (SELECT SCHEMA_NAME(x.schema_id) + NCHAR(1) + x.name COLLATE DATABASE_DEFAULT FROM sys.xml_schema_collections AS x WHERE x.xml_collection_id = ep.major_id)
+                                  WHEN 15 THEN (SELECT m.name COLLATE DATABASE_DEFAULT FROM sys.service_message_types AS m WHERE m.message_type_id = ep.major_id)
+                                  WHEN 16 THEN (SELECT c.name COLLATE DATABASE_DEFAULT FROM sys.service_contracts AS c WHERE c.service_contract_id = ep.major_id)
+                                  WHEN 17 THEN (SELECT v.name COLLATE DATABASE_DEFAULT FROM sys.services AS v WHERE v.service_id = ep.major_id)
+                                  WHEN 18 THEN (SELECT b.name COLLATE DATABASE_DEFAULT FROM sys.remote_service_bindings AS b WHERE b.remote_service_binding_id = ep.major_id)
+                                  WHEN 19 THEN (SELECT r.name COLLATE DATABASE_DEFAULT FROM sys.routes AS r WHERE r.route_id = ep.major_id)
+                                  WHEN 20 THEN (SELECT d.name COLLATE DATABASE_DEFAULT FROM sys.partition_schemes AS d WHERE d.data_space_id = ep.major_id)
+                                  WHEN 21 THEN (SELECT f.name COLLATE DATABASE_DEFAULT FROM sys.partition_functions AS f WHERE f.function_id = ep.major_id) END
              FROM sys.extended_properties AS ep
-             WHERE ep.class IN (0, 1, 2, 3, 6, 7)
+             WHERE ep.class IN (0, 1, 2, 3, 5, 6, 7, 10, 15, 16, 17, 18, 19, 20, 21)
              ORDER BY ep.class, ep.major_id, ep.minor_id, ep.name",
         )
         .await?;
@@ -1003,11 +1015,33 @@ impl Reader {
                     p.class = "SCHEMA".into();
                     p.schema = extra;
                 }
-                6 => {
+                6 | 10 => {
                     let Some((schema, name)) = extra.as_deref().and_then(|e| e.split_once('\u{1}')) else { continue };
-                    p.class = "TYPE".into();
+                    p.class = if i(&r, 0) == 6 { "TYPE" } else { "XML SCHEMA COLLECTION" }.into();
                     p.schema = Some(schema.to_string());
                     p.object = Some(name.to_string());
+                }
+                // Database-wide objects: the class names the object at level 0.
+                class @ (5 | 15..=21) => {
+                    let Some(name) = extra else { continue };
+                    p.class = match class {
+                        5 => "ASSEMBLY",
+                        15 => "MESSAGE TYPE",
+                        16 => "CONTRACT",
+                        17 => "SERVICE",
+                        18 => "REMOTE SERVICE BINDING",
+                        19 => "ROUTE",
+                        20 => "PARTITION SCHEME",
+                        _ => "PARTITION FUNCTION",
+                    }
+                    .into();
+                    p.object = Some(name);
+                }
+                1 if minor == 0 && !self.objects.contains_key(&major) => {
+                    // A database DDL trigger.
+                    let Some(name) = extra else { continue };
+                    p.class = "TRIGGER".into();
+                    p.object = Some(name);
                 }
                 class @ (1 | 2 | 7) => {
                     let Some((kind, name)) = self.objects.get(&major).cloned() else { continue };
@@ -1217,6 +1251,22 @@ impl Reader {
                 deps.insert((from.clone(), ObjectName::new(c.0, c.1)), true);
             }
         }
+        // Modules that use a user-defined type or an XML schema collection through a parameter
+        // (or a result column) can't outlive it.
+        let rows = db::query(
+            conn,
+            "SELECT p.object_id, SCHEMA_NAME(t.schema_id), t.name FROM sys.parameters AS p
+             JOIN sys.types AS t ON t.user_type_id = p.user_type_id AND t.is_user_defined = 1
+             UNION
+             SELECT p.object_id, SCHEMA_NAME(x.schema_id), x.name FROM sys.parameters AS p
+             JOIN sys.xml_schema_collections AS x ON x.xml_collection_id = p.xml_collection_id AND p.xml_collection_id > 0",
+        )
+        .await?;
+        for r in rows {
+            if let Some(from) = self.name_of(i(&r, 0)) {
+                deps.insert((from, ObjectName::new(&s(&r, 1), &s(&r, 2))), true);
+            }
+        }
         for syn in &self.db.synonyms {
             if let Some(target) = parse_synonym_target(&syn.base_object, &self.db.name) {
                 deps.entry((ObjectName::new(&syn.schema, &syn.name), target)).or_insert(false);
@@ -1288,13 +1338,16 @@ fn level1_class(kind: &str) -> &'static str {
         "FN" | "IF" | "TF" | "FS" | "FT" | "AF" => "FUNCTION",
         "SO" => "SEQUENCE",
         "SN" => "SYNONYM",
+        "SQ" => "QUEUE",
+        "D" => "DEFAULT",
+        "R" => "RULE",
         _ => "OBJECT",
     }
 }
 
 /// Graph tables: the index SQL Server makes on the graph id is left out (it comes with the
 /// table), and other indexes name the graph columns by their pseudo columns.
-fn graph_indexes(t: &mut Table) {
+pub fn graph_indexes(t: &mut Table) {
     t.indexes.retain(|ix| !ix.name.starts_with("GRAPH_UNIQUE_INDEX_"));
     let edge = t.graph.as_deref() == Some("EDGE");
     let pseudo = |c: &str| {

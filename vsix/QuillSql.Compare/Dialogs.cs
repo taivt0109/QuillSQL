@@ -52,6 +52,37 @@ namespace QuillSql.Compare
             }
             return owner != null ? d.ShowDialog(owner) : d.ShowDialog();
         }
+        private static readonly List<WeakReference<ContextMenu>> Menus = new List<WeakReference<ContextMenu>>();
+        private static System.Windows.Threading.DispatcherTimer _menuTimer;
+
+        /// <summary>
+        /// A context menu UI tests can use without a mouse or keyboard: with QUILL_TEST_DIALOGS set,
+        /// the text of `menu.txt` in that folder names a menu item to click (the file is removed).
+        /// </summary>
+        public static void RegisterMenu(ContextMenu menu)
+        {
+            var folder = Environment.GetEnvironmentVariable("QUILL_TEST_DIALOGS");
+            if (string.IsNullOrEmpty(folder)) return;
+            Menus.Add(new WeakReference<ContextMenu>(menu));
+            if (_menuTimer != null) return;
+            _menuTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            _menuTimer.Tick += (s, e) =>
+            {
+                var file = Path.Combine(folder, "menu.txt");
+                if (!File.Exists(file)) return;
+                var name = File.ReadAllText(file).Trim();
+                File.Delete(file);
+                foreach (var weak in Menus)
+                {
+                    if (!weak.TryGetTarget(out var m) || !(m.PlacementTarget is UIElement target ? target.IsVisible : true)) continue;
+                    var item = m.Items.OfType<MenuItem>().FirstOrDefault(i => (i.Header as string) == name && i.IsEnabled);
+                    if (item == null) continue;
+                    item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    return;
+                }
+            };
+            _menuTimer.Start();
+        }
         /// <summary>A folder chosen through a save dialog (WPF has no folder picker).</summary>
         public static string PickFolder(Window owner, string start, string title)
         {
@@ -166,6 +197,85 @@ namespace QuillSql.Compare
                 OpenFolder(dir);
             };
             w.Content = Ui.WithFooter(Body("Export CSV files", "Choose the tables and views you want to export. Separate .csv files will be created for each table or view.", content), Buttons(generate, cancel));
+            w.ShowDialog();
+        }
+
+        // ---- Application options ----
+
+        /// <summary>"Application options": the transaction settings of deployment scripts.</summary>
+        public static void ApplicationOptions(Window owner)
+        {
+            var settings = CompareSettings.Load();
+            var w = Ui.Dialog(owner, "Application options", null, 560, 0);
+            w.SizeToContent = SizeToContent.Height;
+            var levels = new[] { ("Read uncommitted", "READ UNCOMMITTED"), ("Read committed", "READ COMMITTED"), ("Repeatable read", "REPEATABLE READ"), ("Snapshot", "SNAPSHOT"), ("Serializable", "SERIALIZABLE") };
+            var level = new ComboBox { ItemsSource = levels.Select(l => l.Item1).ToList(), SelectedIndex = Math.Max(0, Array.FindIndex(levels, l => l.Item2 == settings.IsolationLevel)) };
+            var split = Ui.Check("Split transactions / batch operations (data deployments)", settings.SplitTransactions);
+            var size = new TextBox { Text = settings.MaxTransactionSizeMB.ToString(), Width = 80, HorizontalAlignment = HorizontalAlignment.Left, IsEnabled = settings.SplitTransactions };
+            split.Checked += (s, e) => size.IsEnabled = true;
+            split.Unchecked += (s, e) => size.IsEnabled = false;
+            var status = Ui.Text("", brush: CompareTheme.High);
+            var form = Ui.Form(
+                Ui.Field("Transaction isolation level", level),
+                Ui.Field(null, split),
+                Ui.Field("Maximum transaction / batch size (MB)", size),
+                Ui.Field(null, status));
+            var ok = Ui.Button("OK", () =>
+            {
+                if (!int.TryParse(size.Text.Trim(), out var mb) || mb <= 0)
+                {
+                    status.Text = "The maximum transaction size must be a positive whole number.";
+                    return;
+                }
+                settings.IsolationLevel = levels[Math.Max(0, level.SelectedIndex)].Item2;
+                settings.SplitTransactions = split.IsChecked == true;
+                settings.MaxTransactionSizeMB = mb;
+                settings.Save();
+                w.Close();
+            }, primary: true, minWidth: 100);
+            ok.IsDefault = true;
+            var cancel = Ui.Button("Cancel", () => w.Close(), minWidth: 90);
+            cancel.IsCancel = true;
+            w.Content = Ui.WithFooter(Body("Application options", "How deployment scripts run their changes.", form), Buttons(ok, cancel));
+            w.ShowDialog();
+        }
+
+        // ---- Create snapshot (schema) ----
+
+        /// <summary>Saves the schema of the source or the target as a snapshot file.</summary>
+        public static async Task CreateSnapshot(CompareSession session)
+        {
+            var owner = session.Host.Owner;
+            var choice = Ui.Message(owner, "Create snapshot", "Create a snapshot of which data source?", Ui.Tone.Question, "Source", "Target", "Cancel");
+            if (choice < 0 || choice == 2) return;
+            var side = session.WithPasswords().Obj(choice == 0 ? "source" : "target");
+            if (side == null || side.Str("type") == "empty")
+            {
+                Ui.Error(owner, "Choose a database, snapshot or scripts folder first.");
+                return;
+            }
+            var d = new SaveFileDialog { Filter = "QuillSQL snapshot (*.json)|*.json", DefaultExt = "json", FileName = (side.Str("database") ?? "snapshot") + ".json" };
+            if (Show(d, owner) != true) return;
+            var done = await Ui.Try(owner, () => session.Engine.RequestObject("snapshot", new JsonObject { ["source"] = side, ["path"] = d.FileName }));
+            if (done != null) Ui.Message(owner, "Create snapshot", "Saved the snapshot " + d.FileName + " (" + Ui.Plural(done.Long("tables"), "table", "tables") + ").", Ui.Tone.Info, "OK");
+        }
+
+        /// <summary>A script to read, copy, save or open: "View object deployment script".</summary>
+        public static void ShowScript(ICompareHost host, string title, string sql)
+        {
+            var w = Ui.Dialog(host.Owner, title, null, 900, 620);
+            var code = Ui.Code();
+            code.Text = string.IsNullOrEmpty(sql) ? "-- Nothing to deploy." : sql;
+            var copy = Ui.Button("Copy", () => Clipboard.SetText(code.Text), glyph: Glyph.Copy);
+            var save = Ui.Button("Save script…", () =>
+            {
+                var d = new SaveFileDialog { Filter = "SQL script (*.sql)|*.sql", FileName = "script.sql" };
+                if (Show(d, w) == true) File.WriteAllText(d.FileName, code.Text, new System.Text.UTF8Encoding(true));
+            }, glyph: Glyph.Save);
+            var open = Ui.Button("Open in editor", () => { host.OpenScript(code.Text, title); w.Close(); }, glyph: Glyph.Edit);
+            var close = Ui.Button("Close", () => w.Close(), primary: true);
+            close.IsCancel = true;
+            w.Content = Ui.WithFooter(Body(title, "The script that deploys this object on its own, with what it needs.", Ui.Card(code, 0)), Buttons(copy, save, open, close));
             w.ShowDialog();
         }
 
@@ -418,6 +528,7 @@ namespace QuillSql.Compare
             menu.Items.Add(Ui.MenuItem("Compare now", () => finish(true), Glyph.Play));
             menu.Items.Add(Ui.MenuItem("Edit project", () => finish(false), Glyph.Edit));
             grid.ContextMenu = menu;
+            RegisterMenu(menu);
             CompareTheme.Attach(menu);
             var newMenu = new ContextMenu();
             newMenu.Items.Add(Ui.MenuItem("Schema comparison", () => { choice = new ProjectChoice { NewData = false }; w.Close(); }, Glyph.List));
