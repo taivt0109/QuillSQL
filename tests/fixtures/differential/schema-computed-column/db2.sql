@@ -1,0 +1,3 @@
+CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, A int NULL, B int NULL, S AS (A - B))
+GO
+INSERT dbo.T (Id, A, B) VALUES (1, 5, 3)

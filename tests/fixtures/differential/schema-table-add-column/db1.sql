@@ -1,0 +1,3 @@
+CREATE TABLE dbo.Customer (Id int NOT NULL CONSTRAINT PK_Customer PRIMARY KEY, Name nvarchar(100) NOT NULL, Email varchar(200) NULL)
+GO
+CREATE TABLE dbo.Fresh (Id int NOT NULL CONSTRAINT PK_Fresh PRIMARY KEY)

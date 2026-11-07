@@ -1,0 +1,3 @@
+kind = "data"
+about = "Target table has a DML trigger that logs changes"
+judge_args = ['/exclude:Table:Log']

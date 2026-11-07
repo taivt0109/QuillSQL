@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Partition function and scheme with a partitioned table only in db1"

@@ -1,0 +1,1 @@
+SELECT Id, CHECKSUM(b, ti, si, bi, m, sm, f, r, d, t, dt, sdt, dt2, dto, ch, vc, nc, nv, bn, vb, u, CAST(x AS nvarchar(max)), sv, CAST(h AS varchar(50)), g.STAsText(), gm.STAsText()) c FROM dbo.Ty ORDER BY Id

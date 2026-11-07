@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Column under a schema-bound view is retyped: the view must be dropped and re-created"

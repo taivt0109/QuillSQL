@@ -1,0 +1,1 @@
+SELECT name, definition, is_not_trusted = CAST(NULL AS bit) FROM sys.default_constraints WHERE parent_object_id = OBJECT_ID('dbo.T') UNION ALL SELECT name, definition, is_not_trusted FROM sys.check_constraints WHERE parent_object_id = OBJECT_ID('dbo.T') ORDER BY 1

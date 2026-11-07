@@ -1,0 +1,1 @@
+SELECT Id, V FROM dbo.TT ORDER BY Id

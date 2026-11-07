@@ -1,0 +1,1 @@
+SELECT * FROM dbo.C ORDER BY Code

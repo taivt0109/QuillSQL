@@ -1,0 +1,1 @@
+SELECT * FROM dbo.P ORDER BY Id

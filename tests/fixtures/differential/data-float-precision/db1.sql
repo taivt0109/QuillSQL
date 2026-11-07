@@ -1,0 +1,3 @@
+CREATE TABLE dbo.F (Id int NOT NULL CONSTRAINT PK_F PRIMARY KEY, X float NULL, R real NULL)
+GO
+INSERT dbo.F VALUES (1, 0.1e0 + 0.2e0, 1.1), (2, 1.0e0/3, 2.5)

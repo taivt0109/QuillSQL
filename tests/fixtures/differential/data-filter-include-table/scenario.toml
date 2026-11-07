@@ -1,0 +1,3 @@
+kind = "data"
+about = "/include:Table:Orders compares one table only"
+args = ['/include:Table:Orders']

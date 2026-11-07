@@ -1,0 +1,1 @@
+SELECT * FROM dbo.Hot ORDER BY Id

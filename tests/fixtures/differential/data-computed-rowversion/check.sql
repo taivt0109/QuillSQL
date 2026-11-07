@@ -1,0 +1,1 @@
+SELECT Id, A, Twice FROM dbo.K ORDER BY Id

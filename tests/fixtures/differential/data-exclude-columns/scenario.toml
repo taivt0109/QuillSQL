@@ -1,0 +1,3 @@
+kind = "data"
+about = "/excludeColumns ignores a column that always differs"
+args = ['/excludeColumns:dbo.E:Modified']

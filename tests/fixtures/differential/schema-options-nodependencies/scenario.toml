@@ -1,0 +1,3 @@
+kind = "schema"
+about = "Only a view is included; with /options:None the table it needs is not deployed"
+args = ['/options:None', '/include:View']

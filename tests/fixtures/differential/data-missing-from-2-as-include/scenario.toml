@@ -1,0 +1,4 @@
+kind = "data"
+about = "Table only in db1 with /options:Default,MissingFrom2AsInclude"
+args = ['/options:Default,MissingFrom2AsInclude']
+oracles = ["exit", "diffset", "warnings", "converge-quill", "converge-vendor", "outcome"]

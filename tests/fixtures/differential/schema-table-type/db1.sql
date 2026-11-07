@@ -1,0 +1,3 @@
+CREATE TYPE dbo.IdList AS TABLE (Id int NOT NULL PRIMARY KEY, Note nvarchar(20) NULL)
+GO
+CREATE PROCEDURE dbo.UseList @l dbo.IdList READONLY AS SELECT Id FROM @l

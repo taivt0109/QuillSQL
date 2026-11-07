@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Sparse column and rowversion column only in db1"

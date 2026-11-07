@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Computed column expression changes; a persisted computed column is added"

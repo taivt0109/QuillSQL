@@ -1,0 +1,2 @@
+kind = "schema"
+about = "User-defined table type changed while a procedure uses it"

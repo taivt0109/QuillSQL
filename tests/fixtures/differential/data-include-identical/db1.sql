@@ -1,0 +1,7 @@
+CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, Name nvarchar(50) NULL, Amount decimal(10,2) NULL)
+GO
+INSERT dbo.T VALUES (1, N'same', 1.00)
+GO
+CREATE TABLE dbo.Same (Id int NOT NULL CONSTRAINT PK_Same PRIMARY KEY)
+GO
+INSERT dbo.Same VALUES (1), (2)

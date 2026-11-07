@@ -1,0 +1,5 @@
+kind = "data"
+about = "Project WHERE clause plus /excludeColumns on the command line"
+finding = "data H5"
+args = ['/excludeColumns:.*:Note']
+project = "project.sdc"

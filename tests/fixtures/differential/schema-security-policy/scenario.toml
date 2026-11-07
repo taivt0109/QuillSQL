@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Row-level security policy with a predicate function only in db1"

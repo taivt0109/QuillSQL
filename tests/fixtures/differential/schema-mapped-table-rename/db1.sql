@@ -1,0 +1,1 @@
+CREATE TABLE dbo.Client (Id int NOT NULL CONSTRAINT PK_Client PRIMARY KEY, Name nvarchar(100) NOT NULL)

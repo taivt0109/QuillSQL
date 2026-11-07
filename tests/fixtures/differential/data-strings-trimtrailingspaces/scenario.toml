@@ -1,0 +1,3 @@
+kind = "data"
+about = "String edge cases with /options:Default,TrimTrailingSpaces"
+args = ['/options:Default,TrimTrailingSpaces']

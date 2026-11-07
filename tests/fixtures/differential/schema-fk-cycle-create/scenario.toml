@@ -1,0 +1,2 @@
+kind = "schema"
+about = "Two tables that reference each other exist only in db1"

@@ -1,0 +1,1 @@
+CREATE TABLE dbo.Unrelated (Id int NOT NULL CONSTRAINT PK_Unrelated PRIMARY KEY)

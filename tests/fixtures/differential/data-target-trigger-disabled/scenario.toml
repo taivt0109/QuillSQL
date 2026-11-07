@@ -1,0 +1,4 @@
+kind = "data"
+about = "Target trigger with /options:Default,DisableAndReenableDMLTriggers"
+args = ['/options:Default,DisableAndReenableDMLTriggers']
+judge_args = ['/options:Default,DisableAndReenableDMLTriggers', '/exclude:Table:Log']

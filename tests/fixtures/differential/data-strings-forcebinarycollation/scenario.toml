@@ -1,0 +1,3 @@
+kind = "data"
+about = "String edge cases with /options:Default,ForceBinaryCollation"
+args = ['/options:Default,ForceBinaryCollation']

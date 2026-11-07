@@ -1,0 +1,3 @@
+kind = "data"
+about = "Indexed view with IncludeIndexedViews between live databases (baseline for data H1)"
+args = ['/options:Default,IncludeIndexedViews']
