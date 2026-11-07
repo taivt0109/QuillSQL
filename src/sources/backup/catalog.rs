@@ -127,6 +127,9 @@ mod rc {
     pub const BINDING_OWNER: i64 = 48;
     pub const BINDING_USER: i64 = 24;
     pub const OBJECT_OWNER: i64 = 97;
+    pub const CERTIFICATE_OWNER: i64 = 47;
+    pub const ASYMMETRIC_KEY_OWNER: i64 = 62;
+    pub const SYMMETRIC_KEY_OWNER: i64 = 64;
     pub const MODULE_TO_ASSEMBLY: i64 = 11;
     pub const TYPE_TO_ASSEMBLY: i64 = 38;
     pub const SECURITY_PREDICATE: i64 = 11;
@@ -237,6 +240,7 @@ pub fn read(cat: &Catalog, info: &DatabaseInfo) -> Result<Database, String> {
     b.extended_properties();
     b.sensitivity();
     b.service_broker();
+    b.keys();
     b.principals_and_roles();
     b.permissions();
     b.dependencies();
@@ -1519,6 +1523,72 @@ impl Builder<'_> {
         }
     }
 
+    /// Certificates, asymmetric and symmetric keys (not the private parts: only what the catalog
+    /// views show).
+    fn keys(&mut self) {
+        let hex = |b: &[u8]| format!("0x{}", b.iter().map(|x| format!("{x:02X}")).collect::<String>());
+        let mut certs = self.cat.system("syscerts");
+        certs.sort_by_key(|c| self.key(&c.str("name")));
+        for c in certs.iter().filter(|c| !c.str("name").starts_with("##")) {
+            let der = c.bytes("cert");
+            let parts = certificate_parts(&der).unwrap_or_default();
+            self.db.certificates.push(Certificate {
+                name: c.str("name"),
+                owner: self.owner_ref(rc::CERTIFICATE_OWNER, c.int("id")),
+                subject: parts.0,
+                issuer: parts.1,
+                thumbprint: hex(&c.bytes("thumbprint")),
+                start_date: parts.2,
+                expiry_date: parts.3,
+                private_key: c.str("encrtype"),
+                active_for_dialog: c.int("status") & 1 == 0,
+            });
+        }
+        let mut keys = self.cat.system("sysasymkeys");
+        keys.sort_by_key(|k| self.key(&k.str("name")));
+        for k in keys.iter().filter(|k| !k.str("name").starts_with("##")) {
+            let bits = k.int("bitlength");
+            self.db.asymmetric_keys.push(AsymmetricKey {
+                name: k.str("name"),
+                owner: self.owner_ref(rc::ASYMMETRIC_KEY_OWNER, k.int("id")),
+                thumbprint: hex(&k.bytes("thumbprint")),
+                algorithm: format!("RSA_{bits}"),
+                key_length: bits as i32,
+                private_key: k.str("encrtype"),
+            });
+        }
+        let guids = self.cat.system("sysguidrefs");
+        let mut sym: Vec<SysRow> = self.cat.system("sysclsobjs").into_iter().filter(|r| r.int("class") == 56 && !r.str("name").starts_with("##")).collect();
+        sym.sort_by_key(|k| self.key(&k.str("name")));
+        for k in sym {
+            let id = k.int("id");
+            let ty = k.str("type");
+            let algorithm = match ty.trim() {
+                "A1" => "AES_128",
+                "A2" => "AES_192",
+                "A3" => "AES_256",
+                "D" => "DES",
+                "D3" => "TRIPLE_DES",
+                "DT" => "TRIPLE_DES_3KEY",
+                "DX" => "DESX",
+                "R2" => "RC2",
+                "R4" => "RC4",
+                "RX" => "RC4_128",
+                other => other,
+            };
+            let date = |v: &Value| super::text::odbc(v, values::xtype::DATETIME, 3).chars().take(19).collect::<String>();
+            self.db.symmetric_keys.push(SymmetricKey {
+                name: k.str("name"),
+                owner: self.owner_ref(rc::SYMMETRIC_KEY_OWNER, id),
+                algorithm: algorithm.into(),
+                key_length: k.int("intprop") as i32,
+                key_guid: guids.iter().find(|g| g.int("class") == 2 && g.int("id") == id).map(|g| text_of(g.get("guid")).unwrap_or_default().to_uppercase()).unwrap_or_default(),
+                create_date: date(k.get("created")),
+                modify_date: date(k.get("modified")),
+            });
+        }
+    }
+
     fn parent_of(&self, id: i32) -> Option<&Obj> {
         let o = self.objects.get(&id)?;
         (o.parent != 0).then(|| self.objects.get(&o.parent)).flatten()
@@ -1908,6 +1978,64 @@ fn variant_binary(r: &SysRow, column: &str) -> Vec<u8> {
         }
         _ => Vec::new(),
     }
+}
+
+/// A DER element at `at`: (tag, content start, end).
+fn der(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
+    let tag = *b.get(at)?;
+    let first = *b.get(at + 1)? as usize;
+    let (len, start) = if first < 0x80 {
+        (first, at + 2)
+    } else {
+        let n = first & 0x7f;
+        (b.get(at + 2..at + 2 + n)?.iter().fold(0usize, |v, &x| (v << 8) | x as usize), at + 2 + n)
+    };
+    Some((tag, start, start + len))
+}
+
+/// The common name in a DER Name.
+fn common_name(b: &[u8], start: usize, end: usize) -> String {
+    // Find the OID 2.5.4.3 (55 04 03) and the string after it.
+    let Some(p) = b[start..end].windows(5).position(|w| w == [0x06, 0x03, 0x55, 0x04, 0x03]) else { return String::new() };
+    let at = start + p + 5;
+    match der(b, at) {
+        Some((0x1e, s, e)) => super::values::utf16(&b[s..e].chunks(2).flat_map(|c| [c.get(1).copied().unwrap_or(0), c[0]]).collect::<Vec<u8>>()),
+        Some((_, s, e)) => String::from_utf8_lossy(&b[s..e]).into_owned(),
+        None => String::new(),
+    }
+}
+
+/// A DER time as `yyyy-mm-dd hh:mi:ss`.
+fn der_time(b: &[u8], (tag, s, e): (u8, usize, usize)) -> String {
+    let t = String::from_utf8_lossy(&b[s..e]).into_owned();
+    let t = if tag == 0x17 { format!("{}{t}", if t[..2].parse::<u32>().unwrap_or(0) < 50 { "20" } else { "19" }) } else { t };
+    if t.len() < 14 {
+        return t;
+    }
+    format!("{}-{}-{} {}:{}:{}", &t[..4], &t[4..6], &t[6..8], &t[8..10], &t[10..12], &t[12..14])
+}
+
+/// Subject, issuer, start and expiry of an X.509 certificate.
+fn certificate_parts(b: &[u8]) -> Option<(String, String, String, String)> {
+    let (_, cert, _) = der(b, 0)?;
+    let (_, tbs, _) = der(b, cert)?;
+    let mut at = tbs;
+    let mut fields = Vec::new();
+    while fields.len() < 6 {
+        let f = der(b, at)?;
+        // The optional version comes first, tagged [0].
+        if !(fields.is_empty() && f.0 == 0xa0) {
+            fields.push(f);
+        }
+        at = f.2;
+    }
+    // serial, signature, issuer, validity, subject
+    let (_, is, ie) = fields[2];
+    let (_, vs, _) = fields[3];
+    let before = der(b, vs)?;
+    let after = der(b, before.2)?;
+    let (_, ss, se) = fields[4];
+    Some((common_name(b, ss, se), common_name(b, is, ie), der_time(b, before), der_time(b, after)))
 }
 
 /// XML schema components (sysxmlcomponent, sysxmlplacement) written back as XSD text, in the
