@@ -179,14 +179,18 @@ fn compares_two_versions_of_the_shop() {
     let app = c.differences.iter().find(|d| d.object_type == ObjectType::User && d.name.name == "app").unwrap();
     let names: Vec<&str> = app.properties.iter().map(|p| p.name.as_str()).collect();
     // IgnoreUserProperties is a default, as in SQL Compare: the default schema is not compared.
-    assert_eq!(names, ["Member of"]);
+    // Membership is reported on the role (here the fixed role db_datareader), as SQL Compare does.
+    assert!(names.is_empty(), "{names:?}");
+    let reader = find(ObjectType::Role, "db_datareader");
+    assert!(reader.properties.iter().any(|p| p.name == "Member" && p.source.as_deref() == Some("app")), "{:?}", reader.properties);
     let all = schema::compare(&db1, &db2, &Options::default_set().without(Opt::IgnoreUserProperties), &Mappings::default());
     let app2 = all.differences.iter().find(|d| d.object_type == ObjectType::User && d.name.name == "app").unwrap();
     assert!(app2.properties.iter().any(|p| p.name == "Default schema"));
     assert_eq!(find(ObjectType::Role, "Auditors").kind, DiffKind::OnlyIn2);
     assert!(customer.properties.iter().any(|p| p.name == "Permission" && p.target.as_deref() == Some("GRANT SELECT TO app")));
     let ignored = schema::compare(&db1, &db2, &Options::default_set().with(Opt::IgnoreUsers).with(Opt::IgnorePermissions), &Mappings::default());
-    assert!(!ignored.differences.iter().any(|d| d.object_type == ObjectType::User));
+    // IgnoreUsers keeps the users but not their memberships and permissions.
+    assert!(!ignored.differences.iter().any(|d| d.object_type == ObjectType::User && d.kind == DiffKind::Different));
 
     let opts = Options::default_set()
         .with(Opt::IgnoreExtendedProperties)

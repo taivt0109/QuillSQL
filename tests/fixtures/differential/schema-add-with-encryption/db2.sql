@@ -1,0 +1,1 @@
+CREATE VIEW dbo.V AS SELECT 1 AS x

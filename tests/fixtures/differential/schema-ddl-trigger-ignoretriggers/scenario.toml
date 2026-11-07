@@ -1,0 +1,5 @@
+kind = "schema"
+about = "/options:Default,IgnoreTriggers: a DDL trigger only in db1 is still compared, a DML trigger is not"
+finding = "schema-model M4"
+args = ['/options:Default,IgnoreTriggers']
+oracles = ["diffset", "names", "exit"]
