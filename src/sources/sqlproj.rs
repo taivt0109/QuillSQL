@@ -383,7 +383,7 @@ mod tests {
         assert!(p.sql_files(&dir, Vec::new()).contains(&dir.join("Assemblies").join("Ext.dll")));
         let a = crate::catalog::Assembly { name: "New".into(), clr_name: "new, version=1.0.0.0".into(), permission_set: "UNSAFE".into(), ..Default::default() };
         let new = Path::new("Assemblies").join("New.dll");
-        p.update(&[new.clone()], &[Path::new("Assemblies").join("Ext.dll")], &[(new.clone(), &a)]).unwrap();
+        p.update(std::slice::from_ref(&new), &[Path::new("Assemblies").join("Ext.dll")], &[(new.clone(), &a)]).unwrap();
         std::fs::write(dir.join(&new), b"MZ").unwrap();
         let text = std::fs::read_to_string(dir.join("Db.sqlproj")).unwrap();
         assert!(text.contains("<None Include=\"Assemblies\\New.dll\" />") && !text.contains("Ext"), "{text}");
