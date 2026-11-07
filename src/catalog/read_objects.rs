@@ -72,7 +72,7 @@ fn split_quoted(s: &str) -> Vec<String> {
 }
 
 /// `([dbo].[fn]([TenantId]))` → (`[dbo].[fn]`, `([TenantId])`).
-pub(super) fn split_predicate(definition: &str) -> (String, String) {
+pub(crate) fn split_predicate(definition: &str) -> (String, String) {
     let mut d = definition.trim();
     while d.starts_with('(') && d.ends_with(')') && balanced(&d[1..d.len() - 1]) {
         d = d[1..d.len() - 1].trim();
