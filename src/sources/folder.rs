@@ -856,6 +856,15 @@ pub fn apply(source: &Database, target: &Database, differences: &[Difference]) -
 /// Deploys the selected differences to the scripts folder `target`: rewrites the files of
 /// objects that change, adds files for new objects and deletes files left without objects.
 pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &Options) -> Result<FolderChanges, String> {
+    sync_files(source, target, differences, o, true)
+}
+
+/// The files `sync` would write and delete, without touching the folder.
+pub fn preview(source: &Database, target: &Folder, differences: &[Difference], o: &Options) -> Result<FolderChanges, String> {
+    sync_files(source, target, differences, o, false)
+}
+
+fn sync_files(source: &Database, target: &Folder, differences: &[Difference], o: &Options, write: bool) -> Result<FolderChanges, String> {
     let after = apply(source, &target.database, differences);
     let before: HashMap<ObjectKey, String> = object_scripts(&target.database, &target.info, o).into_iter().collect();
     let after_scripts = object_scripts(&after, &target.info, o);
@@ -896,6 +905,10 @@ pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &
         let full = target.path.join(&rel);
         if text.is_empty() {
             if full.exists() {
+                if !write {
+                    changes.deleted.push(rel);
+                    continue;
+                }
                 std::fs::remove_file(&full).map_err(|e| format!("{}: {e}", full.display()))?;
                 changes.deleted.push(rel);
             }
@@ -906,11 +919,18 @@ pub fn sync(source: &Database, target: &Folder, differences: &[Difference], o: &
         {
             return Err("Some of the scripts in the folder being synchronized to are read only.".into());
         }
+        if !write {
+            changes.written.push(rel);
+            continue;
+        }
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         write_file(&full, &text, &target.info.encoding)?;
         changes.written.push(rel);
+    }
+    if !write {
+        return Ok(changes);
     }
     if target.info.file.is_none() {
         // A folder read without settings has no server version to record.
