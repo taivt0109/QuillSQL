@@ -779,7 +779,10 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
         if side.server.is_empty() && side.database.is_empty() {
             return Ok(None);
         }
-        side.password = args.get(&key("password")).map(str::to_string);
+        // /passwordN replaces a password saved in the project.
+        if let Some(p) = args.get(&key("password")) {
+            side.password = Some(p.to_string());
+        }
         if let Some(u) = args.get(&key("username")) {
             side.user = u.to_string();
             side.authentication = crate::project::Authentication::Sql;

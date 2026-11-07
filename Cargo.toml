@@ -16,7 +16,12 @@ roxmltree = "0.21.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tiberius = { version = "0.13.0", default-features = false, features = ["tds80", "rustls", "sql-browser-tokio", "chrono"] }
-tokio = { version = "1", features = ["rt", "net", "time", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros", "sync", "io-util"] }
+# Already used by tiberius; HTTPS to Microsoft Entra for sign-in tokens.
+tokio-rustls = "0.26"
+rustls-native-certs = "0.8"
+# Already used by tiberius; SQL Compare project selections are keyed by MD5.
+md5 = "0.6"
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 regex = "1"
