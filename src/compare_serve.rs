@@ -61,8 +61,12 @@ struct DataSession {
     script: Option<DeploymentScript>,
     /// Row orders built for the All rows tab and for sorting, by (table, kind, sort).
     views: Views,
-    /// Scripts-folder sides, loaded into temporary databases for the life of the session.
+    /// Scripts-folder sides loaded into temporary databases, for the life of the session.
     staged: [Option<crate::sources::staging::Staging>; 2],
+    /// Scripts-folder sides read without a server.
+    folders: [Option<crate::sources::datafolder::DataFolder>; 2],
+    /// The row kinds of the last script, for deploying to a scripts folder.
+    kinds: [bool; 4],
 }
 
 impl DataSession {
@@ -475,48 +479,75 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 "targetSchemas": db2.schemas.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
             }))
         }
+        // The Table mapping and Owner mapping tabs: what pairs with what, what the user mapped,
+        // and what is left on each side. An empty target in a mapping unmaps a default pair.
+        "mapping_preview" => {
+            let project: Project = field(request, "project")?;
+            mapping_preview(&project, progress)
+        }
         "data_compare" => {
             let project: Project = field(request, "project")?;
             let opts = data_options(&project)?;
-            // A scripts folder is loaded into a temporary database on the other side's server.
+            // A scripts folder is read without a server; when its data needs one, it is loaded
+            // into a temporary database on the other side's server.
             let host = [(&project.source, 1), (&project.target, 2)].into_iter().find(|(s, _)| !s.is_scripts() && !s.is_snapshot() && !s.is_backup()).map(|(s, n)| s.connection(n)).transpose()?;
             let backups = [&project.source, &project.target].map(|s| s.is_backup().then(|| open_backup(s, progress)).transpose());
             let [b1, b2] = backups;
-            let (b1, b2) = (b1?, b2?);
+            let backups = [b1?, b2?];
             let mut staged: [Option<crate::sources::staging::Staging>; 2] = [None, None];
+            let mut folders: [Option<crate::sources::datafolder::DataFolder>; 2] = [None, None];
             for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
                 if side.is_scripts() {
-                    let host = host.as_ref().ok_or("a scripts folder needs the other side to be a live database, to load its data")?;
-                    progress(&format!("Loading the data scripts of '{}'", side.path));
+                    progress(&format!("Reading the data scripts of '{}'", side.path));
                     let revision = (!side.revision.is_empty()).then_some(side.revision.as_str());
-                    staged[k] = Some(crate::sources::staging::stage(std::path::Path::new(&side.path), revision, host)?);
+                    match crate::sources::datafolder::read(std::path::Path::new(&side.path), revision)? {
+                        Ok(f) => folders[k] = Some(f),
+                        Err(reason) => {
+                            let host = host.as_ref().ok_or_else(|| format!("{reason}; reading the folder needs the other side to be a live database"))?;
+                            progress(&format!("Loading '{}' into a temporary database", side.path));
+                            staged[k] = Some(crate::sources::staging::stage(std::path::Path::new(&side.path), revision, host)?);
+                        }
+                    }
                 }
             }
-            let spec = |k: usize, side: &SourceSpec| {
-                if side.is_backup() {
-                    return Ok(crate::db::ConnectionSpec::new("", &side.path, crate::db::Auth::Windows));
+            let mut dbs = Vec::new();
+            let mut specs = Vec::new();
+            for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
+                progress(&format!("Reading {}", side.describe()));
+                if let Some(f) = &folders[k] {
+                    dbs.push(f.folder.database.clone());
+                    specs.push(None);
+                    continue;
                 }
-                staged[k].as_ref().map(|s| Ok(s.spec.clone())).unwrap_or_else(|| side.connection(k as u8 + 1))
-            };
-            let (s1, s2) = (spec(0, &project.source)?, spec(1, &project.target)?);
-            progress(&format!("Reading {}", project.source.describe()));
-            let read = |b: &Option<crate::sources::backup::Backup>, s: &crate::db::ConnectionSpec| match b {
-                Some(b) => b.read_database().map_err(|e| e.to_string()),
-                None => catalog::read_database_with(s, false),
-            };
-            let mut db1 = read(&b1, &s1)?;
-            progress(&format!("Reading {}", project.target.describe()));
-            let mut db2 = read(&b2, &s2)?;
-            for (db, s) in [(&mut db1, &staged[0]), (&mut db2, &staged[1])] {
-                if let Some(s) = s {
+                if let Some(b) = &backups[k] {
+                    dbs.push(b.read_database().map_err(|e| e.to_string())?);
+                    specs.push(None);
+                    continue;
+                }
+                let spec = match &staged[k] {
+                    Some(s) => s.spec.clone(),
+                    None => side.connection(k as u8 + 1)?,
+                };
+                let mut db = catalog::read_database_with(&spec, false)?;
+                if let Some(s) = &staged[k] {
                     db.name = s.folder.database.name.clone();
                 }
+                dbs.push(db);
+                specs.push(Some(spec));
             }
+            let db2 = dbs.pop().unwrap_or_default();
+            let db1 = dbs.pop().unwrap_or_default();
+            let rows = |k: usize| match (&folders[k], &specs[k]) {
+                (Some(f), _) => crate::data::compare::RowSource::Memory(&f.memory),
+                (None, None) if backups[k].is_some() => crate::data::compare::RowSource::Backup(backups[k].as_ref().unwrap()),
+                (None, Some(spec)) => crate::data::compare::RowSource::Live(spec),
+                (None, None) => unreachable!(),
+            };
             progress("Comparing data");
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
-            let result = crate::data::compare::compare_sides(
-                crate::data::compare::Side::of(&b1, &s1),
-                crate::data::compare::Side::of(&b2, &s2),
+            let result = crate::data::compare::compare_sources(
+                rows(0),
+                rows(1),
                 &db1,
                 &db2,
                 &opts,
@@ -528,7 +559,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             state.next += 1;
             let id = state.next;
             let reply = data_session_json(id, &db1.name, &db2.name, &result);
-            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), staged });
+            state.data.insert(id, DataSession { source_name: db1.name, db2, result, project, script: None, views: HashMap::new(), staged, folders, kinds: [false, true, true, true] });
             Ok(reply)
         }
         // `kind` 0–3 is a row kind (`RowKind::ALL` order), 4 every stored row in comparison order;
@@ -643,6 +674,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let mut settings = crate::data::sync::SyncSettings::new(&side(&s.project.source, &s.source_name), &side(&s.project.target, &s.db2.name), &s.db2.name);
             settings.transaction_isolation_level = request.get("isolationLevel").and_then(Value::as_str).unwrap_or("SERIALIZABLE").to_ascii_uppercase();
             settings.kinds = kinds;
+            s.kinds = kinds;
             settings.tables = tables.map(|ix| ix.iter().filter_map(|&i| s.result.tables.get(i)).map(|t| t.pair.source.clone()).collect());
             settings.selections = selections(request, &s.result)?;
             settings.max_transaction_bytes = request.get("maxTransactionSizeMB").and_then(Value::as_u64).filter(|&m| m > 0).map(|m| m * 1_048_576);
@@ -671,7 +703,7 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             let id = state.next;
             let mut reply = data_session_json(id, &source_name, &db2.name, &result);
             reply["project"] = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), staged: [None, None] });
+            state.data.insert(id, DataSession { source_name, db2, result, project, script: None, views: HashMap::new(), staged: [None, None], folders: [None, None], kinds: [false, true, true, true] });
             Ok(reply)
         }
         "deploy" => {
@@ -699,6 +731,15 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             }
             // A data comparison whose target is a scripts folder: run the script on the loaded
             // copy, then write the changed tables' data scripts.
+            if let Some(s) = state.data.get_mut(&id)
+                && let Some(f) = &mut s.folders[1]
+            {
+                if s.script.is_none() {
+                    return Err("create the deployment script first".into());
+                }
+                let files = f.write_back(&s.result, s.kinds)?;
+                return Ok(json!({"batches": 0, "written": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()}));
+            }
             if let Some(s) = state.data.get(&id)
                 && let Some(staged) = &s.staged[1]
             {
@@ -763,6 +804,88 @@ fn backup_into(request: &Value, target: &SourceSpec, script: &mut DeploymentScri
     }
     schema::backup::Plan { options: &o, database: &spec.database, utc: schema::backup::utc_stamp(), caps: &caps }.add_to(script);
     Ok(())
+}
+
+fn mapping_preview(project: &Project, progress: &dyn Fn(&str)) -> Result<Value, String> {
+    let data = project.kind == crate::project::ProjectKind::Data;
+    let (decrypt, case_sensitive) = if data {
+        (false, data_options(project)?.has(DataOpt::CaseSensitiveObjectDefinition))
+    } else {
+        let o = schema_options(project)?;
+        (o.has(Opt::DecryptPost2kEncryptedObjects), o.has(Opt::CaseSensitiveObjectDefinition))
+    };
+    let db1 = load_side(&project.source, 1, decrypt, progress)?;
+    let db2 = if project.target.is_empty_database() { Database::default() } else { load_side(&project.target, 2, decrypt, progress)? };
+    let key = |s: &str| if case_sensitive { s.to_string() } else { s.to_lowercase() };
+    let same = |a: &str, b: &str| key(a) == key(b);
+
+    // Owners: the user's mappings, then by name.
+    let user_schemas = if data { &project.data_mappings.schemas } else { &project.schema_mappings.schemas };
+    let (left, right): (Vec<&str>, Vec<&str>) = (db1.schemas.iter().map(|s| s.name.as_str()).collect(), db2.schemas.iter().map(|s| s.name.as_str()).collect());
+    let mut used = vec![false; right.len()];
+    let mut owners = Vec::new();
+    let mut owners1 = Vec::new();
+    for l in &left {
+        let user = user_schemas.iter().find(|(a, _)| same(a, l));
+        let want = user.map(|(_, b)| b.as_str()).unwrap_or(l);
+        match right.iter().position(|r| !want.is_empty() && same(r, want)) {
+            Some(j) if !used[j] => {
+                used[j] = true;
+                owners.push(json!({"source": l, "target": right[j], "user": user.is_some()}));
+            }
+            _ => owners1.push(json!(l)),
+        }
+    }
+    let owners2: Vec<Value> = right.iter().enumerate().filter(|(j, _)| !used[*j]).map(|(_, r)| json!(r)).collect();
+    let target_schema = |s: &str| user_schemas.iter().find(|(a, _)| same(a, s)).map(|(_, b)| b.clone()).unwrap_or_else(|| s.to_string());
+
+    let columns_of = |db: &Database, n: &ObjectName| db.table(&n.schema, &n.name).map(|t| t.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    let mut tables = Vec::new();
+    let (only1, only2): (Vec<ObjectName>, Vec<ObjectName>);
+    if data {
+        let opts = data_options(project)?;
+        let (pairs, o1, o2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
+        for p in &pairs {
+            let user = project.data_mappings.tables.iter().any(|t| t.source == p.source && t.target.as_ref().is_some_and(|x| !x.name.is_empty()));
+            let explicit = project.data_mappings.tables.iter().find(|t| t.source == p.source).map(|t| t.columns.clone()).unwrap_or_default();
+            let cols: Vec<Value> = p.columns.iter().map(|c| json!({"source": c.source, "target": c.target, "auto": !explicit.iter().any(|(a, _)| a == &c.source) && !c.source.eq_ignore_ascii_case(&c.target)})).collect();
+            tables.push(json!({"source": p.source, "target": p.target, "user": user, "isView": p.is_view, "columns": cols,
+                "sourceColumns": columns_of(&db1, &p.source), "targetColumns": columns_of(&db2, &p.target)}));
+        }
+        (only1, only2) = (o1, o2);
+    } else {
+        // As schema::compare pairs tables, with the columns "Auto-map similar columns" pairs.
+        let auto = schema::compare(&db1, &db2, &schema_options(project)?, &project.schema_mappings).auto_mapped_columns;
+        let mut matched = vec![false; db2.tables.len()];
+        let mut alone = Vec::new();
+        for t1 in db1.tables.iter().filter(|t| !t.history_table) {
+            let n1 = t1.object_name();
+            let mapping = project.schema_mappings.tables.iter().find(|m| same(&m.source.schema, &t1.schema) && same(&m.source.name, &t1.name));
+            let (schema, name) = match mapping {
+                Some(m) => (m.target.schema.clone(), m.target.name.clone()),
+                None => (target_schema(&t1.schema), t1.name.clone()),
+            };
+            let found = db2.tables.iter().position(|t| !name.is_empty() && !t.history_table && same(&t.schema, &schema) && same(&t.name, &name));
+            match found {
+                Some(j) => {
+                    matched[j] = true;
+                    let n2 = db2.tables[j].object_name();
+                    let explicit = mapping.map(|m| m.columns.clone()).unwrap_or_default();
+                    let mut cols: Vec<Value> = explicit.iter().map(|(a, b)| json!({"source": a, "target": b, "auto": false})).collect();
+                    cols.extend(auto.iter().filter(|(t, _, _)| *t == n1).map(|(_, a, b)| json!({"source": a, "target": b, "auto": true})));
+                    tables.push(json!({"source": n1, "target": n2, "user": mapping.is_some(), "columns": cols,
+                        "sourceColumns": columns_of(&db1, &n1), "targetColumns": columns_of(&db2, &n2)}));
+                }
+                None => alone.push(n1),
+            }
+        }
+        only1 = alone;
+        only2 = db2.tables.iter().enumerate().filter(|(j, t)| !matched[*j] && !t.history_table).map(|(_, t)| t.object_name()).collect();
+    }
+    Ok(json!({
+        "owners": {"mapped": owners, "only1": owners1, "only2": owners2},
+        "tables": {"mapped": tables, "only1": only1, "only2": only2},
+    }))
 }
 
 /// The `data_rows` kind that lists every stored row.
@@ -1287,6 +1410,29 @@ mod tests {
         handle(&mut state, &json!({"op": "project_export", "path": scp, "project": filtered_project}), &none).unwrap();
         let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
         assert!(back["filter"].as_str().unwrap().contains("Cust%"));
+
+        // Mapping tabs: the default pairs, then a user mapping and an unmapped default pair.
+        let m = handle(&mut state, &json!({"op": "mapping_preview", "project": project}), &none).unwrap();
+        assert_eq!(m["tables"]["mapped"].as_array().unwrap().len(), 1, "{m}");
+        assert_eq!(m["tables"]["mapped"][0]["user"], false);
+        assert_eq!(m["tables"]["only1"][0]["name"], "Customer");
+        let mut remapped = project.clone();
+        remapped["schemaMappings"] = json!({"tables": [
+            {"source": {"schema": "dbo", "name": "Customer"}, "target": {"schema": "dbo", "name": "Customers"}},
+            {"source": {"schema": "dbo", "name": "Orders"}, "target": {"schema": "", "name": ""}},
+        ]});
+        let m = handle(&mut state, &json!({"op": "mapping_preview", "project": remapped}), &none).unwrap();
+        assert_eq!(m["tables"]["mapped"][0]["target"]["name"], "Customers");
+        assert_eq!(m["tables"]["mapped"][0]["user"], true);
+        assert_eq!((m["tables"]["only1"][0]["name"].as_str(), m["tables"]["only2"][0]["name"].as_str()), (Some("Orders"), Some("Orders")));
+        let r = handle(&mut state, &json!({"op": "schema_compare", "project": remapped}), &none).unwrap();
+        let kinds: Vec<&str> = r["differences"].as_array().unwrap().iter().filter(|d| d["name"] == "Orders").map(|d| d["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["OnlyIn1", "OnlyIn2"]);
+        handle(&mut state, &json!({"op": "project_export", "path": scp, "project": remapped}), &none).unwrap();
+        let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
+        let tables = back["schemaMappings"]["tables"].as_array().unwrap();
+        assert!(tables.iter().any(|t| t["source"]["name"] == "Customer" && t["target"]["name"] == "Customers"), "{back}");
+        assert!(tables.iter().any(|t| t["source"]["name"] == "Orders" && t["target"]["name"] == ""), "{back}");
         std::fs::remove_dir_all(dir).ok();
     }
 

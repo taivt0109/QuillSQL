@@ -1146,6 +1146,9 @@ impl<'a> Comparer<'a> {
         if a.kind == "APPLICATION_ROLE" && b.kind == "APPLICATION_ROLE" {
             d.opt_prop("Default schema", a.default_schema.as_deref(), b.default_schema.as_deref());
         }
+        if !a.is_role() && !o.has(Opt::IgnorePermissions) {
+            d.prop("CONNECT", if a.no_connect { "Revoked" } else { "Granted" }, if b.no_connect { "Revoked" } else { "Granted" });
+        }
         if a.is_role() && !o.has(Opt::IgnoreOwners) && !o.has(Opt::IgnoreSchemaObjectAuthorization) {
             d.opt_prop("Owner", a.owner.as_deref(), b.owner.as_deref());
         }
@@ -1251,7 +1254,7 @@ impl<'a> Comparer<'a> {
                                 p.schema.as_deref().is_some_and(|x| self.same_name(x, s))
                                     && p.object.as_deref().is_some_and(|o| self.same_name(o, name))
                             }
-                            _ => false,
+                            (_, None) => p.schema.is_none() && p.object.as_deref().is_some_and(|o| self.same_name(o, name)),
                         }
                 })
                 .collect::<Vec<_>>()

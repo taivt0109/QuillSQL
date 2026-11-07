@@ -563,7 +563,7 @@ pub fn object_scripts(db: &Database, info: &FolderInfo, o: &Options) -> Vec<(Obj
         }
     }
     for t in db.ddl_triggers.iter().filter(|t| !t.definition.is_empty()) {
-        out.push(((FileKind::DdlTrigger, String::new(), t.name.clone()), script::ddl_trigger(t)));
+        out.push(((FileKind::DdlTrigger, String::new(), t.name.clone()), super::objects::ddl_trigger_file(db, t, o)));
     }
     out.extend(super::objects::object_files(db, o));
     out

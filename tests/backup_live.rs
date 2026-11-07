@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use quillsql::catalog;
-use quillsql::data::compare::{Side, compare_sides};
+use quillsql::data::compare::{RowSource as Side, compare_sources as compare_sides};
 use quillsql::data::mapping::DataMappings;
 use quillsql::data::store::RowKind;
 use quillsql::data::DataOptions;

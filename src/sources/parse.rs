@@ -2254,8 +2254,16 @@ impl Builder {
             grantees.push(c.ident()?);
         }
         let with_grant = c.eat_seq(&["WITH", "GRANT", "OPTION"]);
-        // CONNECT comes with CREATE USER.
-        perms.retain(|x| !(p.class == "DATABASE" && x == "CONNECT"));
+        // CONNECT comes with CREATE USER: a plain GRANT or a REVOKE only says whether the user
+        // still has it.
+        if p.class == "DATABASE" && perms.iter().any(|x| x == "CONNECT") && (verb == "REVOKE" || (verb == "GRANT" && !with_grant)) {
+            for g in &grantees {
+                if let Some(u) = self.db.principals.iter_mut().find(|u| u.name.eq_ignore_ascii_case(g) && !u.is_role()) {
+                    u.no_connect = verb == "REVOKE";
+                }
+            }
+            perms.retain(|x| x != "CONNECT");
+        }
         let state = match verb.as_str() {
             "DENY" => "DENY",
             _ if with_grant => "GRANT_WITH_GRANT_OPTION",
@@ -2352,6 +2360,11 @@ impl Builder {
                             p.minor_type = Some(t2);
                             p.minor_name = Some(n2);
                         }
+                    }
+                    // Database-wide objects: assemblies, Service Broker objects, DDL triggers…
+                    (Some(t0), None) if t0 != "USER" && t0 != "FILEGROUP" && t0 != "PLAN GUIDE" => {
+                        p.class = t0.to_string();
+                        p.object = n0;
                     }
                     _ => return c.fail(MessageKind::IgnoredStatement),
                 }
@@ -3002,5 +3015,29 @@ CREATE TABLE Sales.[Order] (a int)\nGO\n",
         assert!(looks_system_named("DF__Customer__Create__3D5E1FD2"));
         assert!(looks_system_named("PK__TT_IdLis__3214EC07019F7773"));
         assert!(!looks_system_named("PK_Customer"));
+    }
+
+    #[test]
+    fn connect_round_trips() {
+        use crate::schema::{Opt, Options};
+        let mut db = Database::default();
+        for (name, no_connect) in [("Plain", false), ("NoConnect", true)] {
+            db.principals.push(Principal { name: name.into(), kind: "SQL_USER".into(), no_connect, ..Default::default() });
+        }
+        for o in [Options::default_set(), Options::default_set().with(Opt::WriteAsDataToolsPermissions)] {
+            let texts: Vec<String> = db.principals.iter().map(|p| super::super::script::user(&db, p, &o)).collect();
+            let data_tools = o.has(Opt::WriteAsDataToolsPermissions);
+            assert_eq!(texts[0].contains("GRANT CONNECT TO [Plain]"), data_tools);
+            assert_eq!(texts[1].contains("REVOKE CONNECT TO [NoConnect]"), !data_tools);
+            let files: Vec<(String, &str)> = texts.iter().enumerate().map(|(i, t)| (format!("u{i}.sql"), t.as_str())).collect();
+            let files: Vec<(&str, &str)> = files.iter().map(|(n, t)| (n.as_str(), *t)).collect();
+            let r = read(&files);
+            assert!(r.messages.is_empty(), "{:?}", r.messages);
+            let back: Vec<(&str, bool)> = r.database.principals.iter().map(|p| (p.name.as_str(), p.no_connect)).collect();
+            // Read back, a user is connected unless revoked: Data Tools style loses NoConnect,
+            // as in SQL Compare.
+            assert_eq!(back, [("NoConnect", !data_tools), ("Plain", false)]);
+            assert!(r.database.permissions.is_empty());
+        }
     }
 }
