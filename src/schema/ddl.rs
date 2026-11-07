@@ -330,8 +330,10 @@ fn kind_words(ix: &Index) -> &'static str {
 fn fields(ix: &Index) -> String {
     let mut s = String::new();
     if is_columnstore(ix) {
-        if ix.kind != IndexKind::ClusteredColumnstore && !ix.columns.is_empty() {
-            s.push_str(&format!(" ({})", ix.columns.iter().map(|c| quote(&c.name)).collect::<Vec<_>>().join(", ")));
+        // The catalog lists a nonclustered columnstore index's columns as included ones.
+        let cols: Vec<String> = ix.columns.iter().map(|c| quote(&c.name)).chain(ix.included.iter().map(|c| quote(c))).collect();
+        if ix.kind != IndexKind::ClusteredColumnstore && !cols.is_empty() {
+            s.push_str(&format!(" ({})", cols.join(", ")));
         }
         return s;
     }

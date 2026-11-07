@@ -23,6 +23,7 @@ use crate::catalog::*;
 use crate::db::{literal, quote};
 
 mod objects;
+mod rename;
 mod unbind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -80,6 +81,8 @@ enum Phase {
     PreFullText,
     PreTransaction,
     DisableDdlTriggers,
+    /// Tables paired under another name are renamed before anything else uses them.
+    RenameTables,
     CreatePrincipals,
     RoleMembers,
     /// External tables, data sources and file formats (ranked in that order).
@@ -133,6 +136,8 @@ enum Phase {
     /// Tables (with their indexes), views, functions, procedures, synonyms, Service Broker
     /// objects and security policies, dependencies first.
     CreateObjects,
+    /// sp_refreshview of views on changed tables and views, dependencies first.
+    RefreshViews,
     /// SET (SYSTEM_VERSIONING = ON …) once the table has its primary key again.
     Versioning,
     BindColumns,
@@ -197,11 +202,29 @@ pub fn generate(
     settings: &ScriptSettings,
 ) -> Result<DeploymentScript, String> {
     opts.validate()?;
+    let renames = rename::table_renames(comparison, source, target, opts, mappings);
+    if renames.is_empty() {
+        return Ok(plan_script(comparison, source, target, opts, mappings, settings, renames));
+    }
+    let (comparison, target) = rename::after_renames(comparison, target, &renames);
+    Ok(plan_script(&comparison, source, &target, opts, mappings, settings, renames))
+}
+
+fn plan_script(
+    comparison: &Comparison,
+    source: &Database,
+    target: &Database,
+    opts: &Options,
+    mappings: &Mappings,
+    settings: &ScriptSettings,
+    renames: Vec<rename::TableRename>,
+) -> DeploymentScript {
     let prepared = unbind::prepare(comparison, source, target, opts);
     let mut p = Planner::new(comparison, source, target, opts, mappings, settings);
     p.prepared = &prepared;
+    p.renames = renames;
     p.plan();
-    Ok(p.emit())
+    p.emit()
 }
 
 /// A leftover table of an earlier rebuild that failed half way: `RG_Recovery_<n>_…` (and
@@ -238,6 +261,9 @@ struct Planner<'a> {
     dropped_sub: HashSet<(ObjectName, String)>,
     /// Source modules that will be created (rather than altered).
     recreate: BTreeSet<ObjectName>,
+    /// Tables whose columns change and views that are altered (target names): views that use
+    /// them without schema binding are refreshed.
+    altered: BTreeSet<ObjectName>,
     /// Foreign keys already added: (table, name).
     added_fks: HashSet<(ObjectName, String)>,
     /// Column bindings already removed: (table, column, rule).
@@ -252,6 +278,7 @@ struct Planner<'a> {
     object_filegroups: BTreeSet<String>,
     objects: objects::State,
     prepared: &'a unbind::Prepared,
+    renames: Vec<rename::TableRename>,
 }
 
 impl<'a> Planner<'a> {
@@ -296,6 +323,7 @@ impl<'a> Planner<'a> {
             dropped: HashSet::new(),
             dropped_sub: HashSet::new(),
             recreate: BTreeSet::new(),
+            altered: BTreeSet::new(),
             added_fks: HashSet::new(),
             unbound: HashSet::new(),
             case_sensitive: opts.has(Opt::CaseSensitiveObjectDefinition),
@@ -306,6 +334,7 @@ impl<'a> Planner<'a> {
             object_filegroups: BTreeSet::new(),
             objects: objects::State::default(),
             prepared: &unbind::NOTHING,
+            renames: Vec::new(),
         }
     }
 
@@ -380,6 +409,7 @@ impl<'a> Planner<'a> {
     fn plan(&mut self) {
         let selected = self.selected();
         self.ddl_triggers();
+        self.rename_tables();
         self.unbind_by_rebuild();
         for d in &selected {
             match d.object_type {
@@ -401,6 +431,7 @@ impl<'a> Planner<'a> {
         }
         self.finish_objects();
         self.dependants(&selected);
+        self.refresh_views();
         self.extended_properties(&selected);
         self.permissions(&selected);
         self.deployment_warnings();
@@ -698,6 +729,9 @@ impl<'a> Planner<'a> {
                     };
                     let sql = self.module_statement(&d.name, s, Check::Alter, &sql);
                     self.module_step(Phase::CreateObjects, format!("Altering {}", d.name), vec![sql], s.settings());
+                    if matches!(s, Module::View(_)) {
+                        self.altered.insert(tn.clone());
+                    }
                     // ALTER VIEW removes the view's indexes.
                     if let Module::View(v) = s {
                         self.view_indexes(&d.name, v);
@@ -800,13 +834,18 @@ impl<'a> Planner<'a> {
                     continue;
                 }
                 let Some(t) = self.target_module(&dep) else { continue };
-                if !include && !selected.iter().any(|d| self.target_name(d) == dep) {
+                let chosen = selected.iter().any(|d| self.target_name(d) == dep);
+                if !include && !chosen {
                     missing.entry(n.clone()).or_default().push(dep.clone());
                     continue;
                 }
                 queue.push(dep.clone());
                 if self.dropped.contains(&dep) {
                     continue;
+                }
+                // Brought back as it is, it may no longer fit what it is bound to.
+                if !chosen {
+                    self.warn(warn::rebind_might_fail(&dep.to_string()));
                 }
                 self.drop_module(&dep, t);
                 // Bring it back from the source, unless the comparison already creates or drops it.
@@ -819,6 +858,35 @@ impl<'a> Planner<'a> {
         for (owner, objects) in missing {
             let list = objects.iter().map(|o| o.to_string()).collect::<Vec<_>>().join("\r\n");
             self.warn(warn::strong_dependencies(&owner.to_string(), &list));
+        }
+    }
+
+    /// sp_refreshview for target views that are kept as they are but read (directly, through a
+    /// synonym or through another refreshed view) something whose columns change: a view that
+    /// is not schema-bound keeps its old column list otherwise.
+    fn refresh_views(&mut self) {
+        let mut queue: Vec<ObjectName> = self.altered.iter().cloned().collect();
+        let mut seen: HashSet<ObjectName> = queue.iter().cloned().collect();
+        while let Some(n) = queue.pop() {
+            let users: Vec<ObjectName> = self.tgt_deps.iter().filter(|d| !d.strong && d.to == n).map(|d| d.from.clone()).collect();
+            for u in users {
+                if !seen.insert(u.clone()) {
+                    continue;
+                }
+                if self.tgt.synonyms.iter().any(|s| s.schema == u.schema && s.name == u.name) {
+                    queue.push(u);
+                    continue;
+                }
+                let Some(v) = self.tgt.views.iter().find(|v| v.schema == u.schema && v.name == u.name) else { continue };
+                let kept = self.src.views.iter().any(|s| s.schema == u.schema && s.name == u.name)
+                    && !self.cmp.differences.iter().any(|d| d.object_type == ObjectType::View && d.kind != DiffKind::Equal && self.target_name(d) == u);
+                if v.schema_bound || v.encrypted || !kept || self.dropped.contains(&u) || self.recreate.contains(&u) {
+                    continue;
+                }
+                let sql = self.ex.module(&u, "V", Check::Drop, &format!("EXEC sp_refreshview {}", literal(&u.quoted())));
+                self.ranked(Phase::RefreshViews, format!("Refreshing {u}"), &u, vec![sql]);
+                queue.push(u);
+            }
         }
     }
 
@@ -1566,6 +1634,9 @@ impl<'a> Planner<'a> {
         let computed: Vec<&Column> = computed_adds.iter().chain(recompute.iter()).copied().collect();
         statements.extend(add_list(self, &computed));
         statements.extend(period_change.1);
+        if !statements.is_empty() {
+            self.altered.insert(name.clone());
+        }
         // Table options.
         if !o.has(Opt::IgnoreDataCompression) && s.storage.compression != t.storage.compression {
             let c = s.storage.compression.first().map(|p| p.compression.as_str()).unwrap_or("NONE");
@@ -1885,6 +1956,7 @@ impl<'a> Planner<'a> {
         let label = name.to_string();
         self.table_feature_warnings(s);
         self.disturbed.insert(old.clone());
+        self.altered.insert(old.clone());
         self.recreate.insert(name.clone());
         // A memory-optimized table goes through a disk-based copy: it can't be renamed, and its
         // keys and constraints can't be dropped one by one.
@@ -2010,6 +2082,13 @@ impl<'a> Planner<'a> {
             }
         }
         let tmp_q = tmp.quoted();
+        // Period columns the target does not have yet get their values from the period, so it
+        // goes on before the copy; otherwise after, as the copy writes the old period values.
+        let temporal = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal) && !memory_optimized);
+        let period_first = temporal.is_some_and(|x| !into.iter().any(|c| *c == quote(&x.period_start)) || !into.iter().any(|c| *c == quote(&x.period_end)));
+        if let Some(x) = temporal.filter(|_| period_first) {
+            statements.push(format!("ALTER TABLE {tmp_q} ADD PERIOD FOR SYSTEM_TIME ({}, {})", quote(&x.period_start), quote(&x.period_end)));
+        }
         // Bound defaults go on the new table before the copy, for NOT NULL columns that get no value.
         if !self.opts.has(Opt::IgnoreBindings) {
             for c in &s.columns {
@@ -2066,8 +2145,10 @@ impl<'a> Planner<'a> {
                 statements.push(ddl::drop_constraint(&name.quoted(), temp));
                 statements.push(ddl::add_default(&name.quoted(), column, real));
             }
-            if let Some(x) = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal)) {
-                statements.push(format!("ALTER TABLE {} ADD PERIOD FOR SYSTEM_TIME ({}, {})", name.quoted(), quote(&x.period_start), quote(&x.period_end)));
+            if let Some(x) = temporal {
+                if !period_first {
+                    statements.push(format!("ALTER TABLE {} ADD PERIOD FOR SYSTEM_TIME ({}, {})", name.quoted(), quote(&x.period_start), quote(&x.period_end)));
+                }
                 for c in s.columns.iter().filter(|c| c.hidden) {
                     statements.push(format!("ALTER TABLE {} ALTER COLUMN {} ADD HIDDEN", name.quoted(), quote(&c.name)));
                 }
@@ -2416,6 +2497,7 @@ impl<'a> Planner<'a> {
             let Some(name) = step.object.clone().or_else(|| step_object(&step.print)) else { continue };
             match step.phase {
                 Phase::CreateObjects => step.rank = *order_src.get(&name).unwrap_or(&usize::MAX),
+                Phase::RefreshViews => step.rank = *order_tgt.get(&name).unwrap_or(&usize::MAX),
                 // Dependants are dropped first.
                 Phase::DropObjects => step.rank = usize::MAX - order_tgt.get(&name).copied().unwrap_or(0),
                 _ => {}

@@ -1052,11 +1052,13 @@ impl<'a> Planner<'a> {
         match (&s.temporal, &t.temporal) {
             (Some(x), None) => {
                 self.retention_warning(s);
+                self.create_history(s);
                 self.step(Phase::Versioning, "", vec![format!("ALTER TABLE {name} SET ({})", ddl::system_versioning(x, &self.r))]);
             }
             (None, Some(y)) => self.drop_old_history(&y.history_table),
             (Some(x), Some(y)) => {
                 if was_switched_off {
+                    self.create_history(s);
                     self.step(Phase::Versioning, "", vec![format!("ALTER TABLE {name} SET ({})", ddl::system_versioning(x, &self.r))]);
                     if self.key(&x.history_table.to_string()) != self.key(&y.history_table.to_string()) {
                         self.drop_old_history(&y.history_table);
@@ -1071,6 +1073,24 @@ impl<'a> Planner<'a> {
             }
             (None, None) => {}
         }
+    }
+
+    /// The source's history table of a table that becomes system-versioned (or changes history
+    /// table), when the target does not have it: SQL Server would make one without its indexes.
+    pub(super) fn create_history(&mut self, s: &'a Table) {
+        let src = self.src;
+        let Some(x) = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal)) else { return };
+        let Some(h) = src.table(&x.history_table.schema, &x.history_table.name) else { return };
+        if self.tgt.table(&h.schema, &h.name).is_some() {
+            return;
+        }
+        let name = h.object_name();
+        let mut statements = vec![ddl::create_table_with(h, None, false, &self.r)];
+        for ix in &h.indexes {
+            statements.extend(ddl::create_index_with(&name.quoted(), ix, &self.r, &Host::of_table(h)));
+        }
+        self.recreate.insert(name.clone());
+        self.module_step(Phase::CreateObjects, format!("Creating {name}"), statements, &ModuleSettings::default());
     }
 
     fn drop_old_history(&mut self, h: &ObjectName) {
@@ -1108,6 +1128,7 @@ impl<'a> Planner<'a> {
         }
         if let Some(x) = s.temporal.as_ref().filter(|_| self.has(Feature::Temporal)) {
             self.retention_warning(s);
+            self.create_history(s);
             self.step(Phase::Versioning, "", vec![format!("ALTER TABLE {name} SET ({})", ddl::system_versioning(x, &self.r))]);
         }
     }
