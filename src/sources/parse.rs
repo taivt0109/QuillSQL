@@ -1309,6 +1309,7 @@ impl Builder {
                 ix.filter = Some(paren(c.text(a, b)));
             }
             self.index_tail(c, &mut ix)?;
+            columnstore_columns(&mut ix);
             return Ok(Constraint::Key(ix));
         }
         c.syntax()
@@ -1745,6 +1746,7 @@ impl Builder {
             ix.filter = Some(paren(c.text(a, b)));
         }
         self.index_tail(c, &mut ix)?;
+        columnstore_columns(&mut ix);
         if matches!(ix.kind, IndexKind::ClusteredColumnstore | IndexKind::NonclusteredColumnstore) && ix.storage.compression.is_empty() {
             ix.storage.compression = vec![PartitionCompression { partition: 0, compression: "COLUMNSTORE".into() }];
         }
@@ -2200,6 +2202,9 @@ impl Builder {
                         _ => RoutineKind::ClrTableFunction,
                     };
                     self.clr_signature(&definition, &mut r);
+                    // The SET statements SQL Compare writes before a CLR module (both OFF) are
+                    // not its settings: the catalog has none for it.
+                    r.settings = ModuleSettings::default();
                 } else if !r.encrypted {
                     r.definition = definition;
                 }
@@ -2619,8 +2624,13 @@ impl Builder {
             if t.memory_optimized {
                 t.storage = Storage::default();
                 t.text_filegroup = None;
+                // What the catalog shows for what SQL Compare leaves out: the default
+                // durability, and no row or page locks on the indexes.
+                t.durability.get_or_insert_with(|| "SCHEMA_AND_DATA".into());
                 for ix in &mut t.indexes {
                     ix.storage = Storage::default();
+                    ix.allow_row_locks = false;
+                    ix.allow_page_locks = false;
                 }
             }
             for ck in &mut t.check_constraints {
@@ -3016,6 +3026,15 @@ fn dependencies(db: &Database) -> Vec<Dependency> {
         }
     }
     deps.into_iter().map(|((from, to), strong)| Dependency { from, to, strong }).collect()
+}
+
+/// The columns of a nonclustered columnstore index are included columns, as the catalog lists
+/// them (it has no key columns).
+fn columnstore_columns(ix: &mut Index) {
+    if ix.kind == IndexKind::NonclusteredColumnstore && !ix.columns.is_empty() {
+        let keys = std::mem::take(&mut ix.columns);
+        ix.included.splice(0..0, keys.into_iter().map(|k| k.name));
+    }
 }
 
 #[cfg(test)]

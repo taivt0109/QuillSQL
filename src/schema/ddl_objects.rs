@@ -11,6 +11,7 @@ fn owner_or_dbo(o: &Option<String>) -> String {
 
 /// `0x…` with a line continuation after every 128 bytes.
 pub fn hex_literal(hex: &str) -> String {
+    let hex = hex.to_ascii_lowercase();
     let mut out = String::with_capacity(hex.len() + hex.len() / 128 + 4);
     out.push_str("0x");
     let chunks: Vec<&str> = hex.as_bytes().chunks(256).map(|c| std::str::from_utf8(c).unwrap_or_default()).collect();
@@ -19,6 +20,10 @@ pub fn hex_literal(hex: &str) -> String {
         if i + 1 < chunks.len() {
             out.push_str("\\\r\n");
         }
+    }
+    // SQL Compare ends an image of a whole number of 128-byte lines with a line break.
+    if !hex.is_empty() && hex.len().is_multiple_of(256) {
+        out.push_str("\r\n");
     }
     out
 }
@@ -44,7 +49,7 @@ pub fn create_assembly(a: &Assembly) -> Vec<String> {
 }
 
 pub fn add_assembly_file(assembly: &str, f: &AssemblyFile) -> String {
-    format!("ALTER ASSEMBLY {}\r\nADD FILE FROM\r\n{}\r\nAS {}", quote(assembly), hex_literal(&f.content), literal(&f.name))
+    format!("ALTER ASSEMBLY {}\r\nADD FILE FROM\r\n{}\r\nAS '{}'", quote(assembly), hex_literal(&f.content), f.name)
 }
 
 /// ALTER ASSEMBLY for a new binary and/or new options; None when neither changes.
@@ -523,10 +528,10 @@ pub fn alter_route(r: &Route, t: &Route) -> Option<String> {
 
 pub fn create_service_binding(b: &ServiceBinding) -> String {
     format!(
-        "CREATE REMOTE SERVICE BINDING {}\r\nAUTHORIZATION {}\r\nTO SERVICE {}\r\nWITH USER ={},\r\nANONYMOUS = {}",
+        "CREATE REMOTE SERVICE BINDING {}\r\nAUTHORIZATION {}\r\nTO SERVICE '{}'\r\nWITH USER ={},\r\nANONYMOUS = {}",
         quote(&b.name),
         owner_or_dbo(&b.owner),
-        literal(&b.remote_service),
+        b.remote_service,
         quote(&b.user),
         on_off(b.anonymous)
     )
@@ -551,14 +556,14 @@ fn notification_target(e: &EventNotification) -> String {
 }
 
 pub fn create_event_notification(e: &EventNotification) -> String {
-    let instance = if e.broker_instance.is_empty() { String::new() } else { format!(", {}", literal(&e.broker_instance)) };
+    let instance = if e.broker_instance.is_empty() { String::new() } else { format!(", '{}'", e.broker_instance) };
     format!(
-        "CREATE EVENT NOTIFICATION {}\r\nON {}{}\r\nFOR {}\r\nTO SERVICE {}{instance}",
+        "CREATE EVENT NOTIFICATION {}\r\nON {}{}\r\nFOR {}\r\nTO SERVICE '{}'{instance}",
         quote(&e.name),
         notification_target(e),
         if e.fan_in { " WITH FAN_IN" } else { "" },
         e.events.join(", "),
-        literal(&e.service)
+        e.service
     )
 }
 
@@ -835,7 +840,7 @@ mod tests {
     fn hex_wraps_every_128_bytes() {
         let hex = "AB".repeat(130);
         let s = hex_literal(&hex);
-        assert!(s.starts_with("0xABAB") && s.contains("\\\r\n"));
+        assert!(s.starts_with("0xabab") && s.contains("\\\r\n"));
         assert_eq!(s.matches("\\\r\n").count(), 1);
         assert!(!hex_literal(&"AB".repeat(128)).contains('\\'));
     }
