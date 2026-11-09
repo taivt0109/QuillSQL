@@ -37,7 +37,9 @@ JOIN sys.objects rt ON rt.object_id = fk.referenced_object_id
 JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
 JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
 ORDER BY fk.object_id, fkc.constraint_column_id;
-SELECT name FROM sys.servers WHERE is_linked = 1 ORDER BY name;";
+-- Azure SQL Database has no sys.servers (nor linked servers): an empty list there.
+IF OBJECT_ID('sys.servers') IS NOT NULL EXEC('SELECT name FROM sys.servers WHERE is_linked = 1 ORDER BY name');
+ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
 
         /// <summary>The databases on each connection's server, by connection key, once its metadata is read.</summary>
         public static readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<string>> Databases =
