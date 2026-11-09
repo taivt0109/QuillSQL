@@ -303,9 +303,15 @@ pub fn run(opts: &Options) -> std::io::Result<()> {
         let reply = match serde_json::from_str::<Value>(line) {
             Ok(request) => {
                 let id = request["id"].clone();
-                match handle(&request, &mut state) {
-                    Ok(result) => json!({ "id": id, "result": result }),
-                    Err(error) => json!({ "id": id, "error": error }),
+                // A bug in one request (a panic) answers that request with an error; the engine
+                // and the metadata it holds stay up for the next one.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(&request, &mut state))) {
+                    Ok(Ok(result)) => json!({ "id": id, "result": result }),
+                    Ok(Err(error)) => json!({ "id": id, "error": error }),
+                    Err(panic) => {
+                        let what = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
+                        json!({ "id": id, "error": format!("internal error in {}: {what}", request["op"].as_str().unwrap_or("?")) })
+                    }
                 }
             }
             Err(e) => json!({ "id": null, "error": format!("invalid request: {e}") }),

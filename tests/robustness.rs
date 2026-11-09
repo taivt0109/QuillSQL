@@ -29,6 +29,7 @@ fn no_panic_at_any_caret_position_while_typing() {
         "select cast(1 as decimal(10, 2)), convert(nvarchar(20), getdate(), 120), row_number() over (partition by c.Name order by c.CustomerId) from dbo.Customers c group by c.Name having count(*) > 1 union all select 1, 2, 3 except select 1, 2, 3",
         "create procedure dbo.q @Id int, @Out int output as begin set nocount on; select case when @Id is not null then 1 else 0 end; end\nGO\ndrop table if exists #t; truncate table dbo.Customers",
         "select 'unterminated, [also (open \n -- comment ( , \n /* block ( ",
+        "insert into dbo.Customers (Name) values ('a'); insert dbo.Customers default values; insert into #t select * from dbo.Customers; update dbo.Customers set Name = null where 1 = 0; delete from dbo.Customers where CustomerId = 1;",
     ];
     for script in scripts {
         for (end, _) in script.char_indices().chain(std::iter::once((script.len(), ' '))) {
@@ -38,6 +39,10 @@ fn no_panic_at_any_caret_position_while_typing() {
             let _ = complete_across(script, caret, Some(&s), &[&other], &[], Default::default());
             let _ = signature_at(prefix, caret, Some(&s));
             let _ = signature_at(script, caret, Some(&s));
+            // Code analysis runs on what is typed so far too (`INSERT ` alone once panicked).
+            let _ = quillsql::analysis::analyze(prefix, Some(&s));
+            let _ = quillsql::tools::keyword_before(prefix, caret, Some(' '));
+            let _ = quillsql::tools::keyword_before(prefix, caret, Some('('));
         }
     }
 }

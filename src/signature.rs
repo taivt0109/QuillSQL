@@ -90,9 +90,12 @@ fn call(code: &[&Token], o: usize, commas: usize, schema: Option<&Schema>) -> Op
 /// the argument names it (`@Id = `), else by position.
 fn exec(code: &[&Token], touching: bool, schema: Option<&Schema>) -> Option<Signature> {
     let schema = schema?;
-    let start = code.iter().rposition(|t| t.kind == Kind::Word && matches!(t.text.to_ascii_uppercase().as_str(), "EXEC" | "EXECUTE"))?;
-    // Only within that statement: no statement keyword after EXEC.
-    let mut j = start + 1;
+    // After EXEC, or a procedure starting the statement without it (`sp_helptext 'dbo.t'`, as
+    // the first statement of a batch may).
+    let mut j = match code.iter().rposition(|t| t.kind == Kind::Word && matches!(t.text.to_ascii_uppercase().as_str(), "EXEC" | "EXECUTE")) {
+        Some(start) => start + 1,
+        None => code.iter().rposition(|t| matches!(t.kind, Kind::Semi | Kind::Go)).map_or(0, |i| i + 1),
+    };
     // `EXEC @result = name`
     if j + 1 < code.len() && code[j].kind == Kind::Variable && code[j + 1].text == "=" {
         j += 2;

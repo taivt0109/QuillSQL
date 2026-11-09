@@ -23,7 +23,7 @@ namespace QuillSql.Vsix
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.4.10";
+        public const string Version = "0.4.11";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
@@ -229,15 +229,15 @@ namespace QuillSql.Vsix
             MetadataCache.Clear();
             ObjectScripts.ClearCache();
             Log.Write("suggestion metadata cleared");
-            // Read the active window's database again now rather than on the next keystroke.
+            // Read the active window's database again now, saying on the status bar when it is done.
             var target = ConnectionResolver.TryGetActive();
-            if (target != null)
+            if (target?.CanQuery == true)
             {
-                MetadataCache.EnsureLoaded(target);
+                MetadataCache.Refresh(target);
             }
-            if (GetService(typeof(DTE)) is DTE dte)
+            else
             {
-                dte.StatusBar.Text = "QuillSQL: reloading suggestions" + (target == null ? " on next use." : " for " + target.Description + "...");
+                EditorContext.Status("suggestions will reload when a query window is connected.");
             }
         }
 

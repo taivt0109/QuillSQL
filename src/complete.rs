@@ -1784,6 +1784,19 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                     for kw in words {
                         items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
                     }
+                    // Where a statement starts, a procedure can too, without EXEC (`sp_who2`, as the
+                    // first statement of a batch may): the database's own and the system ones.
+                    if !prefix.is_empty() && words.contains(&"EXEC") {
+                        for o in meta.objects.iter().filter(|o| o.kind == "procedure" && o.database.is_empty()) {
+                            let mut item = object_item(o, meta, false);
+                            if eq(&o.schema, "sys") {
+                                item.insert = quote(&o.name);
+                            } else if qualify && !o.schema.is_empty() {
+                                item.insert = format!("{}.{}", quote(&o.schema), quote(&o.name));
+                            }
+                            items.push(item);
+                        }
+                    }
                     if *variables {
                         for (name, ty) in a.declared_variables(prefix_start) {
                             items.push(Item { label: name.clone(), insert: name, kind: "variable", detail: ty });

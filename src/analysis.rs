@@ -144,7 +144,7 @@ impl<'a> Checker<'a> {
 
     fn report(&mut self, code: &str, from: usize, to: usize, detail: Option<String>, fix: Option<(usize, usize, String, &str)>) {
         let (code, severity, title) = rule(code);
-        let start = self.u16(self.a.starts[from]);
+        let start = self.u16(self.a.starts.get(from).copied().unwrap_or_else(|| end_of(&self.a, from)));
         let end = self.u16(end_of(&self.a, to));
         let fix = fix.map(|(s, e, text, title)| Fix { title: title.to_string(), start: self.u16(s), end: self.u16(e), text });
         let message = match detail {
@@ -154,8 +154,13 @@ impl<'a> Checker<'a> {
         self.issues.push(Issue { code, severity, message, start, end, fix });
     }
 
+    /// The word at token `i` in upper case; empty for another kind of token or past the end (a
+    /// statement still being typed, such as `INSERT `).
     fn word(&self, i: usize) -> &str {
-        if self.a.tokens[i].kind == Kind::Word { &self.a.up[i] } else { "" }
+        match self.a.tokens.get(i) {
+            Some(t) if t.kind == Kind::Word => &self.a.up[i],
+            _ => "",
+        }
     }
 
     fn next_word(&self, i: usize) -> &str {

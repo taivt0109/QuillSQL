@@ -176,7 +176,7 @@ Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
 background the first time a database is used and follows `USE`. When tables, columns or other
 objects change, by you or anyone else, it reloads by itself: a light check runs at most once a
 minute while you type, and at once on Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D)
-reloads everything.
+reloads everything; the status bar says when it is done, with how many objects it read.
 
 The list also writes code:
 
@@ -207,7 +207,8 @@ SQL Server keeps no catalog of its built-in functions, so they come with QuillSQ
 (`src/data/functions.json`, about 190); add or change some in
 `%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int",
 "what": "..." }]`). The system procedures and functions (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`)
-and their parameters are read from the server, and are offered after `EXEC`. The descriptions
+and their parameters are read from the server, and are offered after `EXEC` and where a statement starts (a procedure may start a batch
+without `EXEC`). The descriptions
 people gave tables, columns, procedures and parameters (`MS_Description`) show beside the list.
 
 If SSMS closes without shutting down (a crash, a killed process), the next start offers to reopen

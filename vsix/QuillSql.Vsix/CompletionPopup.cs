@@ -173,25 +173,92 @@ namespace QuillSql.Vsix
         {
             _cardDelay.Stop();
             _cardVersion++;
-            var info = _showDefinition ? Selected?.Info : null;
-            _definitionText.Text = info ?? "";
-            ShowText();
-            _definition.Visibility = string.IsNullOrEmpty(info) ? Visibility.Collapsed : Visibility.Visible;
+            var item = _showDefinition ? Selected : null;
             // A table, view, procedure or function of the database: the same card as when the mouse
-            // rests on its name, at once when it was read lately, else once the selection settles.
-            var name = CardName(Selected);
-            if (name == null)
+            // rests on its name, at once when it was read lately, else its title while it is read.
+            var name = CardName(item);
+            if (name != null)
             {
+                var cached = ObjectScripts.Cached(_target, name);
+                if (cached != null)
+                {
+                    ShowCard(cached);
+                    return;
+                }
+                var dot = name.IndexOf('.');
+                Show(ObjectScripts.Loading(name.Substring(0, dot), name.Substring(dot + 1), KindLabel(item.Kind)), true);
+                _cardDelay.Start();
                 return;
             }
-            var cached = ObjectScripts.Cached(_target, name);
-            if (cached != null)
+            ShowInfo(item);
+        }
+
+        /// <summary>
+        /// What the suggestion engine says about the item (a built-in function, a system procedure,
+        /// an object without a card), in the card's look: a kind badge, the name, then the text.
+        /// </summary>
+        private void ShowInfo(CompletionItem item)
+        {
+            var info = item?.Info;
+            if (string.IsNullOrEmpty(info))
             {
-                ShowCard(cached);
+                _definition.Visibility = Visibility.Collapsed;
+                return;
             }
-            else
+            var title = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            title.Children.Add(Theme.Badge(KindLabel(item.Kind), KindColor(item.Kind), 9.5));
+            title.Children.Add(new TextBlock { Text = item.Label, FontSize = 14, FontWeight = FontWeights.SemiBold, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            var body = new StackPanel { MinWidth = 300, MaxWidth = 500 };
+            body.Children.Add(title);
+            var lines = info.Replace("\r\n", "\n").Split('\n').ToList();
+            // "procedure sys.sp_who2 (...)": the badge already says what it is.
+            var kind = (item.Kind ?? "").Replace('_', ' ');
+            if (lines.Count > 0 && lines[0].StartsWith(kind + " ", StringComparison.OrdinalIgnoreCase))
             {
-                _cardDelay.Start();
+                lines[0] = lines[0].Substring(kind.Length + 1);
+            }
+            for (var i = 0; i < lines.Count; i++)
+            {
+                var line = lines[i];
+                if (line.Length == 0)
+                {
+                    body.Children.Add(new Border { Height = 6 });
+                    continue;
+                }
+                // The signature and the indented columns or parameters in the code font; the
+                // description as text.
+                var code = i == 0 || line.StartsWith("    ", StringComparison.Ordinal);
+                body.Children.Add(new TextBlock
+                {
+                    Text = code ? line.TrimEnd() : line.Trim(),
+                    FontFamily = code ? Theme.Mono : null,
+                    FontSize = 12,
+                    Opacity = line.StartsWith("returns ", StringComparison.Ordinal) ? 0.7 : 1,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 1, 0, 1),
+                });
+            }
+            Show(body, false);
+        }
+
+        private static string KindLabel(string kind)
+        {
+            switch (kind)
+            {
+                case "function": case "scalar_function": return "FUNCTION";
+                case "table_function": return "TABLE FUNCTION";
+                default: return (kind ?? "object").Replace('_', ' ').ToUpperInvariant();
+            }
+        }
+
+        private static Color KindColor(string kind)
+        {
+            switch (kind)
+            {
+                case "table": return Theme.Blue;
+                case "view": return Color.FromRgb(0x1E, 0x95, 0xA3);
+                case "procedure": case "function": case "scalar_function": case "table_function": return Theme.Purple;
+                default: return Theme.Slate;
             }
         }
 
@@ -237,26 +304,31 @@ namespace QuillSql.Vsix
                     Log.Verbose("card for " + name + ": " + ex.Message);
                 }
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                if (details != null && version == _cardVersion && _popup.IsOpen)
+                if (version != _cardVersion || !_popup.IsOpen)
+                {
+                    return;
+                }
+                // No details (a system object, no permission): what the engine knows instead.
+                if (details != null)
                 {
                     ShowCard(details);
+                }
+                else
+                {
+                    ShowInfo(Selected);
                 }
             }).FileAndForget("QuillSQL/CompletionCard");
         }
 
-        private void ShowCard(ObjectDetails details)
-        {
-            _definitionScroll.Content = new Border { Child = ObjectScripts.Card(details), Padding = new Thickness(10, 8, 10, 8) };
-            _definition.MaxWidth = 720;
-            _definition.MaxHeight = 440;
-            _definition.Visibility = Visibility.Visible;
-        }
+        private void ShowCard(ObjectDetails details) => Show(ObjectScripts.Card(details), true);
 
-        private void ShowText()
+        /// <summary>Puts `content` beside the list; a full card gets more room.</summary>
+        private void Show(UIElement content, bool card)
         {
-            _definitionScroll.Content = _definitionText;
-            _definition.MaxWidth = 460;
-            _definition.MaxHeight = 300;
+            _definitionScroll.Content = new Border { Child = content, Padding = new Thickness(10, 8, 10, 8) };
+            _definition.MaxWidth = card ? 720 : 540;
+            _definition.MaxHeight = card ? 440 : 320;
+            _definition.Visibility = Visibility.Visible;
         }
 
         /// <summary>Opens the list with `select` selected, or nothing selected when it is -1.</summary>

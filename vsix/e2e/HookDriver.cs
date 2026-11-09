@@ -136,8 +136,15 @@ static class HookDriver
             typed("", "exec sp_who"); list = Send("list"); Send("key|esc");
             Check("system procedures from the server after EXEC", list.Contains("sp_who2"), list);
 
+            typed("", "sp_who"); list = Send("list"); Send("key|esc");
+            Check("procedures where a statement starts, without EXEC", list.Contains("sp_who2"), list);
+            typed("", "select 1 from dbo.Customers c where c.Name = 'x' and sp_who"); list = Send("list"); Send("key|esc");
+            Check("no procedures inside an expression", !list.Contains("sp_who2"), list);
+
             Send("command|Tools.RefreshTSQLSuggestions");
-            Check("refresh command runs", true, "");
+            var status = "";
+            for (var i = 0; i < 40 && !status.Contains("refreshed"); i++) { Send("wait|500"); status = Send("status"); }
+            Check("refresh says when it is done", status.Contains("suggestions refreshed") && status.Contains("objects"), status);
 
             Send("wait|4000");
             var tabs = Send("tabs");

@@ -125,7 +125,16 @@ namespace QuillSql.Vsix
             _process.ErrorDataReceived += (s, e) => { if (!string.IsNullOrEmpty(e.Data)) Log.Write("engine: " + e.Data); };
             _process.BeginErrorReadLine();
             Log.Write("engine started, pid " + _process.Id);
+            // A new engine after one that stopped (a crash) has no metadata: load it again, or the
+            // suggestions stay empty until SSMS restarts.
+            if (++_starts > 1)
+            {
+                Log.Write("engine restarted; suggestions reload their metadata");
+                MetadataCache.Clear();
+            }
         }
+
+        private int _starts;
 
         private void Stop()
         {

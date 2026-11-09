@@ -598,3 +598,28 @@ fn descriptions_people_gave_objects_columns_and_parameters_are_shown() {
     let procedure = quillsql::info::describe_object(&s.objects[1]);
     assert!(procedure.contains("Moves a bin") && procedure.contains("@BinId: The bin to move"), "{procedure}");
 }
+
+#[test]
+fn procedures_where_a_statement_starts_without_exec() {
+    let s: Schema = serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo", "schemas": ["dbo", "sys"],
+        "objects": [
+            {"schema": "sys", "name": "sp_who2", "kind": "procedure", "params": [{"name": "@loginame", "type": "sysname"}]},
+            {"schema": "dbo", "name": "usp_Sync", "kind": "procedure"},
+            {"schema": "dbo", "name": "Customers", "kind": "table", "columns": [{"name": "Name", "type": "int"}]}
+        ]
+    }))
+    .unwrap();
+    let first = |sql: &str| {
+        let caret = sql.find('|').unwrap();
+        let text = sql.replace('|', "");
+        complete(&text, caret, Some(&s)).items.into_iter().next().map(|i| i.insert)
+    };
+    assert_eq!(first("sp_w|").as_deref(), Some("sp_who2"));
+    assert_eq!(first("select 1;\nusp|").as_deref(), Some("dbo.usp_Sync"));
+    // Not inside an expression.
+    assert_eq!(first("select * from dbo.Customers where sp_w|"), None);
+    let text = "sp_who2 ";
+    let sig = quillsql::signature::signature_at(text, text.len(), Some(&s)).expect("signature without EXEC");
+    assert_eq!(sig.params, vec!["@loginame sysname".to_string()]);
+}

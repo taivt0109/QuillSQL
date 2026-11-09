@@ -74,8 +74,11 @@ pub(crate) fn scope_sources(a: &Analysis, d: &[usize], stmt: (usize, usize), i: 
         .collect()
 }
 
+/// The byte after token `i`; past the last token, the end of the last one (a statement still
+/// being typed can point there).
 pub(crate) fn end_of(a: &Analysis, i: usize) -> usize {
-    a.starts[i] + a.tokens[i].text.len()
+    let i = i.min(a.tokens.len().saturating_sub(1));
+    a.tokens.get(i).map_or(0, |t| a.starts[i] + t.text.len())
 }
 
 /// The `SELECT` whose select list contains token `i`, if any.

@@ -170,6 +170,8 @@ namespace QuillSql.Vsix
                     await Task.Delay(3000);
                     return count.ToString();
                 }
+                case "status":
+                    return EditorContext.Dte?.StatusBar.Text ?? "";
                 case "tabs":
                     return TabColorizer.ColoredTabs.ToString();
                 case "command":

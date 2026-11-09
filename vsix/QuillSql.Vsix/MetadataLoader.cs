@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using Microsoft.Data.SqlClient;
+using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Threading;
 using System.Text;
 
 namespace QuillSql.Vsix
@@ -278,20 +280,26 @@ FROM sys.objects WHERE is_ms_shipped = 0;";
             return false;
         }
 
-        private static bool Load(ConnectionTarget target)
+        private static bool Load(ConnectionTarget target) => Load(target, out _, out _);
+
+        /// <summary>Reads the metadata and hands it to the engine; how many objects, or why not.</summary>
+        private static bool Load(ConnectionTarget target, out int count, out string problem)
         {
+            count = 0;
+            problem = null;
             try
             {
                 var started = DateTime.Now;
                 // Read before the metadata, so a change made while it loads is seen by the next check.
                 var stamp = Stamp(target);
-                var schema = MetadataLoader.Load(target, out var count);
+                var schema = MetadataLoader.Load(target, out count);
                 var loadedAt = DateTime.Now;
                 var reply = EngineProcess.Shared.Request("load", "\"key\":" + Json.Str(target.Key) + ",\"schema\":" + schema);
                 var error = reply == null ? "no reply" : Json.Parse<ErrorOnlyReply>(reply)?.Error;
                 if (error != null)
                 {
                     Log.Write("engine rejected metadata: " + error);
+                    problem = "the engine did not take the metadata (" + error + ")";
                     return false;
                 }
                 lock (Gate)
@@ -304,8 +312,53 @@ FROM sys.objects WHERE is_ms_shipped = 0;";
             catch (Exception ex)
             {
                 Log.Error("loading metadata for " + target.Description, ex);
+                problem = ex.Message;
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Refresh Suggestions: reads the window's database again now, with the status bar saying
+        /// it is reading and then how it went (how many objects, how long).
+        /// </summary>
+        public static void Refresh(ConnectionTarget target)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            lock (Gate)
+            {
+                State[target.Key] = "loading";
+            }
+            var dte = EditorContext.Dte;
+            try
+            {
+                dte?.StatusBar.Animate(true, EnvDTE.vsStatusAnimation.vsStatusAnimationSync);
+            }
+            catch (System.Runtime.InteropServices.COMException)
+            {
+            }
+            EditorContext.Status("refreshing suggestions for " + target.Description + "...");
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await System.Threading.Tasks.TaskScheduler.Default;
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var loaded = Load(target, out var count, out var problem);
+                lock (Gate)
+                {
+                    State[target.Key] = loaded ? "loaded" : "failed:" + DateTime.UtcNow.Ticks;
+                    Checked[target.Key] = DateTime.UtcNow;
+                }
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                try
+                {
+                    dte?.StatusBar.Animate(false, EnvDTE.vsStatusAnimation.vsStatusAnimationSync);
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+                EditorContext.Status(loaded
+                    ? "suggestions refreshed for " + target.Description + ": " + count + " objects in " + (watch.ElapsedMilliseconds / 1000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " s."
+                    : "suggestions could not be refreshed for " + target.Description + ": " + problem);
+            });
         }
 
         private static void CheckForChanges(ConnectionTarget target)

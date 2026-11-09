@@ -164,7 +164,7 @@ Từ khóa gõ bằng chữ thường được tự viết hoa khi gõ dấu cá
 
 Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách. Bên cạnh danh sách có ô hiện card của bảng, view, procedure hoặc function đang chọn, giống như khi rê chuột lên tên: số dòng, dung lượng, cột, index, partition và script. Phím nào dùng để chèn (Tab, Enter, Space, `.`, `,`, `(`) do bạn chọn trong Options.
 
-Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D) nạp lại toàn bộ.
+Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D) nạp lại toàn bộ; thanh trạng thái báo khi nào xong và đã đọc bao nhiêu object.
 
 Danh sách còn viết code giúp bạn:
 
@@ -181,7 +181,7 @@ Danh sách còn viết code giúp bạn:
 
 Khi gõ đối số của hàm hoặc procedure, một tooltip phía trên dòng hiện các tham số, tham số hiện tại in đậm (Esc để đóng).
 
-Bên cạnh danh sách gợi ý, hàm có sẵn hiện tham số, kiểu trả về và hàm đó làm gì. SQL Server không có danh mục nào chứa các hàm có sẵn, nên chúng đi kèm QuillSQL (`src/data/functions.json`, khoảng 190 hàm); thêm hoặc sửa trong `%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int", "what": "..." }]`). Procedure và hàm hệ thống (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`) cùng tham số được đọc từ server và gợi ý sau `EXEC`. Mô tả mà người dùng đặt cho bảng, cột, procedure và tham số (`MS_Description`) hiện bên cạnh danh sách.
+Bên cạnh danh sách gợi ý, hàm có sẵn hiện tham số, kiểu trả về và hàm đó làm gì. SQL Server không có danh mục nào chứa các hàm có sẵn, nên chúng đi kèm QuillSQL (`src/data/functions.json`, khoảng 190 hàm); thêm hoặc sửa trong `%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int", "what": "..." }]`). Procedure và hàm hệ thống (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`) cùng tham số được đọc từ server và gợi ý sau `EXEC` cũng như ở đầu câu lệnh (procedure có thể mở đầu batch mà không cần `EXEC`). Mô tả mà người dùng đặt cho bảng, cột, procedure và tham số (`MS_Description`) hiện bên cạnh danh sách.
 
 Nếu SSMS bị tắt ngang (crash, bị kill), lần mở sau sẽ hỏi có mở lại các cửa sổ query không, kèm nội dung và kết nối (không lưu mật khẩu). Tắt trong Options.
 
