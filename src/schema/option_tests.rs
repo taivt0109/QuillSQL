@@ -97,12 +97,12 @@ fn case(o: Opt) -> Case {
             view: true,
             marker: Some("FULLTEXT INDEX"),
         },
-        // Column definitions are shown as each side has them (IDENTITY, seed, NULL / NOT NULL).
-        Opt::IgnoreIdentityProperties => Ignore { change: |d| t(d).columns[0].identity = Some(identity("1")), base: nothing, view: false, marker: Some("IDENTITY") },
+        // Column definitions are shown as each side has them; the ignored parts do not make the line differ.
+        Opt::IgnoreIdentityProperties => Ignore { change: |d| t(d).columns[0].identity = Some(identity("1")), base: nothing, view: true, marker: Some("IDENTITY") },
         Opt::IgnoreIdentitySeedAndIncrement => Ignore {
             change: |d| t(d).columns[0].identity = Some(identity("100")),
             base: |d| t(d).columns[0].identity = Some(identity("1")),
-            view: false,
+            view: true,
             marker: Some("100"),
         },
         Opt::IgnoreIndexes => ignore(|d| t(d).indexes.push(index("IX_T_P")), Some("IX_T_P")),
@@ -120,7 +120,7 @@ fn case(o: Opt) -> Case {
             view: true,
             marker: Some("NOT FOR REPLICATION"),
         },
-        Opt::IgnoreNullability => Ignore { change: |d| t(d).columns[1].nullable = false, base: nothing, view: false, marker: Some("[P] [int] NOT NULL") },
+        Opt::IgnoreNullability => Ignore { change: |d| t(d).columns[1].nullable = false, base: nothing, view: true, marker: Some("[P] [int] NOT NULL") },
         Opt::IgnorePerformanceIndexes => ignore(|d| t(d).indexes.push(index("IX_T_P")), Some("IX_T_P")),
         Opt::IgnorePermissions => ignore(
             |d| {
@@ -368,7 +368,7 @@ fn check_ignore(o: Opt, change: fn(&mut Database), prepare: fn(&mut Database), v
         if view {
             let left = crate::compare_serve::object_sql(&a, d.object_type, &d.name, &on);
             let right = crate::compare_serve::object_sql(&b, d.object_type, d.target_name.as_ref().unwrap_or(&d.name), &on);
-            let lines = linediff::compare(left.as_deref(), right.as_deref(), on.has(Opt::IgnoreWhiteSpace));
+            let lines = linediff::compare_with(left.as_deref(), right.as_deref(), &on);
             assert!(lines.iter().all(|l| !l.different), "{o:?} on: the view differs\n{left:?}\n{right:?}");
         }
     }

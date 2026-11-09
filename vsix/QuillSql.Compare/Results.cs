@@ -447,7 +447,7 @@ namespace QuillSql.Compare
             if (sql == null) return;
             var left = SideBox();
             var right = SideBox();
-            var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"), CaseSensitive, IgnoreWhiteSpace);
+            var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"), CaseSensitive, IgnoreWhiteSpace, sql.Str("sourceKeys"), sql.Str("targetKeys"));
             Fill(left, lines, true);
             Fill(right, lines, false);
             SyncScroll(left, right);
@@ -760,7 +760,7 @@ namespace QuillSql.Compare
             _shownSql = sql;
             _formattedShown = false;
             if (_bottomTabs.SelectedItem == _formattedTab) await ShowFormatted();
-            var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"), CaseSensitive, IgnoreWhiteSpace);
+            var lines = LineDiff.Align(sql.Str("source"), sql.Str("target"), CaseSensitive, IgnoreWhiteSpace, sql.Str("sourceKeys"), sql.Str("targetKeys"));
             Fill(_left, lines, true);
             Fill(_right, lines, false);
             // The first line of each run of differing lines, for the up and down buttons.

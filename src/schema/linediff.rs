@@ -1,12 +1,45 @@
 //! Line-by-line comparison of two object scripts, aligned as the classic compare tool shows them: equal lines
 //! side by side, changed lines paired up, and lines present on one side only.
 
+use regex::Regex;
+
+use super::options::{Opt, Options};
+
 /// One aligned row: a line from each side (`None` where that side has no line).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
     pub left: Option<String>,
     pub right: Option<String>,
     pub different: bool,
+}
+
+/// A column line (`[Id] [int] NOT NULL IDENTITY(1, 1),`) without what the options ignore: its
+/// IDENTITY, its seed and increment, its NULL or NOT NULL. The line is still shown as it is; only
+/// whether it counts as different follows the comparison.
+pub fn comparison_key(line: &str, opts: &Options) -> String {
+    use std::sync::LazyLock;
+    static IDENTITY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s+IDENTITY\s*\(\s*-?\d+\s*,\s*-?\d+\s*\)(\s+NOT\s+FOR\s+REPLICATION)?").unwrap());
+    static NULLS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s+(NOT\s+)?NULL\b").unwrap());
+    if !line.trim_start().starts_with('[') {
+        return line.to_string();
+    }
+    let mut s = line.to_string();
+    if opts.has(Opt::IgnoreIdentityProperties) {
+        s = IDENTITY.replace_all(&s, "").into_owned();
+    } else if opts.has(Opt::IgnoreIdentitySeedAndIncrement) {
+        s = IDENTITY.replace_all(&s, " IDENTITY$1").into_owned();
+    }
+    if opts.has(Opt::IgnoreNullability) {
+        s = NULLS.replace_all(&s, "").into_owned();
+    }
+    s
+}
+
+/// [`comparison_key`] of every line of a text, or `None` when no line changes.
+pub fn comparison_keys(text: &str, opts: &Options) -> Option<String> {
+    let keys: Vec<String> = text.replace("\r\n", "\n").split('\n').map(|l| comparison_key(l, opts)).collect();
+    let joined = keys.join("\n");
+    (joined != text.replace("\r\n", "\n")).then_some(joined)
 }
 
 /// Lines whose normalized forms are equal count as the same line.
@@ -19,9 +52,20 @@ const MAX_CELLS: usize = 4_000_000;
 
 /// Aligns `left` and `right` (either may be absent: an object on one side only).
 pub fn compare(left: Option<&str>, right: Option<&str>, ignore_whitespace: bool) -> Vec<Line> {
+    align(left, right, |l| key(l, ignore_whitespace))
+}
+
+/// [`compare`] as the comparison sees the lines: white space and the column details the options
+/// ignore (see [`comparison_key`]) do not make a line different.
+pub fn compare_with(left: Option<&str>, right: Option<&str>, opts: &Options) -> Vec<Line> {
+    let ws = opts.has(Opt::IgnoreWhiteSpace);
+    align(left, right, |l| key(&comparison_key(l, opts), ws))
+}
+
+fn align(left: Option<&str>, right: Option<&str>, key: impl Fn(&str) -> String) -> Vec<Line> {
     let split = |t: Option<&str>| -> Vec<String> { t.map(|t| t.replace("\r\n", "\n").split('\n').map(str::to_string).collect()).unwrap_or_default() };
     let (a, b) = (split(left), split(right));
-    let (ka, kb): (Vec<String>, Vec<String>) = (a.iter().map(|l| key(l, ignore_whitespace)).collect(), b.iter().map(|l| key(l, ignore_whitespace)).collect());
+    let (ka, kb): (Vec<String>, Vec<String>) = (a.iter().map(|l| key(l)).collect(), b.iter().map(|l| key(l)).collect());
     let prefix = ka.iter().zip(&kb).take_while(|(x, y)| x == y).count();
     let suffix = ka[prefix..].iter().rev().zip(kb[prefix..].iter().rev()).take_while(|(x, y)| x == y).count();
     let (ma, mb) = (&ka[prefix..ka.len() - suffix], &kb[prefix..kb.len() - suffix]);

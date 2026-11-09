@@ -363,7 +363,7 @@ namespace QuillSql.Compare
         /// Aligns the lines of two texts. Lines are equal as the comparison sees them: ignoring
         /// case unless it is case-sensitive, and ignoring white space only when it is ignored.
         /// </summary>
-        public static List<Line> Align(string left, string right, bool caseSensitive = true, bool ignoreWhiteSpace = true)
+        public static List<Line> Align(string left, string right, bool caseSensitive = true, bool ignoreWhiteSpace = true, string leftKeys = null, string rightKeys = null)
         {
             string Key(string s)
             {
@@ -386,8 +386,14 @@ namespace QuillSql.Compare
                 }
                 return result;
             }
-            var ka = Array.ConvertAll(a, Key);
-            var kb = Array.ConvertAll(b, Key);
+            // The engine's view of the lines where the options ignore part of one (IDENTITY, NULL).
+            string[] Keys(string[] lines, string keys)
+            {
+                var k = keys?.Replace("\r\n", "\n").Split('\n');
+                return Array.ConvertAll(k != null && k.Length == lines.Length ? k : lines, Key);
+            }
+            var ka = Keys(a, leftKeys);
+            var kb = Keys(b, rightKeys);
             var lcs = new int[a.Length + 1, b.Length + 1];
             for (var i = a.Length - 1; i >= 0; i--)
             {

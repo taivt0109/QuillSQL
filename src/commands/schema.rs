@@ -557,7 +557,7 @@ fn print_summary(listed: &[&Difference], id1: &str, id2: &str, data: Option<&cra
 fn script_lines(d: &Difference, db1: &Database, db2: &Database, opts: &Options) -> Vec<linediff::Line> {
     let left = (d.kind != DiffKind::OnlyIn2).then(|| crate::compare_serve::object_sql(db1, d.object_type, &d.name, opts)).flatten();
     let right = (d.kind != DiffKind::OnlyIn1).then(|| crate::compare_serve::object_sql(db2, d.object_type, d.target_name.as_ref().unwrap_or(&d.name), opts)).flatten();
-    linediff::compare(left.as_deref(), right.as_deref(), opts.has(Opt::IgnoreWhiteSpace))
+    linediff::compare_with(left.as_deref(), right.as_deref(), opts)
 }
 
 /// `/verbose`: each object's script, line against line.

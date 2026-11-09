@@ -553,7 +553,9 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
             let opts = schema_options(&s.project)?;
             let source = if d.kind == DiffKind::OnlyIn2 { None } else { object_sql(&s.db1, d.object_type, &d.name, &opts) };
             let target = if d.kind == DiffKind::OnlyIn1 { None } else { object_sql(&s.db2, d.object_type, &target, &opts) };
-            Ok(json!({"source": source, "target": target}))
+            // What the comparison sees of each line, where the options ignore part of one.
+            let keys = |t: &Option<String>| t.as_deref().and_then(|t| schema::linediff::comparison_keys(t, &opts));
+            Ok(json!({"source": source, "target": target, "sourceKeys": keys(&source), "targetKeys": keys(&target)}))
         }
         "schema_script" => {
             let id = session(request)?;
@@ -1283,7 +1285,6 @@ fn report_side(spec: &SourceSpec, db: &Database) -> schema::report::DataSource {
 fn schema_report(s: &SchemaSession, format: &str, selected: Option<&[usize]>, include_identical: bool) -> Vec<u8> {
     use schema::report::{self, Item, Report};
     let opts = schema_options(&s.project).unwrap_or_else(|_| Options::default_set());
-    let ignore_ws = opts.has(Opt::IgnoreWhiteSpace);
     let mut items: Vec<Item> = s
         .comparison
         .differences
@@ -1307,7 +1308,7 @@ fn schema_report(s: &SchemaSession, format: &str, selected: Option<&[usize]>, in
                 name1: one.map(|n| n.name.clone()).unwrap_or_default(),
                 owner2: two.map(|n| n.schema.clone()).unwrap_or_default(),
                 name2: two.map(|n| n.name.clone()).unwrap_or_default(),
-                lines: schema::linediff::compare(left.as_deref(), right.as_deref(), ignore_ws),
+                lines: schema::linediff::compare_with(left.as_deref(), right.as_deref(), &opts),
             }
         })
         .collect();
