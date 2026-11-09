@@ -30,8 +30,10 @@ function Install-QuillSql {
         $instances = (& $vswhere -all -prerelease -products * -format json | Out-String | ConvertFrom-Json)
         $ssms += @($instances) | Where-Object { $_.productId -like '*Ssms*' } | ForEach-Object { $_.installationPath }
     }
-    $default = "$env:ProgramFiles\Microsoft SQL Server Management Studio 21\Release"
-    if (Test-Path $default) { $ssms += $default }
+    foreach ($v in 21, 22) {
+        $default = "$env:ProgramFiles\Microsoft SQL Server Management Studio $v\Release"
+        if (Test-Path $default) { $ssms += $default }
+    }
     $ssms = $ssms | Where-Object { Test-Path (Join-Path $_ 'Common7\IDE\VSIXInstaller.exe') } | Sort-Object -Unique
     if (-not $ssms) { throw 'SSMS 21 or later was not found. Install it from https://aka.ms/ssms first.' }
 
