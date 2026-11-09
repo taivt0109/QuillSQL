@@ -497,7 +497,11 @@ installed copies offer the update within a day.
 - With Microsoft Entra logins, QuillSQL connects with the sign-in SSMS keeps for the query
   window, asking SSMS for a fresh access token each time it connects, so an expired token is
   renewed the same way SSMS renews it. If SSMS cannot renew it silently, run a query in the window
-  to sign in again. This relies on SSMS internals and is new: report it if a window is not read.
+  to sign in again. When SSMS keeps no token for the window (Microsoft Entra MFA, Integrated,
+  Default, Password, Managed Identity, Service Principal), QuillSQL connects the way SSMS does, with
+  the same method and account, reusing the sign-in SSMS already made; if that asks to sign in and
+  you cancel, it tries again only on Refresh T-SQL Suggestions. Device code sign-in is not used.
+  This relies on SSMS internals and is new: report it if a window is not read.
 - Compare's Microsoft Entra sign-in: "integrated" takes the token of the account signed in to the
   Azure CLI (`az login`) rather than Windows' own single sign-on, and "MFA" uses the device-code
   page (microsoft.com/devicelogin). Federated (ADFS) password sign-in is not supported. Entra
