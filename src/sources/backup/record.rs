@@ -87,11 +87,10 @@ impl<'a> Record<'a> {
         if c.null_bit as usize > self.columns {
             return Field::Missing;
         }
-        if let Some(n) = self.nulls {
-            let bit = c.null_bit as usize - 1;
-            if c.null_bit > 0 && n.get(bit / 8).is_some_and(|b| b & (1 << (bit % 8)) != 0) {
-                return Field::Null;
-            }
+        if let (Some(n), Some(bit)) = (self.nulls, (c.null_bit as usize).checked_sub(1))
+            && n.get(bit / 8).is_some_and(|b| b & (1 << (bit % 8)) != 0)
+        {
+            return Field::Null;
         }
         if c.offset > 0 {
             let at = c.offset as usize;
