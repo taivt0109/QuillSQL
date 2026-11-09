@@ -80,6 +80,9 @@
     <EmbeddedResource Include="install-update.ps1">
       <LogicalName>QuillSql.Vsix.install-update.ps1</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Include="$(RepoRoot)\assets\logo\quillsql.ico">
+      <LogicalName>QuillSql.Vsix.quillsql.ico</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
     <None Include="source.extension.vsixmanifest">

@@ -362,6 +362,11 @@ Kết quả cho thấy những gì khác nhau; với schema, SQL của hai bên 
 transaction, hoặc mở script trong cửa sổ query. QuillSQL Compare theo chế độ sáng/tối và màu nhấn của
 Windows (nền Mica trên Windows 11); trong SSMS thì theo theme màu của SSMS.
 
+Trong lúc so sánh, một bảng tiến trình hiện nguồn và đích: server và database (hoặc file) của
+từng bên, bước đang chạy (kết nối, từng truy vấn catalog kèm phần trăm, dựng model), rồi bước ghép
+cặp và so sánh, cùng thời gian đã chạy. **Stop** để dừng; nếu một bên không đọc được, bảng giữ
+lại lỗi của bên đó.
+
 Project lưu thành file JSON `.qsc` (schema) và `.qdc` (dữ liệu), để trong Git được. Password
 không bao giờ được ghi vào file: "Remember credentials" lưu trong Windows Credential Manager.
 

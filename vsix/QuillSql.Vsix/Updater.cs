@@ -280,6 +280,13 @@ namespace QuillSql.Vsix
             var path = Path.Combine(Folder, "updates", "install-update.ps1");
             // UTF-8 with a signature, so Windows PowerShell reads the translated texts right.
             File.WriteAllText(path, script, new System.Text.UTF8Encoding(true));
+            // The window's icon, next to the script.
+            var icon = Path.Combine(Folder, "updates", "quillsql.ico");
+            using (var stream = typeof(Updater).Assembly.GetManifestResourceStream("QuillSql.Vsix.quillsql.ico"))
+            using (var file = File.Create(icon))
+            {
+                stream?.CopyTo(file);
+            }
             File.Delete(ResultFile);
             string quote(string s) => "\"" + s + "\"";
             var cache = instance == null ? "" : Path.Combine(instance.FullName, "ComponentModelCache");
@@ -292,7 +299,8 @@ namespace QuillSql.Vsix
                 + (suffix.Length > 0 ? " -RootSuffix " + quote(suffix) : "")
                 + " -Cache " + quote(cache)
                 + " -Log " + quote(Log.FilePath)
-                + " -Result " + quote(ResultFile);
+                + " -Result " + quote(ResultFile)
+                + " -Icon " + quote(icon);
             Process.Start(new ProcessStartInfo("powershell.exe", arguments) { UseShellExecute = false, CreateNoWindow = true });
             Log.Write("update " + _version + " scheduled for when SSMS closes" + (suffix.Length > 0 ? " (instance " + suffix + ")" : ""));
         }

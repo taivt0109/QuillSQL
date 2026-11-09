@@ -33,7 +33,8 @@ namespace QuillSql.Compare
             Copy = "", Search = "", Settings = "", Connect = "", List = "", People = "",
             Delete = "", Warning = "", Info = "", Help = "", Chevron = "", Document = "",
             Check = "", Recent = "", Next = "", Previous = "", Code = "", Server = "",
-            Up = "\uE70E", Down = "\uE70D", Filter = "\uE71C", Report = "\uE9F9", Export = "\uEDE1", Folder = "\uE8B7", View = "\uE890";
+            Up = "\uE70E", Down = "\uE70D", Filter = "\uE71C", Report = "\uE9F9", Export = "\uEDE1", Folder = "\uE8B7", View = "\uE890",
+            Cancel = "\uE711";
     }
 
     internal static class Ui

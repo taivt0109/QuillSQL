@@ -31,6 +31,7 @@ namespace QuillSql.Compare
         {
             public TaskCompletionSource<object> Reply = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
             public Action<string> Progress;
+            public Action<JsonObject> Steps;
         }
 
         /// <summary>
@@ -88,6 +89,7 @@ namespace QuillSql.Compare
                     if (reply.ContainsKey("progress"))
                     {
                         pending.Progress?.Invoke(reply.Str("progress"));
+                        pending.Steps?.Invoke(reply);
                         continue;
                     }
                     _pending.TryRemove(id, out _);
@@ -107,8 +109,11 @@ namespace QuillSql.Compare
             _pending.Clear();
         }
 
-        /// <summary>Sends `{"op":op,...fields}` and returns the result.</summary>
-        public async Task<object> Request(string op, IDictionary<string, object> fields = null, Action<string> progress = null)
+        /// <summary>
+        /// Sends `{"op":op,...fields}` and returns the result. `progress` has the text of each progress
+        /// line; `steps` the whole line, with the side, stage and counts a comparison reports.
+        /// </summary>
+        public async Task<object> Request(string op, IDictionary<string, object> fields = null, Action<string> progress = null, Action<JsonObject> steps = null)
         {
             await _gate.WaitAsync().ConfigureAwait(false);
             try
@@ -120,7 +125,7 @@ namespace QuillSql.Compare
                 {
                     foreach (var kv in fields) request[kv.Key] = kv.Value;
                 }
-                var pending = new Pending { Progress = progress };
+                var pending = new Pending { Progress = progress, Steps = steps };
                 _pending[id] = pending;
                 await _process.StandardInput.WriteLineAsync(Json.Write(request)).ConfigureAwait(false);
                 await _process.StandardInput.FlushAsync().ConfigureAwait(false);
@@ -132,8 +137,8 @@ namespace QuillSql.Compare
             }
         }
 
-        public async Task<JsonObject> RequestObject(string op, IDictionary<string, object> fields = null, Action<string> progress = null)
-            => await Request(op, fields, progress).ConfigureAwait(false) as JsonObject ?? new JsonObject();
+        public async Task<JsonObject> RequestObject(string op, IDictionary<string, object> fields = null, Action<string> progress = null, Action<JsonObject> steps = null)
+            => await Request(op, fields, progress, steps).ConfigureAwait(false) as JsonObject ?? new JsonObject();
 
         /// <summary>Stops the running request; open comparisons are lost.</summary>
         public void Cancel()

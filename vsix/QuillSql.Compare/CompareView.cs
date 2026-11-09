@@ -91,6 +91,7 @@ namespace QuillSql.Compare
         private readonly TextBlock _sourceName = Ui.Text(""), _targetName = Ui.Text("");
         private readonly TextBlock _status = Ui.Text("", brush: CompareTheme.Muted);
         private readonly ProgressBar _busy = new ProgressBar { IsIndeterminate = true, Visibility = Visibility.Hidden, Margin = new Thickness(0) };
+        private readonly CompareProgress _progress = new CompareProgress();
         private readonly Button _compare, _deploy, _edit, _cancel;
         private readonly ContextMenu _openMenu = new ContextMenu();
         private JsonObject _optionDefs;
@@ -110,7 +111,7 @@ namespace QuillSql.Compare
             _compare = Ui.Button("Compare", async () => await Compare(), primary: true, minWidth: 110, glyph: Glyph.Play);
             _deploy = Ui.Button("Deploy…", async () => await Deploy(), minWidth: 100, glyph: Glyph.Upload);
             _edit = Ui.Command(Glyph.Edit, "Edit project", ShowEditor);
-            _cancel = Ui.Button("Stop", () => { _engine.Cancel(); SetBusy(false, "Stopped."); }, minWidth: 90, glyph: Glyph.Stop);
+            _cancel = Ui.Button("Stop", () => { _engine.Cancel(); _progress.Hide(); SetBusy(false, "Stopped."); }, minWidth: 90, glyph: Glyph.Stop);
             _cancel.Visibility = Visibility.Collapsed;
 
             var newMenu = new ContextMenu();
@@ -150,7 +151,7 @@ namespace QuillSql.Compare
             var header = Ui.Column(_title, subtitle);
             header.Margin = new Thickness(28, 14, 28, 6);
 
-            var top = Ui.Column(bar, header, _busy);
+            var top = Ui.Column(bar, header, _progress, _busy);
             SetDock(top, Dock.Top);
             Children.Add(top);
             Children.Add(_content);
@@ -462,12 +463,7 @@ namespace QuillSql.Compare
         private void UpdateTitle()
         {
             if (_session == null) return;
-            string side(string key)
-            {
-                var s = _session.Project.Obj(key);
-                if (s == null) return "?";
-                return s.Str("type") == "snapshot" || s.Str("type") == "backup" ? string.Join(", ", (s.Str("path") ?? "").Split(';').Select(Path.GetFileName)) : s.Str("type") == "scripts" ? s.Str("path") + (string.IsNullOrEmpty(s.Str("revision")) ? "" : " @ " + s.Str("revision")) : s.Str("type") == "empty" ? "Empty database" : (s.Str("server") + " / " + s.Str("database"));
-            }
+            string side(string key) => SideName(_session.Project.Obj(key));
             var kind = _session.IsData ? "Data compare" : "Schema compare";
             var file = _session.FilePath != null ? Path.GetFileName(_session.FilePath) : "New project";
             var dirty = IsDirty();
@@ -480,6 +476,13 @@ namespace QuillSql.Compare
         }
 
         private string _lastTitle;
+
+        /// <summary>A side as the header names it: server / database, or its files.</summary>
+        private static string SideName(JsonObject s)
+        {
+            if (s == null) return "?";
+            return s.Str("type") == "snapshot" || s.Str("type") == "backup" ? string.Join(", ", (s.Str("path") ?? "").Split(';').Select(Path.GetFileName)) : s.Str("type") == "scripts" ? s.Str("path") + (string.IsNullOrEmpty(s.Str("revision")) ? "" : " @ " + s.Str("revision")) : s.Str("type") == "empty" ? "Empty database" : (s.Str("server") + " / " + s.Str("database"));
+        }
 
         private void ShowEditor()
         {
@@ -518,6 +521,13 @@ namespace QuillSql.Compare
 
         private void Progress(string text) => Dispatcher.BeginInvoke(new Action(() => _status.Text = text + "…"));
 
+        /// <summary>A comparison's progress line: the panel shows where each side is; other lines go to the status text.</summary>
+        private void CompareStep(JsonObject line) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (line.Str("stage") == null) _status.Text = line.Str("progress") + "…";
+            else _progress.Update(line);
+        }));
+
         public async Task Compare()
         {
             if (_session == null) return;
@@ -533,13 +543,18 @@ namespace QuillSql.Compare
             }
             var clean = !IsDirty();
             SetBusy(true, "Comparing…");
+            // The progress panel stands in for the busy line.
+            _busy.Visibility = Visibility.Hidden;
+            _progress.Start(_session.IsData, SideName(source), SideName(target));
             var op = _session.IsData ? "data_compare" : "schema_compare";
-            var result = await Ui.Try(_host.Owner, () => _engine.RequestObject(op, new JsonObject { ["project"] = _session.WithPasswords() }, Progress));
+            var result = await Ui.Try(_host.Owner, () => _engine.RequestObject(op, new JsonObject { ["project"] = _session.WithPasswords() }, steps: CompareStep));
             if (result == null)
             {
+                _progress.Fail();
                 SetBusy(false, "The comparison did not finish.");
                 return;
             }
+            _progress.Hide();
             _schemaResults = null;
             _dataResults = null;
             ShowComparison(result);

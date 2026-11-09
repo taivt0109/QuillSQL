@@ -18,11 +18,28 @@ pub fn read_database(spec: &ConnectionSpec) -> Result<Database, String> {
 /// Reads the database named in `spec`; `decrypt` recovers the text of encrypted modules over
 /// the dedicated administrator connection when it can be reached.
 pub fn read_database_with(spec: &ConnectionSpec, decrypt: bool) -> Result<Database, String> {
+    read_database_reporting(spec, decrypt, &|_| {})
+}
+
+/// Where a read is, for progress: `report` may be called from the connections reading at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step<'a> {
+    Connecting,
+    /// A catalog query finished: `done` of `total`, and what it read ("columns", "indexes"...).
+    Read { done: usize, total: usize, what: &'a str },
+    Building,
+    Decrypting,
+}
+
+/// `read_database_with`, telling `report` each step as it goes.
+pub fn read_database_reporting(spec: &ConnectionSpec, decrypt: bool, report: &(dyn Fn(Step) + Sync)) -> Result<Database, String> {
     let rt = db::runtime()?;
     rt.block_on(async {
+        report(Step::Connecting);
         let mut conn = db::connect_async(spec).await?;
-        let mut model = read_ahead(&mut conn, Some(spec)).await?;
+        let mut model = read_ahead(&mut conn, Some(spec), report).await?;
         if decrypt {
+            report(Step::Decrypting);
             super::decrypt::decrypt_modules(&mut conn, spec, &mut model).await?;
         }
         Ok(model)
@@ -31,7 +48,20 @@ pub fn read_database_with(spec: &ConnectionSpec, decrypt: bool) -> Result<Databa
 
 /// Reads the connection's current database.
 pub async fn read(conn: &mut Connection) -> Result<Database, String> {
-    read_ahead(conn, None).await
+    read_ahead(conn, None, &|_| {}).await
+}
+
+/// What a catalog query reads, for progress: the first `sys.<view>` it selects from, else
+/// the first it names, else "catalog".
+pub fn query_name(sql: &str) -> &str {
+    let lower = sql.to_ascii_lowercase();
+    let view_at = |from: usize| {
+        let start = from + "sys.".len();
+        let len = lower[start..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(lower.len() - start);
+        (len > 0).then(|| &sql[start..start + len])
+    };
+    let named = |pattern: &str| lower.match_indices(pattern).find_map(|(at, _)| view_at(at + pattern.len() - "sys.".len()));
+    named("from sys.").or_else(|| named("sys.")).unwrap_or("catalog")
 }
 
 /// Isolation for every connection of a read.
@@ -44,7 +74,7 @@ const AHEAD: usize = 4;
 /// once (the queries depend only on the server's version, so a dry run lists them); the model is
 /// then built from their rows in the usual order. A query that was not fetched, or failed, runs
 /// on the reader's connection then, so the result is the same either way.
-async fn read_ahead(conn: &mut Connection, spec: Option<&ConnectionSpec>) -> Result<Database, String> {
+async fn read_ahead(conn: &mut Connection, spec: Option<&ConnectionSpec>, report: &(dyn Fn(Step) + Sync)) -> Result<Database, String> {
     db::execute(conn, SESSION).await?;
     let started = std::time::Instant::now();
     let mut r = Reader { db: Database { model_version: MODEL_VERSION, ..Default::default() }, ..Default::default() };
@@ -57,8 +87,9 @@ async fn read_ahead(conn: &mut Connection, spec: Option<&ConnectionSpec>) -> Res
         let _ = dry.steps(&mut list).await;
         let sqls = list.noted.unwrap_or_default();
         let live = c.live.take().expect("the reader's connection");
-        (c.ready, timings) = fetch_ahead(live, spec, &sqls).await;
+        (c.ready, timings) = fetch_ahead(live, spec, &sqls, report).await;
         c.live = Some(live);
+        report(Step::Building);
     }
     r.steps(&mut c).await?;
     log_timings(&r.db, started.elapsed(), &timings);
@@ -88,9 +119,11 @@ impl Conn<'_> {
 
 /// Runs `sqls` on the reader's connection and AHEAD - 1 more, each taking the next query not yet
 /// started; the rows of those that succeed, and how long each took.
-async fn fetch_ahead(live: &mut Connection, spec: &ConnectionSpec, sqls: &[String]) -> Fetched {
+async fn fetch_ahead(live: &mut Connection, spec: &ConnectionSpec, sqls: &[String], report: &(dyn Fn(Step) + Sync)) -> Fetched {
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let finished = std::sync::atomic::AtomicUsize::new(0);
     let done = std::sync::Mutex::new((HashMap::new(), Vec::new()));
+    let queue = Queue { sqls, next: &next, finished: &finished, done: &done, report };
     let extra = async {
         // More connections while there is work for them; one that fails to open just isn't used.
         let opened = futures_util::future::join_all((1..AHEAD.min(sqls.len())).map(|_| async {
@@ -100,27 +133,42 @@ async fn fetch_ahead(live: &mut Connection, spec: &ConnectionSpec, sqls: &[Strin
         }))
         .await;
         let mut conns: Vec<Connection> = opened.into_iter().flatten().collect();
-        futures_util::future::join_all(conns.iter_mut().map(|c| run_queue(c, sqls, &next, &done))).await;
+        futures_util::future::join_all(conns.iter_mut().map(|c| run_queue(c, &queue))).await;
     };
-    futures_util::future::join(run_queue(live, sqls, &next, &done), extra).await;
+    futures_util::future::join(run_queue(live, &queue), extra).await;
     done.into_inner().unwrap()
 }
 
 /// Rows by query, and how long each query took.
 type Fetched = (HashMap<String, Vec<Row>>, Vec<(String, u128)>);
 
+/// The queries the connections of a read share, and what they report.
+struct Queue<'a> {
+    sqls: &'a [String],
+    /// The next query to start, and how many have finished.
+    next: &'a std::sync::atomic::AtomicUsize,
+    finished: &'a std::sync::atomic::AtomicUsize,
+    done: &'a std::sync::Mutex<Fetched>,
+    report: &'a (dyn Fn(Step) + Sync),
+}
+
 /// Takes the next query not yet started until none is left.
-async fn run_queue(conn: &mut Connection, sqls: &[String], next: &std::sync::atomic::AtomicUsize, done: &std::sync::Mutex<Fetched>) {
+async fn run_queue(conn: &mut Connection, q: &Queue<'_>) {
+    use std::sync::atomic::Ordering::Relaxed;
     loop {
-        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let Some(sql) = sqls.get(i) else { break };
+        let i = q.next.fetch_add(1, Relaxed);
+        let Some(sql) = q.sqls.get(i) else { break };
         let t = std::time::Instant::now();
         let rows = db::query(conn, sql).await;
-        let mut d = done.lock().unwrap();
-        d.1.push((sql.clone(), t.elapsed().as_millis()));
-        if let Ok(rows) = rows {
-            d.0.insert(sql.clone(), rows);
+        {
+            let mut d = q.done.lock().unwrap();
+            d.1.push((sql.clone(), t.elapsed().as_millis()));
+            if let Ok(rows) = rows {
+                d.0.insert(sql.clone(), rows);
+            }
         }
+        let done = q.finished.fetch_add(1, Relaxed) + 1;
+        (q.report)(Step::Read { done, total: q.sqls.len(), what: query_name(sql) });
     }
 }
 
@@ -1661,6 +1709,18 @@ fn split_multipart(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_names() {
+        assert_eq!(query_name("SELECT c.name FROM sys.columns AS c JOIN sys.types AS t ON 1 = 1"), "columns");
+        assert_eq!(query_name("SELECT i.name
+             FROM sys.indexes AS i JOIN sys.objects AS o ON o.object_id = i.object_id"), "indexes");
+        assert_eq!(query_name("SELECT f.name FROM SYS.Foreign_Keys AS f"), "Foreign_Keys");
+        // A view named elsewhere than after FROM, then nothing to name.
+        assert_eq!(query_name("SELECT x FROM (SELECT 1 AS x) AS y CROSS APPLY sys.dm_sql_referenced_entities(1, 2)"), "dm_sql_referenced_entities");
+        assert_eq!(query_name("SELECT 1 FROM sys."), "catalog");
+        assert_eq!(query_name("SELECT SERVERPROPERTY('Edition')"), "catalog");
+    }
 
     #[test]
     fn multipart_names() {

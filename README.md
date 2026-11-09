@@ -433,6 +433,11 @@ Save as my defaults). Results show what differs; for schema, the SQL of both sid
 one transaction, or opens it in a query window. QuillSQL Compare follows the Windows light or dark
 mode and accent color (Mica on Windows 11); in SSMS it uses the SSMS color theme.
 
+While a comparison runs, a progress panel shows the source and the target one above the other:
+each side's server and database (or files), its current step (connecting, each catalog query with
+a percentage, building the model), then mapping and comparing, with the elapsed time.
+**Stop** cancels; if a side cannot be read, the panel keeps its error on show.
+
 Projects are saved as `.qsc` (schema) and `.qdc` (data) JSON files that you can keep in Git.
 Passwords are never written to them: "Remember credentials" keeps them in Windows Credential
 Manager.

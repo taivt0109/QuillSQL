@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "quillsql"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "chrono",
  "clap",

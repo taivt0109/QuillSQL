@@ -9,4 +9,4 @@ pub(crate) use read_objects::{object_dependencies, split_predicate};
 
 pub use model::*;
 pub use objects::*;
-pub use read::{read_database, read_database_with};
+pub use read::{Step, read_database, read_database_reporting, read_database_with};

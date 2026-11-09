@@ -257,6 +257,23 @@ pub fn compare_sources(
     parallel: usize,
     progress: impl Fn(&TablePair, &TableResult),
 ) -> Result<DataComparison, String> {
+    compare_counted(side1, side2, db1, db2, opts, user, include, parallel, |p, r, _, _| progress(p, r))
+}
+
+/// `compare_sources`, telling `progress` each table as it finishes, with how many have finished
+/// and how many there are.
+#[allow(clippy::too_many_arguments)]
+pub fn compare_counted(
+    side1: RowSource,
+    side2: RowSource,
+    db1: &Database,
+    db2: &Database,
+    opts: &DataOptions,
+    user: &DataMappings,
+    include: impl Fn(&TablePair) -> bool,
+    parallel: usize,
+    progress: impl Fn(&TablePair, &TableResult, usize, usize),
+) -> Result<DataComparison, String> {
     let (mut pairs, mut only_in_1, only_in_2) = mapping::map_tables(db1, db2, opts, user);
     // MissingFrom2AsInclude: a table only in database 1 is compared with an empty one.
     if opts.has(DataOpt::MissingFrom2AsInclude) {
@@ -311,15 +328,22 @@ pub fn compare_sources(
         _ => None,
     }
     .unwrap_or(false);
+    let total = pairs.len();
     let (tables, ddl_triggers) = rt.block_on(async {
         let jobs = pairs.into_iter().enumerate().map(|(i, pair)| {
             let path = session.table_path(i);
             async move { compare_table(side1, side2, pair, opts, server, path).await }
         });
-        let mut done: Vec<TableResult> = futures_util::stream::iter(jobs).buffered(parallel.max(1)).collect().await;
-        for r in &done {
-            progress(&r.pair, r);
-        }
+        // Told in order as each finishes.
+        let finished = std::cell::Cell::new(0);
+        let mut done: Vec<TableResult> = futures_util::stream::iter(jobs)
+            .buffered(parallel.max(1))
+            .inspect(|r| {
+                finished.set(finished.get() + 1);
+                progress(&r.pair, r, finished.get(), total);
+            })
+            .collect()
+            .await;
         done.sort_by(|a, b| a.pair.source.cmp(&b.pair.source));
         let mut triggers = Vec::new();
         if opts.has(DataOpt::DisableDdlTriggers)

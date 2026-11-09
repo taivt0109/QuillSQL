@@ -2,6 +2,8 @@
 //! One JSON request per stdin line, `{"id":n,"op":"...",...}`; one reply per stdout line,
 //! `{"id":n,"result":...}` or `{"id":n,"error":"..."}`. Long operations first send
 //! `{"id":n,"progress":"..."}` lines. Comparison results stay here between requests.
+//! While sides are read and compared a progress line also says where it is (see `Report`):
+//! `{"id":n,"progress":"Reading columns","side":1,"stage":"read","done":7,"total":52}`.
 //!
 //! - `options` describes every schema and data option (for the Options tabs).
 //! - `databases` {source} lists databases; `test_connection` {source} returns the server version.
@@ -86,8 +88,85 @@ struct State {
     sides: Vec<(String, Database, Vec<String>)>,
 }
 
-/// Progress lines of a request; both sides may report at once.
-type Progress<'a> = dyn Fn(&str) + Sync + 'a;
+/// Progress lines of a request, with what each is about; both sides may report at once.
+type Progress<'a> = dyn Fn(&str, Report) + Sync + 'a;
+
+/// What a progress line is about beyond its text: the side (1 source, 2 target; none for
+/// steps of both), the stage, and how far it is when that is known.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Report {
+    side: Option<u8>,
+    stage: Option<Stage>,
+    done: Option<usize>,
+    total: Option<usize>,
+}
+
+/// Where a comparison is: a side is connected to, read, built (and decrypted), then done or
+/// failed; then both are mapped and compared (`data` for each table of a data comparison).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Connect,
+    Read,
+    Build,
+    Decrypt,
+    Done,
+    Failed,
+    Map,
+    Compare,
+    Data,
+}
+
+impl Stage {
+    fn name(self) -> &'static str {
+        match self {
+            Stage::Connect => "connect",
+            Stage::Read => "read",
+            Stage::Build => "build",
+            Stage::Decrypt => "decrypt",
+            Stage::Done => "done",
+            Stage::Failed => "failed",
+            Stage::Map => "map",
+            Stage::Compare => "compare",
+            Stage::Data => "data",
+        }
+    }
+}
+
+impl Report {
+    /// Text only.
+    const NONE: Report = Report { side: None, stage: None, done: None, total: None };
+
+    fn side(n: u8, stage: Stage) -> Report {
+        Report { side: Some(n), stage: Some(stage), ..Report::NONE }
+    }
+
+    /// A step of both sides.
+    fn shared(stage: Stage) -> Report {
+        Report { stage: Some(stage), ..Report::NONE }
+    }
+
+    fn of(self, done: usize, total: usize) -> Report {
+        Report { done: Some(done), total: Some(total), ..self }
+    }
+}
+
+/// The progress line of request `id`.
+fn progress_line(id: &Value, text: &str, r: Report) -> Value {
+    let mut line = json!({"id": id, "progress": text});
+    if let Some(n) = r.side {
+        line["side"] = json!(n);
+    }
+    if let Some(stage) = r.stage {
+        line["stage"] = json!(stage.name());
+    }
+    if let Some(done) = r.done {
+        line["done"] = json!(done);
+    }
+    if let Some(total) = r.total {
+        line["total"] = json!(total);
+    }
+    line
+}
 
 /// A side and what its reader warned about.
 type Loaded = (Database, Vec<String>);
@@ -98,6 +177,15 @@ fn load_sides(state: &mut State, project: &Project, decrypt: bool, fresh: bool, 
     let key = |s: &SourceSpec| format!("{decrypt}|{}", serde_json::to_string(s).unwrap_or_default());
     let cached = |s: &SourceSpec| (!fresh).then(|| state.sides.iter().find(|c| c.0 == key(s)).map(|c| (c.1.clone(), c.2.clone()))).flatten();
     let (c1, c2) = (cached(&project.source), if project.target.is_empty_database() { None } else { cached(&project.target) });
+    // A side read lately is ready at once.
+    for (n, c) in [(1, &c1), (2, &c2)] {
+        if let Some((db, _)) = c {
+            side_done(n, db, progress);
+        }
+    }
+    if project.target.is_empty_database() {
+        progress("Empty database", Report::side(2, Stage::Done));
+    }
     let (r1, r2) = std::thread::scope(|scope| {
         let t2 = (c2.is_none() && !project.target.is_empty_database()).then(|| scope.spawn(|| load_side_with_warnings(&project.target, 2, decrypt, progress)));
         let r1 = match c1 {
@@ -105,7 +193,7 @@ fn load_sides(state: &mut State, project: &Project, decrypt: bool, fresh: bool, 
             None => load_side_with_warnings(&project.source, 1, decrypt, progress),
         };
         let r2 = match t2 {
-            Some(t) => t.join().unwrap_or_else(|_| Err("reading the target failed".into())).map(Some),
+            Some(t) => t.join().unwrap_or_else(|_| failed(2, "reading the target failed".into(), progress)).map(Some),
             None => Ok(c2),
         };
         (r1, r2)
@@ -140,9 +228,9 @@ pub fn run() -> Result<(), String> {
             }
         };
         let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let progress = |text: &str| {
+        let progress = |text: &str, r: Report| {
             let mut out = stdout.lock();
-            let _ = writeln!(out, "{}", json!({"id": id, "progress": text}));
+            let _ = writeln!(out, "{}", progress_line(&id, text, r));
             let _ = out.flush();
         };
         // Microsoft Entra device-code sign-in shows its code as a progress line of this request.
@@ -179,8 +267,9 @@ fn backup_files(side: &SourceSpec) -> (Vec<std::path::PathBuf>, Vec<String>) {
     (files, passwords)
 }
 
-fn open_backup(side: &SourceSpec, progress: &Progress) -> Result<crate::sources::backup::Backup, String> {
-    progress(&format!("Reading backup {}", side.path));
+/// Opens backup side `n`.
+fn open_backup(side: &SourceSpec, n: u8, progress: &Progress) -> Result<crate::sources::backup::Backup, String> {
+    progress(&format!("Reading backup {}", side.path), Report::side(n, Stage::Read));
     let (files, passwords) = backup_files(side);
     let set = (!side.backup_set.is_empty()).then_some(side.backup_set.as_str());
     crate::sources::backup::open(&files, &passwords, set).map_err(|e| e.to_string())
@@ -191,17 +280,51 @@ fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &Progress) -> Re
     load_side_with_warnings(side, n, decrypt, progress).map(|(db, _)| db)
 }
 
-/// A side and, for a scripts folder, what its parser skipped.
+/// A side and, for a scripts folder, what its parser skipped; reported done or failed.
 fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &Progress) -> Result<(Database, Vec<String>), String> {
+    match read_side(side, n, decrypt, progress) {
+        Ok(loaded) => {
+            side_done(n, &loaded.0, progress);
+            Ok(loaded)
+        }
+        Err(e) => failed(n, e, progress),
+    }
+}
+
+/// Reports side `n` failed, then returns its error.
+fn failed<T>(n: u8, e: String, progress: &Progress) -> Result<T, String> {
+    progress(&e, Report::side(n, Stage::Failed));
+    Err(e)
+}
+
+/// Reports side `n` read, with how many objects it has (tables, views, routines, types,
+/// sequences and synonyms).
+fn side_done(n: u8, db: &Database, progress: &Progress) {
+    let count = db.tables.len() + db.views.len() + db.routines.len() + db.types.len() + db.sequences.len() + db.synonyms.len();
+    let what = if count == 1 { "object" } else { "objects" };
+    progress(&format!("Read {count} {what}"), Report::side(n, Stage::Done).of(count, count));
+}
+
+/// Reads live database `n`, reporting each catalog query as it finishes.
+fn read_live(spec: &crate::db::ConnectionSpec, n: u8, decrypt: bool, progress: &Progress) -> Result<Database, String> {
+    catalog::read_database_reporting(spec, decrypt, &|step| match step {
+        catalog::Step::Connecting => progress(&format!("Connecting to {}", spec.describe()), Report::side(n, Stage::Connect)),
+        catalog::Step::Read { done, total, what } => progress(&format!("Reading {}", what.replace('_', " ")), Report::side(n, Stage::Read).of(done, total)),
+        catalog::Step::Building => progress("Building the model", Report::side(n, Stage::Build)),
+        catalog::Step::Decrypting => progress("Decrypting encrypted objects", Report::side(n, Stage::Decrypt)),
+    })
+}
+
+fn read_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &Progress) -> Result<(Database, Vec<String>), String> {
     if side.is_scripts() {
         let checkout = match side.revision.as_str() {
             "" => None,
             r => {
-                progress(&format!("Getting revision {r} of '{}'", side.path));
+                progress(&format!("Getting revision {r} of '{}'", side.path), Report::side(n, Stage::Read));
                 Some(crate::sources::scm::checkout(&side.path, r)?)
             }
         };
-        progress(&format!("Reading database scripts from '{}'", side.path));
+        progress(&format!("Reading database scripts from '{}'", side.path), Report::side(n, Stage::Read));
         let dir = checkout.as_ref().map(|c| c.dir.clone()).unwrap_or_else(|| std::path::PathBuf::from(&side.path));
         let mut f = crate::sources::folder::read(&dir)?;
         if checkout.is_some() {
@@ -211,9 +334,10 @@ fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &P
         return Ok((f.database, warnings));
     }
     if side.is_backup() {
-        return Ok((open_backup(side, progress)?.read_database().map_err(|e| e.to_string())?, Vec::new()));
+        return Ok((open_backup(side, n, progress)?.read_database().map_err(|e| e.to_string())?, Vec::new()));
     }
     if side.is_snapshot() {
+        progress(&format!("Reading the snapshot {}", side.path), Report::side(n, Stage::Read));
         let bytes = std::fs::read(&side.path).map_err(|e| format!("{}: {e}", side.path))?;
         if crate::sources::snp::is_snp(&bytes) {
             return Ok((crate::sources::snp::read(&bytes).map_err(|e| format!("{}: {e}", side.path))?, Vec::new()));
@@ -221,8 +345,7 @@ fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &P
         let db = serde_json::from_slice(crate::project::without_bom(&bytes)).map_err(|e| format!("{} is not a snapshot: {e}", side.path))?;
         return Ok((db, Vec::new()));
     }
-    progress(&format!("Reading {}", side.describe()));
-    Ok((catalog::read_database_with(&side.connection(n)?, decrypt)?, Vec::new()))
+    Ok((read_live(&side.connection(n)?, n, decrypt, progress)?, Vec::new()))
 }
 
 fn schema_options(p: &Project) -> Result<Options, String> {
@@ -315,7 +438,7 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
                 Err(_) => (field::<SourceSpec>(request, "source")?, Options::default_set()),
             };
             let db = load_side(&side, 1, opts.has(Opt::DecryptPost2kEncryptedObjects), progress)?;
-            progress(&format!("Writing the scripts folder '{path}'"));
+            progress(&format!("Writing the scripts folder '{path}'"), Report::NONE);
             let files = crate::sources::folder::write_all(&db, std::path::Path::new(&path), &opts)?;
             Ok(json!({"files": files}))
         }
@@ -337,7 +460,9 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
             } else {
                 Database { name: "Empty".into(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }
             };
-            progress("Comparing");
+            // Objects are paired and compared in one pass.
+            progress("Mapping objects", Report::shared(Stage::Map));
+            progress("Comparing", Report::shared(Stage::Compare));
             let comparison = compare_schemas(&db1, &db2, &opts, &project)?;
             state.next += 1;
             let id = state.next;
@@ -531,47 +656,49 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
             let project: Project = field(request, "project")?;
             let opts = data_options(&project)?;
             // A scripts folder is read without a server, as SQL Data Compare reads it.
-            let backups = [&project.source, &project.target].map(|s| s.is_backup().then(|| open_backup(s, progress)).transpose());
-            let [b1, b2] = backups;
-            let backups = [b1?, b2?];
+            let mut backups: [Option<crate::sources::backup::Backup>; 2] = [None, None];
             let mut folders: [Option<crate::sources::datafolder::DataFolder>; 2] = [None, None];
-            for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
-                if side.is_scripts() {
-                    progress(&format!("Reading the data scripts of '{}'", side.path));
-                    let revision = (!side.revision.is_empty()).then_some(side.revision.as_str());
-                    folders[k] = Some(crate::sources::datafolder::read(std::path::Path::new(&side.path), revision)?);
-                }
-            }
+            let mut specs: [Option<crate::db::ConnectionSpec>; 2] = [None, None];
             let mut dbs = Vec::new();
-            let mut specs = Vec::new();
             for (k, side) in [&project.source, &project.target].into_iter().enumerate() {
-                progress(&format!("Reading {}", side.describe()));
-                if let Some(f) = &folders[k] {
-                    dbs.push(f.folder.database.clone());
-                    specs.push(None);
-                    continue;
-                }
-                if let Some(b) = &backups[k] {
-                    dbs.push(b.read_database().map_err(|e| e.to_string())?);
-                    specs.push(None);
-                    continue;
-                }
-                let spec = side.connection(k as u8 + 1)?;
-                dbs.push(catalog::read_database_with(&spec, false)?);
-                specs.push(Some(spec));
+                let n = k as u8 + 1;
+                let mut read = || -> Result<Database, String> {
+                    if side.is_scripts() {
+                        progress(&format!("Reading the data scripts of '{}'", side.path), Report::side(n, Stage::Read));
+                        let revision = (!side.revision.is_empty()).then_some(side.revision.as_str());
+                        let f = crate::sources::datafolder::read(std::path::Path::new(&side.path), revision)?;
+                        let db = f.folder.database.clone();
+                        folders[k] = Some(f);
+                        return Ok(db);
+                    }
+                    if side.is_backup() {
+                        let b = open_backup(side, n, progress)?;
+                        let db = b.read_database().map_err(|e| e.to_string())?;
+                        backups[k] = Some(b);
+                        return Ok(db);
+                    }
+                    let spec = side.connection(n)?;
+                    let db = read_live(&spec, n, false, progress)?;
+                    specs[k] = Some(spec);
+                    Ok(db)
+                };
+                let db = read().or_else(|e| failed(n, e, progress))?;
+                side_done(n, &db, progress);
+                dbs.push(db);
             }
             let db2 = dbs.pop().unwrap_or_default();
             let db1 = dbs.pop().unwrap_or_default();
-            let rows = |k: usize| match (&folders[k], &specs[k]) {
-                (Some(f), _) => crate::data::compare::RowSource::Memory(&f.memory),
-                (None, None) if backups[k].is_some() => crate::data::compare::RowSource::Backup(backups[k].as_ref().unwrap()),
-                (None, Some(spec)) => crate::data::compare::RowSource::Live(spec),
-                (None, None) => unreachable!(),
+            let rows = |k: usize| match (&folders[k], &backups[k], &specs[k]) {
+                (Some(f), _, _) => crate::data::compare::RowSource::Memory(&f.memory),
+                (None, Some(b), _) => crate::data::compare::RowSource::Backup(b),
+                (None, None, Some(spec)) => crate::data::compare::RowSource::Live(spec),
+                (None, None, None) => unreachable!(),
             };
-            progress("Comparing data");
+            progress("Mapping tables", Report::shared(Stage::Map));
+            progress("Comparing data", Report::shared(Stage::Data));
             let deselected: Vec<ObjectName> = project.deselected.iter().map(|d| ObjectName::new(&d.schema, &d.name)).collect();
             let only = only_selected(request);
-            let result = crate::data::compare::compare_sources(
+            let result = crate::data::compare::compare_counted(
                 rows(0),
                 rows(1),
                 &db1,
@@ -580,7 +707,7 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
                 &project.data_mappings,
                 |p| !deselected.contains(&p.source) && only.as_ref().is_none_or(|o| o.contains(&p.source)),
                 4,
-                |p, _| progress(&progress_text(p, opts.has(DataOpt::UseChecksumComparison))),
+                |p, _, done, total| progress(&progress_text(p, opts.has(DataOpt::UseChecksumComparison)), Report::shared(Stage::Data).of(done, total)),
             )?;
             state.next += 1;
             let id = state.next;
@@ -760,7 +887,7 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
                 for (i, d) in comparison.differences.iter_mut().enumerate() {
                     d.selected = s.selected.contains(&i);
                 }
-                progress(&format!("Writing to the scripts folder '{}'", s.project.target.path));
+                progress(&format!("Writing to the scripts folder '{}'", s.project.target.path), Report::NONE);
                 let target = crate::sources::folder::read(std::path::Path::new(&s.project.target.path))?;
                 let changes = crate::sources::folder::sync(&s.db1, &target, &comparison.differences, &opts)?;
                 let list = |v: &[std::path::PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
@@ -797,7 +924,7 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
                 return Err("the target is an empty database; only a script can be created".into());
             }
             let spec = target.connection(2)?;
-            let ran = deploy::execute(&spec, &script, |i, n| progress(&format!("Running batch {} of {n}", i + 1)))?;
+            let ran = deploy::execute(&spec, &script, |i, n| progress(&format!("Running batch {} of {n}", i + 1), Report::NONE))?;
             Ok(json!({"batches": ran}))
         }
         // What the backup page starts with: the instance's backup folder and the automatic name.
@@ -1371,7 +1498,7 @@ fn ui_op(state: &mut State, op: &str, request: &Value, progress: &Progress) -> R
         }
         "revisions" => {
             let path: String = field(request, "path")?;
-            progress("Reading the history");
+            progress("Reading the history", Report::NONE);
             Ok(json!(revisions(std::path::Path::new(&path))?))
         }
         "folder_preview" => {
@@ -1570,7 +1697,7 @@ mod tests {
     #[test]
     fn options_and_projects() {
         let mut state = State::default();
-        let none = |_: &str| {};
+        let none = |_: &str, _: Report| {};
         let o = handle(&mut state, &json!({"op": "options"}), &none).unwrap();
         assert_eq!(o["schema"].as_array().unwrap().len(), schema::options::ALL.len());
         assert_eq!(o["data"].as_array().unwrap().len(), 25);
@@ -1621,7 +1748,7 @@ mod tests {
         // SAFETY: no other test reads or writes QUILL_PASSWORD1.
         unsafe { std::env::set_var("QUILL_PASSWORD1", side.password.clone().unwrap_or_default()) };
         let mut state = State::default();
-        let none = |_: &str| {};
+        let none = |_: &str, _: Report| {};
         let mut project = Project::new(crate::project::ProjectKind::Data);
         project.source = side.clone();
         project.target = SourceSpec { kind: "scripts".into(), path: dir.to_string_lossy().to_string(), ..Default::default() };
@@ -1664,7 +1791,7 @@ mod tests {
         project.target = SourceSpec { kind: "snapshot".into(), path: path("two.json"), ..Default::default() };
         let project = serde_json::to_value(&project).unwrap();
         let mut state = State::default();
-        let none = |_: &str| {};
+        let none = |_: &str, _: Report| {};
         let r = handle(&mut state, &json!({"op": "schema_compare", "project": project}), &none).unwrap();
         let s = r["session"].clone();
         // No rename suggestions: SQL Compare's UI makes none; tables are mapped by hand.
@@ -1734,7 +1861,7 @@ mod tests {
     #[test]
     fn compares_and_deploys_scripts_folders() {
         let mut state = State::default();
-        let none = |_: &str| {};
+        let none = |_: &str, _: Report| {};
         let base = std::env::temp_dir().join(format!("quill-serve-scripts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let write = |dir: &str, file: &str, text: &str| {
@@ -1798,6 +1925,46 @@ mod tests {
         std::fs::remove_dir_all(base).ok();
     }
 
+    /// Progress lines say which side they are about and where it is: a scripts folder and a
+    /// snapshot are read then done, then both are mapped and compared; a side that cannot be
+    /// read is reported failed with its error.
+    #[test]
+    fn progress_lines_carry_side_and_stage() {
+        let base = std::env::temp_dir().join(format!("quill-serve-progress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("a").join("Tables")).unwrap();
+        std::fs::write(base.join("a").join("Tables").join("dbo.T.sql"), "CREATE TABLE [dbo].[T]\r\n(\r\n[a] [int] NULL\r\n)\r\nGO\r\n").unwrap();
+        let snapshot = base.join("two.json");
+        std::fs::write(&snapshot, serde_json::to_vec(&Database { name: "Two".into(), ..Default::default() }).unwrap()).unwrap();
+        let mut project = Project::new(crate::project::ProjectKind::Schema);
+        project.source = SourceSpec { kind: "scripts".into(), path: base.join("a").to_string_lossy().to_string(), ..Default::default() };
+        project.target = SourceSpec { kind: "snapshot".into(), path: snapshot.to_string_lossy().to_string(), ..Default::default() };
+        let lines = std::sync::Mutex::new(Vec::new());
+        let record = |text: &str, r: Report| lines.lock().unwrap().push(progress_line(&json!(7), text, r));
+        let mut state = State::default();
+        handle(&mut state, &json!({"op": "schema_compare", "project": project}), &record).unwrap();
+        let seen = std::mem::take(&mut *lines.lock().unwrap());
+        assert!(seen.iter().all(|l| l["id"] == 7 && l["progress"].is_string()), "{seen:?}");
+        let at = |side: Option<u64>, stage: &str| seen.iter().position(|l| l["side"].as_u64() == side && l["stage"] == stage).unwrap_or_else(|| panic!("no {side:?} {stage} in {seen:?}"));
+        assert!(at(Some(1), "read") < at(Some(1), "done"));
+        assert!(at(Some(2), "read") < at(Some(2), "done"));
+        let done1 = &seen[at(Some(1), "done")];
+        assert_eq!((done1["done"].as_u64(), done1["total"].as_u64()), (Some(1), Some(1)), "{done1}");
+        assert_eq!(seen[at(Some(2), "done")]["total"], 0);
+        assert!(at(None, "map") > at(Some(1), "done").max(at(Some(2), "done")));
+        assert!(at(None, "compare") > at(None, "map"));
+        // Shared steps have no side; plain lines have no stage.
+        assert!(seen[at(None, "map")].get("side").is_none());
+        assert_eq!(progress_line(&json!(1), "x", Report::NONE), json!({"id": 1, "progress": "x"}));
+
+        project.target.path = base.join("missing.json").to_string_lossy().to_string();
+        let e = handle(&mut state, &json!({"op": "schema_compare", "project": project}), &record).unwrap_err();
+        let seen = lines.into_inner().unwrap();
+        let failed = seen.iter().find(|l| l["stage"] == "failed").expect("a failed line");
+        assert_eq!((failed["side"].as_u64(), failed["progress"].as_str()), (Some(2), Some(e.as_str())));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn every_shown_option_has_a_description() {
         let o = option_definitions();
@@ -1842,7 +2009,7 @@ mod tests {
     #[test]
     fn ui_ops() {
         let mut state = State::default();
-        let none = |_: &str| {};
+        let none = |_: &str, _: Report| {};
         let f = handle(&mut state, &json!({"op": "format_sql", "source": "select a,b from t", "target": null, "style": "none"}), &none).unwrap();
         assert_eq!(f["source"], "select a,
        b
