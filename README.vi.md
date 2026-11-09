@@ -189,7 +189,7 @@ F12 trên procedure, view hoặc function tạo bằng `WITH ENCRYPTION` sẽ h�
 
 Khi gõ, `'`, `[` và `/*` được tự đóng (cả `(` nếu bạn bật); gõ ký tự đóng thì con trỏ chỉ nhảy qua nó.
 
-QuillSQL tắt "Auto list members" của SSMS để không hiện hai danh sách cùng lúc. Muốn bật lại thì vào Tools > Options > Text Editor > Transact-SQL > IntelliSense. SSMS 22 lưu cài đặt này ở chỗ QuillSQL không chạm tới được: nếu thấy hai danh sách cùng hiện, hãy tự tắt "Auto list members".
+QuillSQL tắt "Auto list members" của SSMS để không hiện hai danh sách cùng lúc. Muốn bật lại thì vào Tools > Options > Text Editor > Transact-SQL > IntelliSense. Trong SSMS 22, cài đặt này là `languages.sql.general.showCompletionOnTyping.autoListMembers` trong `settings.json` của instance; QuillSQL đặt nó thành false ở đó.
 
 ### Snippet
 

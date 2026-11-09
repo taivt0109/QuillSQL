@@ -23,7 +23,7 @@ namespace QuillSql.Vsix
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.4.12";
+        public const string Version = "0.4.13";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
@@ -211,7 +211,8 @@ namespace QuillSql.Vsix
             }
             if (setting == null)
             {
-                Log.Write("SSMS's own suggestion list setting was not found; turn off Auto list members under Tools > Options > Text Editor > Transact-SQL if two lists show");
+                // SSMS 22 keeps it in Unified Settings, in the instance's settings.json.
+                TurnOffUnifiedAutoList();
                 return;
             }
             if (setting.Value is bool on && on)
@@ -220,6 +221,60 @@ namespace QuillSql.Vsix
                 var saved = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuillSQL", "native-autolist-was-on.txt");
                 System.IO.File.WriteAllText(saved, DateTime.Now.ToString("s"));
                 Log.Write("turned off SSMS auto list members (was on)");
+            }
+        }
+
+        /// <summary>The Unified Settings key of SSMS 22's own list for T-SQL (language "sql").</summary>
+        private const string UnifiedAutoList = "languages.sql.general.showCompletionOnTyping.autoListMembers";
+
+        /// <summary>
+        /// SSMS 22: sets <see cref="UnifiedAutoList"/> to false in the settings.json of this SSMS
+        /// instance (the folder two levels above the extension), which SSMS reads when it changes.
+        /// </summary>
+        private static void TurnOffUnifiedAutoList()
+        {
+            try
+            {
+                var instance = new System.IO.DirectoryInfo(System.IO.Path.GetDirectoryName(typeof(QuillSqlPackage).Assembly.Location)).Parent?.Parent;
+                var path = instance == null ? null : System.IO.Path.Combine(instance.FullName, "settings.json");
+                if (path == null || !System.IO.File.Exists(path))
+                {
+                    Log.Write("SSMS's own suggestion list setting was not found; turn off Auto list members under Tools > Options > Text Editor > Transact-SQL if two lists show");
+                    return;
+                }
+                var text = System.IO.File.ReadAllText(path);
+                var key = "\"" + UnifiedAutoList + "\"";
+                var existing = new System.Text.RegularExpressions.Regex(System.Text.RegularExpressions.Regex.Escape(key) + @"\s*:\s*(true|false)");
+                var m = existing.Match(text);
+                if (m.Success && m.Groups[1].Value == "false")
+                {
+                    return;
+                }
+                string updated;
+                if (m.Success)
+                {
+                    updated = text.Substring(0, m.Groups[1].Index) + "false" + text.Substring(m.Groups[1].Index + m.Groups[1].Length);
+                }
+                else
+                {
+                    // A new last entry of the object; the file may start with a comment.
+                    var end = text.LastIndexOf('}');
+                    if (end < 0)
+                    {
+                        return;
+                    }
+                    var before = text.Substring(0, end).TrimEnd();
+                    var comma = before.EndsWith("{", StringComparison.Ordinal) ? "" : ",";
+                    updated = before + comma + Environment.NewLine + "  " + key + ": false" + Environment.NewLine + text.Substring(end);
+                }
+                System.IO.File.WriteAllText(path, updated);
+                var saved = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuillSQL", "native-autolist-was-on.txt");
+                System.IO.File.WriteAllText(saved, DateTime.Now.ToString("s") + " " + path);
+                Log.Write("turned off SSMS's own suggestion list in " + path);
+            }
+            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException)
+            {
+                Log.Error("turning off SSMS's own suggestion list", ex);
             }
         }
 

@@ -228,15 +228,20 @@ namespace QuillSql.Vsix
                 // The signature and the indented columns or parameters in the code font; the
                 // description as text.
                 var code = i == 0 || line.StartsWith("    ", StringComparison.Ordinal);
-                body.Children.Add(new TextBlock
+                var block = new TextBlock
                 {
                     Text = code ? line.TrimEnd() : line.Trim(),
-                    FontFamily = code ? Theme.Mono : null,
                     FontSize = 12,
                     Opacity = line.StartsWith("returns ", StringComparison.Ordinal) ? 0.7 : 1,
                     TextWrapping = TextWrapping.Wrap,
                     Margin = new Thickness(0, 1, 0, 1),
-                });
+                };
+                // Only code lines change font: a null font family is not allowed.
+                if (code)
+                {
+                    block.FontFamily = Theme.Mono;
+                }
+                body.Children.Add(block);
             }
             Show(body, false);
         }

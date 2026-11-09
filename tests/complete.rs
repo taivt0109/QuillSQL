@@ -623,3 +623,9 @@ fn procedures_where_a_statement_starts_without_exec() {
     let sig = quillsql::signature::signature_at(text, text.len(), Some(&s)).expect("signature without EXEC");
     assert_eq!(sig.params, vec!["@loginame sysname".to_string()]);
 }
+
+#[test]
+fn three_letters_inside_a_built_in_function_select_it() {
+    let r = run("select dateadd(day, 1, getdate()), add|");
+    assert_eq!(r.selected.map(|i| r.items[i].label.as_str()), Some("DATEADD"), "{:?}", r.items.iter().map(|i| &i.label).collect::<Vec<_>>());
+}

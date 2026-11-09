@@ -223,8 +223,9 @@ While you type, `'`, `[` and `/*` are closed for you (and `(` if you turn it on)
 closing character moves over it.
 
 QuillSQL turns off SSMS's own "Auto list members" so that two lists do not open; turn it back on
-in Tools > Options > Text Editor > Transact-SQL > IntelliSense. SSMS 22 keeps the setting where
-QuillSQL cannot reach it: if two lists open there, turn "Auto list members" off yourself.
+in Tools > Options > Text Editor > Transact-SQL > IntelliSense. In SSMS 22 the setting is
+`languages.sql.general.showCompletionOnTyping.autoListMembers` in the instance's `settings.json`;
+QuillSQL sets it to false there.
 
 ### Snippets
 

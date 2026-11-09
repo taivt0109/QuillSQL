@@ -19,6 +19,8 @@ if ($LASTEXITCODE -ne 0) { throw 'The driver did not compile.' }
 
 $q = "$env:LOCALAPPDATA\QuillSQL"
 New-Item -ItemType Directory -Force $q | Out-Null
+$logPath = "$q\quillsql.log"
+$logStart = if (Test-Path $logPath) { (Get-Item $logPath).Length } else { 0 }
 $saved = @{}
 foreach ($f in 'settings.json', 'picks.txt') {
     if (Test-Path "$q\$f") { Copy-Item "$q\$f" "$work\$f.backup" -Force; $saved[$f] = $true }
@@ -41,3 +43,9 @@ try {
     sqlcmd -S '(localdb)\MSSQLLocalDB' -Q "IF DB_ID('QuillTest') IS NOT NULL BEGIN ALTER DATABASE QuillTest SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE QuillTest; END" | Out-Null
 }
 Get-Content "$work\result.txt" -Encoding UTF8
+# Errors the extension logged during the run fail it too (a card that could not be drawn, ...).
+if (Test-Path $logPath) {
+    $fs = [IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite'); $fs.Seek($logStart, 'Begin') | Out-Null
+    $errors = (New-Object IO.StreamReader($fs)).ReadToEnd() -split "`n" | Where-Object { $_ -match ' ERROR ' }; $fs.Close()
+    if ($errors) { 'FAIL the extension logged errors:'; $errors | Select-Object -First 10 | ForEach-Object { '   ' + $_.Trim() } } else { 'PASS no errors in the log' }
+}

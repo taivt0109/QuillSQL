@@ -1892,6 +1892,9 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
     let items: Vec<Item> = scored.into_iter().take(MAX_ITEMS).map(|(_, _, _, _, it)| it).collect();
     // Select the first item only when something was typed and it matches for sure; a list of guesses,
     // or one opened by a space before anything is typed, starts with nothing selected.
-    let selected = items.first().filter(|it| !prefix.is_empty() && match_quality(&it.label, &prefix).is_some_and(|q| q <= 2)).map(|_| 0);
+    // Three letters inside a built-in function's name count too (`add` for DATEADD): their names
+    // are known words, unlike the database's names, where they may be the start of a new one.
+    let sure = |it: &Item, q: u8| q <= 2 || (q == 3 && it.kind == "function" && prefix.chars().count() >= 3);
+    let selected = items.first().filter(|it| !prefix.is_empty() && match_quality(&it.label, &prefix).is_some_and(|q| sure(it, q))).map(|_| 0);
     Completion { start: byte_to_utf16(text, prefix_start), items, selected }
 }
