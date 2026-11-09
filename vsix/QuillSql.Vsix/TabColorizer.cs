@@ -6,8 +6,11 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.VisualStudio;
+using Microsoft.VisualStudio.ComponentModelHost;
+using Microsoft.VisualStudio.Editor;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Microsoft.VisualStudio.TextManager.Interop;
 
 namespace QuillSql.Vsix
 {
@@ -25,6 +28,22 @@ namespace QuillSql.Vsix
         private static readonly Dictionary<Control, Tuple<Border, object>> Original = new Dictionary<Control, Tuple<Border, object>>();
         private static readonly Dictionary<string, SolidColorBrush> Brushes = new Dictionary<string, SolidColorBrush>();
         private static bool _loggedShape;
+
+        /// <summary>How many tabs are colored now, for the test hook.</summary>
+        public static int ColoredTabs => Original.Count;
+        /// <summary>The document view each tab was matched to through its editor, for when the tab is not shown.</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, object> Matched = new System.Runtime.CompilerServices.ConditionalWeakTable<object, object>();
+
+        private sealed class Document
+        {
+            public object FrameView;
+            public object DocView;
+            public string Caption;
+            public string Description;
+            /// <summary>The query window's editor, to find the tab that holds it.</summary>
+            public DependencyObject Editor;
+        }
+        private static int _missed;
 
         public static void Start()
         {
@@ -56,25 +75,69 @@ namespace QuillSql.Vsix
             return brush;
         }
 
-        /// <summary>Each open document's tab key (its view object and caption) with its connection.</summary>
-        private static List<Tuple<object, string, string>> Documents()
+        /// <summary>Each open document: its tab keys (its view object, caption, editor) and its connection.</summary>
+        private static List<Document> Documents()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            var documents = new List<Tuple<object, string, string>>();
+            var documents = new List<Document>();
             if (!(Package.GetGlobalService(typeof(SVsUIShell)) is IVsUIShell shell) || shell.GetDocumentWindowEnum(out var frames) != VSConstants.S_OK)
             {
                 return documents;
             }
+            var adapters = (Package.GetGlobalService(typeof(SComponentModel)) as IComponentModel)?.GetService<IVsEditorAdaptersFactoryService>();
             var one = new IVsWindowFrame[1];
             while (frames.Next(1, one, out var fetched) == VSConstants.S_OK && fetched == 1)
             {
                 var frame = one[0];
                 frame.GetProperty((int)__VSFPROPID.VSFPROPID_DocView, out var docView);
                 frame.GetProperty((int)__VSFPROPID.VSFPROPID_Caption, out var caption);
-                var description = docView == null ? null : ConnectionResolver.ForDocView(docView)?.Description;
-                documents.Add(Tuple.Create(ConnectionResolver.Get(frame, "FrameView"), caption as string, description));
+                DependencyObject editor = null;
+                if (docView is IVsCodeWindow code && code.GetPrimaryView(out var textView) == VSConstants.S_OK && textView != null)
+                {
+                    editor = adapters?.GetWpfTextView(textView)?.VisualElement;
+                }
+                documents.Add(new Document
+                {
+                    FrameView = ConnectionResolver.Get(frame, "FrameView"),
+                    DocView = docView,
+                    Caption = caption as string,
+                    Description = docView == null ? null : ConnectionResolver.ForDocView(docView)?.Description,
+                    Editor = editor,
+                });
             }
             return documents;
+        }
+
+        /// <summary>True when `element` sits inside the tab whose view is `view` (SSMS 22 names its parts differently).</summary>
+        private static bool Holds(object view, DependencyObject element)
+        {
+            var content = ConnectionResolver.Get(view, "Content");
+            for (var node = element; node != null; node = VisualTreeHelper.GetParent(node) ?? LogicalTreeHelper.GetParent(node))
+            {
+                if (ReferenceEquals(node, content) || (node is FrameworkElement fe && ReferenceEquals(fe.DataContext, view)))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>The document a tab shows: by its view, its title, or the editor inside it.</summary>
+        private static Document DocumentOf(Control tab, List<Document> documents)
+        {
+            var view = tab.DataContext;
+            var title = ConnectionResolver.Get(view, "Title")?.ToString();
+            var found = documents.FirstOrDefault(d => d.FrameView != null && ReferenceEquals(d.FrameView, view))
+                ?? documents.FirstOrDefault(d => d.Caption != null && d.Caption == title)
+                ?? documents.FirstOrDefault(d => d.Editor != null && Holds(view, d.Editor));
+            if (found != null)
+            {
+                Matched.Remove(view);
+                Matched.Add(view, found.DocView ?? found);
+                return found;
+            }
+            // A tab in the background has its editor out of the tree: use what it was matched to.
+            return Matched.TryGetValue(view, out var known) ? documents.FirstOrDefault(d => ReferenceEquals(d.DocView, known)) : null;
         }
 
         private static IEnumerable<Control> Tabs(DependencyObject root)
@@ -117,7 +180,8 @@ namespace QuillSql.Vsix
         }
 
         /// <summary>
-        /// The border that paints the tab: PART_Border in SSMS 21's template, else the first border
+        /// The border that paints the tab: PART_Border in SSMS 21's template, the TopCurvedBorder of
+        /// SSMS 22's, else the first border
         /// with an opaque background, else the outermost one.
         /// </summary>
         private static Border Chrome(Control tab)
@@ -139,6 +203,7 @@ namespace QuillSql.Vsix
                 }
             }
             return borders.FirstOrDefault(b => b.Name == "PART_Border")
+                ?? borders.FirstOrDefault(b => b.GetType().Name.EndsWith("CurvedBorder", StringComparison.Ordinal))
                 ?? borders.FirstOrDefault(b => b.Background is SolidColorBrush brush && brush.Color.A == 255)
                 ?? borders.FirstOrDefault();
         }
@@ -153,16 +218,46 @@ namespace QuillSql.Vsix
             {
                 _loggedShape = true;
                 Log.Verbose("document tabs: " + string.Join(", ", tabs.Select(t => t.GetType().Name + "/" + t.DataContext.GetType().Name))
-                    + "; frame views: " + string.Join(", ", documents.Select(d => (d.Item1?.GetType().Name ?? "null") + " '" + d.Item2 + "'"))
+                    + "; frame views: " + string.Join(", ", documents.Select(d => (d.FrameView?.GetType().Name ?? "null") + " '" + d.Caption + "'"))
                     + "; template: " + Describe(tabs[0], 0));
+            }
+            // Documents open but no tab found for a minute: say once what the window holds, so another
+            // SSMS version's tab elements can be recognized.
+            if (!_loggedShape && documents.Count > 0 && tabs.Count == 0 && ++_missed == 30)
+            {
+                _loggedShape = true;
+                var names = new SortedSet<string>();
+                foreach (var w in windows)
+                {
+                    var stack = new Stack<DependencyObject>();
+                    stack.Push(w);
+                    while (stack.Count > 0 && names.Count < 60)
+                    {
+                        var node = stack.Pop();
+                        var type = node.GetType().Name;
+                        if (type.IndexOf("Tab", StringComparison.OrdinalIgnoreCase) >= 0 || type.IndexOf("Document", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            names.Add(type + "/" + ((node as FrameworkElement)?.DataContext?.GetType().Name ?? "-"));
+                        }
+                        if (type == "WpfTextView" || type == "WpfMultiViewHost")
+                        {
+                            continue;
+                        }
+                        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+                        {
+                            stack.Push(VisualTreeHelper.GetChild(node, i));
+                        }
+                    }
+                }
+                Log.Write("no document tabs found in " + windows.Count + " window(s) for " + documents.Count + " document(s); elements: " + string.Join(", ", names)
+                    + "; frame views: " + string.Join(", ", documents.Select(d => (d.FrameView?.GetType().Name ?? "null") + " '" + d.Caption + "'")));
             }
             var colored = new HashSet<Control>();
             foreach (var tab in tabs)
             {
                 var title = ConnectionResolver.Get(tab.DataContext, "Title")?.ToString();
-                var document = documents.FirstOrDefault(d => d.Item1 != null && ReferenceEquals(d.Item1, tab.DataContext))
-                    ?? documents.FirstOrDefault(d => d.Item2 != null && d.Item2 == title);
-                var rule = document == null ? null : ConnectionColors.Find(document.Item3);
+                var document = DocumentOf(tab, documents);
+                var rule = document == null ? null : ConnectionColors.Find(document.Description);
                 if (rule == null)
                 {
                     continue;

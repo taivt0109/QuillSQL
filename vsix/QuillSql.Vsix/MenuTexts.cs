@@ -29,6 +29,7 @@ namespace QuillSql.Vsix
             [0x0114] = "Analyze Actual Plan with AI (runs the query)...",
             [0x0115] = "Find Slow Queries with AI (Query Store)",
             [0x0116] = "Check for Updates",
+            [0x013B] = "About QuillSQL",
             [0x0120] = "Script Object at Caret",
             [0x0121] = "Insert Semicolons",
             [0x0122] = "Unformat",

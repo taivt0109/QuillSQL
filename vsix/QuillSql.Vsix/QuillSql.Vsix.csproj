@@ -32,6 +32,9 @@
   <ItemGroup>
     <Compile Include="AiAssistant.cs" />
     <Compile Include="SignatureTip.cs" />
+    <Compile Include="TestHook.cs" />
+    <Compile Include="SessionKeeper.cs" />
+    <Compile Include="AboutWindow.cs" />
     <Compile Include="ColumnPicker.cs" />
     <Compile Include="Decryptor.cs" />
     <Compile Include="AiChat.cs" />
@@ -72,6 +75,11 @@
     <Compile Include="ComparePane.cs" />
     <Compile Include="QuillSqlPackage.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="install-update.ps1">
+      <LogicalName>QuillSql.Vsix.install-update.ps1</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
     <None Include="source.extension.vsixmanifest">

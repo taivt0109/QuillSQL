@@ -40,31 +40,6 @@ const CONTEXTUAL: &[&str] = &[
     "ROW", "ROWS", "SEND", "THROW", "WINDOW",
 ];
 
-/// Built-in functions whose name is not reserved. Matched only when called, so a column
-/// with the same name is left alone.
-pub const FUNCTIONS: &[&str] = &[
-    "ABS", "ACOS", "APPROX_COUNT_DISTINCT", "ASCII", "ASIN", "ATAN", "ATN2", "AVG", "CAST",
-    "CEILING", "CHAR", "CHARINDEX", "CHECKSUM", "CHECKSUM_AGG", "CHOOSE", "CONCAT", "CONCAT_WS",
-    "COS", "COT", "COUNT", "COUNT_BIG", "CUME_DIST", "CURSOR_STATUS", "DATALENGTH", "DATEADD",
-    "DATEDIFF", "DATEDIFF_BIG", "DATEFROMPARTS", "DATENAME", "DATEPART", "DATETIME2FROMPARTS",
-    "DATETIMEFROMPARTS", "DATETRUNC", "DATE_BUCKET", "DAY", "DB_ID", "DB_NAME", "DEGREES",
-    "DENSE_RANK", "DIFFERENCE", "EOMONTH", "ERROR_LINE", "ERROR_MESSAGE", "ERROR_NUMBER",
-    "ERROR_PROCEDURE", "ERROR_SEVERITY", "ERROR_STATE", "EXP", "FIRST_VALUE", "FLOOR", "FORMAT",
-    "FORMATMESSAGE", "GETDATE", "GETUTCDATE", "GREATEST", "GROUPING", "GROUPING_ID", "HASHBYTES",
-    "IIF", "ISDATE", "ISJSON", "ISNULL", "ISNUMERIC", "JSON_ARRAY", "JSON_MODIFY", "JSON_OBJECT",
-    "JSON_QUERY", "JSON_VALUE", "LAG", "LAST_VALUE", "LEAD", "LEAST", "LEN", "LOG", "LOG10",
-    "LOWER", "LTRIM", "MAX", "MIN", "MONTH", "NCHAR", "NEWID", "NEWSEQUENTIALID", "NTILE",
-    "OBJECT_ID", "OBJECT_NAME", "OBJECT_SCHEMA_NAME", "PARSE", "PATINDEX", "PERCENTILE_CONT",
-    "PERCENTILE_DISC", "PERCENT_RANK", "PI", "POWER", "QUOTENAME", "RADIANS", "RAND", "RANK",
-    "REPLACE", "REPLICATE", "REVERSE", "ROUND", "ROW_NUMBER", "RTRIM", "SCHEMA_ID", "SCHEMA_NAME",
-    "SCOPE_IDENTITY", "SIGN", "SIN", "SOUNDEX", "SPACE", "SQRT", "SQUARE", "STDEV", "STDEVP",
-    "STR", "STRING_AGG", "STRING_ESCAPE", "STRING_SPLIT", "STUFF", "SUBSTRING", "SUM",
-    "SUSER_NAME", "SUSER_SNAME", "SWITCHOFFSET", "SYSDATETIME", "SYSDATETIMEOFFSET",
-    "SYSUTCDATETIME", "TAN", "TIMEFROMPARTS", "TODATETIMEOFFSET", "TRANSLATE", "TRIM",
-    "TRY_CAST", "TRY_PARSE", "TYPE_ID", "TYPE_NAME", "UNICODE", "UPPER", "USER_NAME", "VAR",
-    "VARP", "XACT_STATE", "YEAR",
-];
-
 pub(crate) const DATA_TYPES: &[&str] = &[
     "BIGINT", "BINARY", "BIT", "CHAR", "CURSOR", "DATE", "DATETIME", "DATETIME2", "DATETIMEOFFSET",
     "DECIMAL", "FLOAT", "GEOGRAPHY", "GEOMETRY", "HIERARCHYID", "IMAGE", "INT", "MONEY", "NCHAR",
@@ -73,8 +48,10 @@ pub(crate) const DATA_TYPES: &[&str] = &[
     "UNIQUEIDENTIFIER", "VARBINARY", "VARCHAR", "XML",
 ];
 
+/// A built-in function whose name is not reserved (those are keywords). Matched only when
+/// called, so a column with the same name is left alone.
 pub fn is_function(upper: &str) -> bool {
-    FUNCTIONS.binary_search(&upper).is_ok() || is_call_like(upper)
+    (crate::functions::find(upper).is_some() && !is_reserved(upper)) || is_call_like(upper)
 }
 
 pub fn is_data_type(upper: &str) -> bool {
@@ -97,7 +74,7 @@ pub fn is_contextual(upper: &str) -> bool {
 mod tests {
     #[test]
     fn lists_are_sorted_for_binary_search() {
-        for list in [super::RESERVED, super::FUNCTIONS, super::DATA_TYPES] {
+        for list in [super::RESERVED, super::DATA_TYPES] {
             assert!(list.windows(2).all(|w| w[0] < w[1]), "{:?}", list.windows(2).find(|w| w[0] >= w[1]));
         }
     }

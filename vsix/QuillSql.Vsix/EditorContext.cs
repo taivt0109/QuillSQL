@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -174,6 +175,58 @@ namespace QuillSql.Vsix
             if (dte.ActiveDocument?.Object("TextDocument") is TextDocument document)
             {
                 document.StartPoint.CreateEditPoint().Insert(script);
+            }
+        }
+
+        /// <summary>
+        /// Opens a new query window connected to `server` and `database` through SSMS's script factory,
+        /// with SSMS's authentication type (0 Windows, 1 SQL Server, 2 to 9 Microsoft Entra) and user,
+        /// and puts `script` in it; false when SSMS could not open it. No password is passed: a SQL
+        /// Server login uses the one SSMS remembers, or SSMS asks.
+        /// </summary>
+        public static bool OpenConnected(string script, string server, string database, int authentication, string user, bool trustServerCertificate)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            const System.Reflection.BindingFlags Instance = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            Type find(string name) => AppDomain.CurrentDomain.GetAssemblies()
+                .Select(a => { try { return a.GetType(name, false); } catch (Exception) { return null; } })
+                .FirstOrDefault(t => t != null);
+            try
+            {
+                var factory = find("Microsoft.SqlServer.Management.UI.VSIntegration.ServiceCache")
+                    ?.GetProperty("ScriptFactory", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(null);
+                var infoType = find("Microsoft.SqlServer.Management.Smo.RegSvrEnum.UIConnectionInfo");
+                var scriptType = find("Microsoft.SqlServer.Management.UI.VSIntegration.Editors.ScriptType");
+                var create = factory?.GetType().GetMethods(Instance).FirstOrDefault(m => m.Name == "CreateNewBlankScript" && m.GetParameters().Length == 3);
+                if (create == null || infoType == null || scriptType == null)
+                {
+                    return false;
+                }
+                var info = Activator.CreateInstance(infoType);
+                void set(string name, object value) => infoType.GetProperty(name, Instance)?.SetValue(info, value);
+                set("ServerName", server);
+                // The database engine's server type.
+                set("ServerType", new Guid("8c91a03d-f9b4-46c0-a305-b5dcc79ff907"));
+                set("AuthenticationType", authentication);
+                if (!string.IsNullOrEmpty(user))
+                {
+                    set("UserName", user);
+                }
+                if (infoType.GetProperty("AdvancedOptions", Instance)?.GetValue(info) is System.Collections.Specialized.NameValueCollection options)
+                {
+                    if (!string.IsNullOrEmpty(database))
+                    {
+                        options["DATABASE"] = database;
+                    }
+                    options["TRUST_SERVER_CERTIFICATE"] = trustServerCertificate ? "True" : "False";
+                }
+                create.Invoke(factory, new[] { Enum.Parse(scriptType, "Sql"), info, null });
+                return string.IsNullOrEmpty(script) || InsertInActive(script);
+            }
+            catch (Exception ex) when (ex is System.Reflection.TargetInvocationException || ex is ArgumentException || ex is InvalidOperationException || ex is MissingMethodException || ex is COMException)
+            {
+                Log.Error("opening a connected query window", ex);
+                return false;
             }
         }
 

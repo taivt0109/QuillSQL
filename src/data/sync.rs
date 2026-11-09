@@ -84,7 +84,7 @@ impl SyncSettings {
     }
 }
 
-/// The execution blocks Vendor's executor sends without a GO, at most.
+/// At most this many statements are sent in one batch, without a GO.
 const EXEC_CHUNK: usize = 32_000;
 
 /// A table to deploy and what to do with it.

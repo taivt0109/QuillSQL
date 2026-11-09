@@ -34,6 +34,9 @@ namespace QuillSql.Vsix
 
         public event Action Committed;
 
+        /// <summary>A click in the list or the card is done: the editor should take the keyboard back.</summary>
+        public event Action Clicked;
+
         public CompletionPopup()
         {
             _list = new ListBox
@@ -93,6 +96,9 @@ namespace QuillSql.Vsix
             border.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.CommandBarMenuBorderBrushKey);
             border.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.CommandBarMenuBackgroundGradientBrushKey);
             TextOptions.SetTextFormattingMode(border, TextFormattingMode.Display);
+            // Clicking a tab or a button of the card moves the focus into the popup; once the click is
+            // done the editor gets it back, so typing and the arrow keys go on working.
+            border.PreviewMouseUp += (s, e) => Clicked?.Invoke();
             _popup = new Popup
             {
                 Child = border,
@@ -104,6 +110,12 @@ namespace QuillSql.Vsix
         }
 
         public bool IsOpen => _popup.IsOpen;
+
+        /// <summary>The mouse is on the list or the card: a click there must not close it.</summary>
+        public bool IsMouseOver => _popup.IsOpen && _popup.Child.IsMouseOver;
+
+        /// <summary>The keyboard is in the list or the card (a tab or a button was clicked).</summary>
+        public bool HasKeyboard => _popup.IsOpen && _popup.Child.IsKeyboardFocusWithin;
 
         public CompletionItem Selected => (_list.SelectedItem as Row)?.Item;
 

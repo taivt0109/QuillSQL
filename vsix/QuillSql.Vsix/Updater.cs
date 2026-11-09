@@ -245,9 +245,13 @@ namespace QuillSql.Vsix
             element.Unadvise(_cookie);
         }
 
+        /// <summary>The outcome the update script leaves for the next start: installed|version or failed|version|code.</summary>
+        private static string ResultFile => Path.Combine(Folder, "updates", "update-result.txt");
+
         /// <summary>
-        /// Starts a hidden PowerShell script that waits for this SSMS to exit, installs the update
-        /// into the same SSMS instance and clears that instance's cache of editor components.
+        /// Starts the update script: a small window that waits for every SSMS of this installation to
+        /// close, installs the update into the same SSMS instance, clears that instance's cache of
+        /// editor components, and says how it went (Retry when SSMS was opened halfway through).
         /// </summary>
         private void ScheduleInstall()
         {
@@ -256,27 +260,61 @@ namespace QuillSql.Vsix
             // This assembly lives in <instance>\Extensions\<random>\, for example 21.0_cc31859bExp.
             var instance = new DirectoryInfo(Path.GetDirectoryName(typeof(Updater).Assembly.Location)).Parent?.Parent;
             var suffix = instance == null ? "" : System.Text.RegularExpressions.Regex.Match(instance.Name, @"^\d+\.\d+_[0-9a-f]{8}(.*)$").Groups[1].Value;
-            var script = Path.Combine(Folder, "updates", "install-update.ps1");
-            File.WriteAllText(script, @"param([int]$WaitFor, [string]$Installer, [string]$Vsix, [string]$RootSuffix, [string]$Cache, [string]$Log)
-Wait-Process -Id $WaitFor -ErrorAction SilentlyContinue
-$arguments = @('/quiet')
-if ($RootSuffix) { $arguments += ""/rootSuffix:$RootSuffix"" }
-$arguments += ('""' + $Vsix + '""')
-$p = Start-Process -FilePath $Installer -ArgumentList $arguments -Wait -PassThru
-if ($Cache) { Remove-Item -LiteralPath $Cache -Recurse -Force -ErrorAction SilentlyContinue }
-Add-Content -LiteralPath $Log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff') + "" update installed from $Vsix, VSIXInstaller exit code $($p.ExitCode)"")
-");
+            string template;
+            using (var stream = typeof(Updater).Assembly.GetManifestResourceStream("QuillSql.Vsix.install-update.ps1"))
+            using (var reader = new StreamReader(stream))
+            {
+                template = reader.ReadToEnd();
+            }
+            // The window's texts, in the user's language; single quotes doubled for PowerShell.
+            string text(string english) => Loc.T(english).Replace("'", "''");
+            var script = template
+                .Replace("{{WAITING}}", text("Close SSMS to install the update. It installs as soon as every SSMS window is closed."))
+                .Replace("{{INSTALLING}}", text("Installing the update... Do not open SSMS until this is done."))
+                .Replace("{{DONE}}", text("The update is installed. You can open SSMS now."))
+                .Replace("{{REOPENED}}", text("SSMS was opened before the update finished, so it was not installed. Close SSMS and click Retry."))
+                .Replace("{{FAILED}}", text("The update could not be installed. Click Retry, or open the log to see why."))
+                .Replace("{{CLOSE}}", text("Close"))
+                .Replace("{{RETRY}}", text("Retry"))
+                .Replace("{{OPEN_LOG}}", text("Open log"));
+            var path = Path.Combine(Folder, "updates", "install-update.ps1");
+            // UTF-8 with a signature, so Windows PowerShell reads the translated texts right.
+            File.WriteAllText(path, script, new System.Text.UTF8Encoding(true));
+            File.Delete(ResultFile);
             string quote(string s) => "\"" + s + "\"";
             var cache = instance == null ? "" : Path.Combine(instance.FullName, "ComponentModelCache");
-            var arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + quote(script)
+            var arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + quote(path)
                 + " -WaitFor " + Process.GetCurrentProcess().Id
+                + " -Ide " + quote(ide)
                 + " -Installer " + quote(installer)
                 + " -Vsix " + quote(_vsix)
+                + " -Version " + quote(_version)
                 + (suffix.Length > 0 ? " -RootSuffix " + quote(suffix) : "")
                 + " -Cache " + quote(cache)
-                + " -Log " + quote(Log.FilePath);
+                + " -Log " + quote(Log.FilePath)
+                + " -Result " + quote(ResultFile);
             Process.Start(new ProcessStartInfo("powershell.exe", arguments) { UseShellExecute = false, CreateNoWindow = true });
             Log.Write("update " + _version + " scheduled for when SSMS closes" + (suffix.Length > 0 ? " (instance " + suffix + ")" : ""));
+        }
+
+        /// <summary>Says, once, how the update installed when SSMS last closed went.</summary>
+        public static void ReportLastInstall()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!File.Exists(ResultFile))
+            {
+                return;
+            }
+            var parts = File.ReadAllText(ResultFile).Trim().Split('|');
+            File.Delete(ResultFile);
+            if (parts[0] == "installed" && parts.Length > 1)
+            {
+                EditorContext.Status("updated to version " + parts[1] + ".");
+            }
+            else if (parts[0] == "failed" && parts.Length > 1)
+            {
+                EditorContext.Status("the update to version " + parts[1] + " was not installed; run Tools > QuillSQL > Check for Updates to try again.");
+            }
         }
     }
 }

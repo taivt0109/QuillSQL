@@ -303,7 +303,8 @@ namespace QuillSql.Vsix
                 Heading("Editor"),
                 Check("Write keywords, functions and data types in upper case as you type (select becomes SELECT)", s.UppercaseKeywords, v => s.UppercaseKeywords = v),
                 Check("Show a card with columns, indexes, partitions and script when the mouse rests on an object", s.ObjectCards, v => s.ObjectCards = v),
-                Check("Highlight the other uses of the name under the caret", s.HighlightMatches, v => s.HighlightMatches = v));
+                Check("Highlight the other uses of the name under the caret", s.HighlightMatches, v => s.HighlightMatches = v),
+                Check("Offer to reopen the query windows when SSMS closed without shutting down (takes effect after a restart)", s.RestoreTabs, v => s.RestoreTabs = v));
         }
 
         private string FormattingJson()

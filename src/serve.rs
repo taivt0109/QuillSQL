@@ -37,15 +37,22 @@ struct State {
 /// Object kinds whose description is shown next to the suggestion list.
 const DESCRIBED: &[&str] = &["table", "view", "procedure", "function", "table_function", "synonym"];
 
-/// Adds an `info` description to the first suggestions that are database objects.
+/// Adds an `info` description to the first suggestions that are database objects or built-in
+/// functions.
 fn with_descriptions(completion: Value, schema: Option<&Schema>) -> Value {
-    let Some(schema) = schema else { return completion };
     let mut completion = completion;
     if let Some(items) = completion["items"].as_array_mut() {
         for item in items.iter_mut().take(80) {
+            if item["kind"] == "function" && item["detail"] == "built-in function" {
+                if let Some(text) = item["label"].as_str().and_then(quillsql::functions::describe) {
+                    item["info"] = json!(text);
+                }
+                continue;
+            }
             if !DESCRIBED.contains(&item["kind"].as_str().unwrap_or("")) {
                 continue;
             }
+            let Some(schema) = schema else { continue };
             let detail = item["detail"].as_str().unwrap_or("");
             let full = detail.split(" (").next().unwrap_or(detail);
             let Some((owner, name)) = full.split_once('.') else { continue };

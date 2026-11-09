@@ -23,7 +23,7 @@ namespace QuillSql.Vsix
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.4.9";
+        public const string Version = "0.4.10";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
@@ -75,6 +75,7 @@ namespace QuillSql.Vsix
         private const int TabColorCommandId = 0x0138;
         private const int SchemaCompareCommandId = 0x0139;
         private const int DataCompareCommandId = 0x013A;
+        private const int AboutCommandId = 0x013B;
 
         private EditorWatcher _watcher;
 
@@ -110,6 +111,7 @@ namespace QuillSql.Vsix
             add(ActualPlanAiCommandId, () => AiAssistant.AnalyzePlan(this, true));
             add(SlowQueriesAiCommandId, () => AiAssistant.ReviewSlowQueries(this));
             add(CheckUpdatesCommandId, () => Updater.Start(this, true));
+            add(AboutCommandId, () => AboutWindow.Show(this));
             add(ScriptObjectCommandId, () => ObjectScripts.ScriptAtCaret(true));
             add(InsertSemicolonsCommandId, () => TextCommands.Rewrite("semicolons", "semicolons inserted"));
             add(UnformatCommandId, () => TextCommands.Rewrite("unformat", "unformatted"));
@@ -141,24 +143,43 @@ namespace QuillSql.Vsix
                     EditorContext.Status("open a query window first.");
                 }
             });
-            try
+            // Each part starts on its own: one that fails in another SSMS version (a setting SSMS 22
+            // no longer has) must not keep the others, such as the tab colors, from starting.
+            void start(string what, Action action)
             {
-                CodeAnalysis.Initialize(this);
-                _watcher = EditorWatcher.Start();
-                TurnOffNativeAutoList();
-                if (await GetServiceAsync(typeof(DTE)) is DTE dte)
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("starting " + what, ex);
+                }
+            }
+            start("code analysis", () => CodeAnalysis.Initialize(this));
+            start("suggestions", () => _watcher = EditorWatcher.Start());
+            start("SSMS's own list", TurnOffNativeAutoList);
+            var dte = await GetServiceAsync(typeof(DTE)) as DTE;
+            start("query history", () =>
+            {
+                if (dte != null)
                 {
                     QueryHistory.Start(dte);
                 }
-                TabColorizer.Start();
+            });
+            start("tab colors", TabColorizer.Start);
+            start("Object Explorer menu", () =>
+            {
                 ObjectExplorerMenu.HostPackage = this;
                 ObjectExplorerMenu.Start();
-                Updater.Start(this, false);
-            }
-            catch (Exception ex)
+            });
+            start("updates", () =>
             {
-                Log.Error("starting suggestions", ex);
-            }
+                Updater.ReportLastInstall();
+                Updater.Start(this, false);
+            });
+            start("test hook", TestHook.Start);
+            start("query window keeper", SessionKeeper.Start);
         }
 
         /// <summary>
@@ -172,7 +193,27 @@ namespace QuillSql.Vsix
             {
                 return;
             }
-            var setting = dte.Properties["TextEditor", "SQL"].Item("AutoListMembers");
+            // The page is "SQL" in SSMS 21; look for it under the other names it may have.
+            EnvDTE.Property setting = null;
+            foreach (var page in new[] { "SQL", "Transact-SQL", "SQL Server Tools", "TSQL" })
+            {
+                try
+                {
+                    setting = dte.Properties["TextEditor", page].Item("AutoListMembers");
+                    break;
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+                catch (ArgumentException)
+                {
+                }
+            }
+            if (setting == null)
+            {
+                Log.Write("SSMS's own suggestion list setting was not found; turn off Auto list members under Tools > Options > Text Editor > Transact-SQL if two lists show");
+                return;
+            }
             if (setting.Value is bool on && on)
             {
                 setting.Value = false;
@@ -186,10 +227,17 @@ namespace QuillSql.Vsix
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             MetadataCache.Clear();
+            ObjectScripts.ClearCache();
             Log.Write("suggestion metadata cleared");
+            // Read the active window's database again now rather than on the next keystroke.
+            var target = ConnectionResolver.TryGetActive();
+            if (target != null)
+            {
+                MetadataCache.EnsureLoaded(target);
+            }
             if (GetService(typeof(DTE)) is DTE dte)
             {
-                dte.StatusBar.Text = "QuillSQL: suggestions will reload on next use.";
+                dte.StatusBar.Text = "QuillSQL: reloading suggestions" + (target == null ? " on next use." : " for " + target.Description + "...");
             }
         }
 
@@ -197,6 +245,7 @@ namespace QuillSql.Vsix
         {
             if (disposing)
             {
+                SessionKeeper.Stop();
                 EngineProcess.Shared.Dispose();
             }
             base.Dispose(disposing);

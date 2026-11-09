@@ -10,6 +10,7 @@ pub mod data;
 pub mod db;
 pub mod des;
 pub mod entra;
+pub mod functions;
 pub mod info;
 pub mod keywords;
 pub mod layout;

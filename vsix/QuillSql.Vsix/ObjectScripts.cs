@@ -171,6 +171,15 @@ FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY paramete
 
         private static readonly TimeSpan Fresh = TimeSpan.FromMinutes(10);
 
+        /// <summary>Forgets every object's details, so the next card reads them again.</summary>
+        public static void ClearCache()
+        {
+            lock (Cache)
+            {
+                Cache.Clear();
+            }
+        }
+
         /// <summary>Details read in the last ten minutes, without asking the database; null if there are none.</summary>
         public static ObjectDetails Cached(ConnectionTarget target, string fullName)
         {

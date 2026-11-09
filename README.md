@@ -69,7 +69,9 @@ irm https://raw.githubusercontent.com/taivt0109/QuillSQL/main/install.ps1 | iex
 Once a day QuillSQL looks for a newer release on GitHub. When it finds one, it downloads it,
 checks its checksum and shows a bar at the top of SSMS: **Install when SSMS closes**, **What's
 new** or **Skip this version**. SSMS cannot replace an extension while it runs, so the update is
-installed right after SSMS exits. **Tools > QuillSQL > Check for Updates** checks now. To turn the
+installed right after SSMS exits, in a small window that waits until every SSMS window is closed,
+says not to open SSMS while it installs, and says how it went (with Retry when SSMS was opened
+halfway through). The next start says whether the update was installed. **Tools > QuillSQL > Check for Updates** checks now. To turn the
 daily check off, create `%LOCALAPPDATA%\QuillSQL\settings.json` containing
 `{ "autoUpdate": false }`, or untick it in Options.
 
@@ -95,6 +97,7 @@ daily check off, create `%LOCALAPPDATA%\QuillSQL\settings.json` containing
 | Ctrl+B, Ctrl+I | AI Chat |
 | Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Ask AI / analyze the plan with AI |
 | Ctrl+B, Ctrl+O | Options |
+| Ctrl+Shift+D | Refresh suggestions (read the database's objects again) |
 
 Change any of them in Tools > Options > Environment > Keyboard (search for `QuillSQL`). Every
 command is also in **Tools > QuillSQL** and in the editor's right-click menu.
@@ -172,7 +175,7 @@ rests on its name: rows, size, columns, indexes, partitions and script. Which ke
 Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
 background the first time a database is used and follows `USE`. When tables, columns or other
 objects change, by you or anyone else, it reloads by itself: a light check runs at most once a
-minute while you type, and at once on Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions**
+minute while you type, and at once on Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D)
 reloads everything.
 
 The list also writes code:
@@ -184,7 +187,12 @@ The list also writes code:
 - after `ALTER PROCEDURE`, `ALTER VIEW` or `ALTER FUNCTION`, the object's whole definition;
 - built-in and scalar functions with their parentheses, the caret inside: `GETDATE()`;
 - after `EXEC`, the procedure with all its parameters, one per line with its type;
-- after `INSERT INTO table `, the column list and a `VALUES` row with a placeholder per column;
+- picking the table after `INSERT INTO` (or `INSERT`) writes the whole statement: the column list
+  and a `VALUES` row, one line a column, with `DEFAULT` for a column that has a default, `NULL` for
+  one that allows it, else a value of its type, and a comment with each column's name and type;
+  after `INSERT INTO table `, the same list and row;
+- a column of a table with an alias is written with it: `Name` in `FROM dbo.JitBin AS jb` gives
+  `jb.Name`;
   after `UPDATE table SET `, every column (identity, computed and rowversion columns are skipped);
 - in a select list, **(choose columns…)** opens a list of check boxes to insert several columns at
   once;
@@ -193,6 +201,17 @@ The list also writes code:
 
 While you type the arguments of a function or procedure, a tip above the line shows its
 parameters, the current one in bold (Esc closes it).
+
+Beside the list, a built-in function shows its parameters, what it returns and what it does.
+SQL Server keeps no catalog of its built-in functions, so they come with QuillSQL
+(`src/data/functions.json`, about 190); add or change some in
+`%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int",
+"what": "..." }]`). The system procedures and functions (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`)
+and their parameters are read from the server, and are offered after `EXEC`. The descriptions
+people gave tables, columns, procedures and parameters (`MS_Description`) show beside the list.
+
+If SSMS closes without shutting down (a crash, a killed process), the next start offers to reopen
+its query windows, with their text and connection (never a password). Turn it off in Options.
 
 F12 on a procedure, view or function created `WITH ENCRYPTION` offers to decrypt it. QuillSQL then
 reads the definition over the dedicated admin connection (DAC), which needs a sysadmin login and,
@@ -203,7 +222,8 @@ While you type, `'`, `[` and `/*` are closed for you (and `(` if you turn it on)
 closing character moves over it.
 
 QuillSQL turns off SSMS's own "Auto list members" so that two lists do not open; turn it back on
-in Tools > Options > Text Editor > Transact-SQL > IntelliSense.
+in Tools > Options > Text Editor > Transact-SQL > IntelliSense. SSMS 22 keeps the setting where
+QuillSQL cannot reach it: if two lists open there, turn "Auto list members" off yourself.
 
 ### Snippets
 
@@ -465,7 +485,7 @@ control, a sectioned style groups settings by `whitespace`, `lists`, `joinStatem
 | Path | What it is |
 |---|---|
 | `%USERPROFILE%\.quillsql.json` | Formatting options |
-| `%USERPROFILE%\.quillsql-colors.json` | Tab and bar colors per server |
+| `%USERPROFILE%\.quillsql-colors.json` | Tab colors per server |
 | `%LOCALAPPDATA%\QuillSQL\settings.json` | Everything set in the Options window |
 | `%LOCALAPPDATA%\QuillSQL\ai.json` | AI model and answer language |
 | `%LOCALAPPDATA%\QuillSQL\Snippets\` | Your snippets |
@@ -480,7 +500,12 @@ Requires Rust (stable) and Visual Studio 2022 with MSBuild; the VS SDK comes fro
 cargo test
 .\vsix\build.ps1                 # builds quill.exe and vsix\QuillSql.Vsix\bin\Release\QuillSql.Vsix.vsix
 .\vsix\install.ps1               # close SSMS first; -RootSuffix Exp for a test instance, -Uninstall to remove
+.\vsix\e2e\run-e2e.ps1 -Version 22   # close SSMS first: end-to-end test in SSMS 22's (or 21's) test instance
 ```
+
+The end-to-end test needs no screen: it starts SSMS with the extension's test hook (a named pipe,
+open only when `QUILLSQL_TEST_PIPE` is set), creates `QuillTest` on `(localdb)\MSSQLLocalDB`,
+types through the editor's command chain and checks the result, then puts your settings back.
 
 ```
 src/      Rust engine: lexer, formatter, IntelliSense, refactoring, analysis, plans, snippets
@@ -519,7 +544,7 @@ installed copies offer the update within a day.
 - `insertSemicolons` skips ambiguous places, for example before `THROW`.
 - Smart Rename of database objects produces a script; it does not change other objects for you.
 - Compare writes certificates and keys as comments only (their private keys can't be read), as SQL
-  Compare does. Full-text and PolyBase objects, and files written by SQL Backup (`.sqb`),
+  Compare does. Full-text and PolyBase objects, and SQL Backup files (`.sqb`),
   are covered by unit tests but have not been checked against a live server or real SQL Backup
   files.
 - Compare treats string literals in modules, defaults and checks as case-sensitive even when the

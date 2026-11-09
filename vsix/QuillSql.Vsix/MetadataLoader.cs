@@ -14,21 +14,36 @@ SELECT DB_NAME(), SCHEMA_NAME();
 SELECT name FROM sys.schemas WHERE schema_id < 16384 ORDER BY name;
 -- Not HAS_DBACCESS: it opens every AUTO_CLOSE database, which takes minutes on servers with many.
 SELECT name FROM sys.databases WHERE state = 0 ORDER BY name;
-SELECT o.object_id, s.name, o.name, o.type
+-- With the description (MS_Description) people give objects, columns and parameters.
+SELECT o.object_id, s.name, o.name, o.type, CONVERT(nvarchar(1000), ep.value)
 FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
+LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = 'MS_Description'
 WHERE o.type IN ('U', 'V', 'P', 'PC', 'FN', 'FS', 'IF', 'TF', 'FT', 'SN') AND o.is_ms_shipped = 0
 UNION ALL
-SELECT o.object_id, s.name, o.name, o.type
+-- The system views, procedures and functions (sp_who2, xp_fixeddrives, fn_my_permissions...).
+SELECT o.object_id, s.name, o.name, o.type, NULL
 FROM sys.system_objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
-WHERE o.type = 'V' AND s.name IN ('sys', 'INFORMATION_SCHEMA');
-SELECT c.object_id, c.name, TYPE_NAME(c.user_type_id), c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity, c.is_computed
+WHERE (o.type = 'V' AND s.name IN ('sys', 'INFORMATION_SCHEMA'))
+   OR (o.type IN ('P', 'X', 'PC', 'FN', 'FS', 'IF', 'TF', 'FT') AND s.name = 'sys');
+SELECT c.object_id, c.name, TYPE_NAME(c.user_type_id), c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity, c.is_computed, dc.definition,
+    CONVERT(nvarchar(1000), ep.value)
 FROM sys.columns c JOIN sys.objects o ON o.object_id = c.object_id
+LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
+LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
 WHERE o.is_ms_shipped = 0 AND o.type IN ('U', 'V', 'IF', 'TF', 'FT')
 ORDER BY c.object_id, c.column_id;
-SELECT p.object_id, p.name, TYPE_NAME(p.user_type_id), p.max_length, p.precision, p.scale, p.is_output
-FROM sys.parameters p JOIN sys.objects o ON o.object_id = p.object_id
-WHERE o.is_ms_shipped = 0 AND p.parameter_id > 0
-ORDER BY p.object_id, p.parameter_id;
+SELECT object_id, name, type, max_length, precision, scale, is_output, description FROM (
+    SELECT p.object_id, p.parameter_id, p.name, TYPE_NAME(p.user_type_id) AS type, p.max_length, p.precision, p.scale, p.is_output,
+        CONVERT(nvarchar(1000), ep.value) AS description
+    FROM sys.parameters p JOIN sys.objects o ON o.object_id = p.object_id
+    LEFT JOIN sys.extended_properties ep ON ep.class = 2 AND ep.major_id = p.object_id AND ep.minor_id = p.parameter_id AND ep.name = 'MS_Description'
+    WHERE o.is_ms_shipped = 0 AND p.parameter_id > 0
+    UNION ALL
+    SELECT p.object_id, p.parameter_id, p.name, TYPE_NAME(p.user_type_id), p.max_length, p.precision, p.scale, p.is_output, NULL
+    FROM sys.system_parameters p JOIN sys.system_objects o ON o.object_id = p.object_id
+    WHERE o.type IN ('P', 'X', 'PC', 'FN', 'FS', 'IF', 'TF', 'FT') AND p.parameter_id > 0
+) p
+ORDER BY object_id, parameter_id;
 SELECT fk.object_id, SCHEMA_NAME(pt.schema_id), pt.name, SCHEMA_NAME(rt.schema_id), rt.name, pc.name, rc.name
 FROM sys.foreign_keys fk
 JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
@@ -57,6 +72,7 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
             public string Schema;
             public string Name;
             public string Kind;
+            public string Description;
             public readonly List<string> Columns = new List<string>();
             public readonly List<string> Params = new List<string>();
         }
@@ -67,7 +83,7 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
             {
                 case "U": return "table";
                 case "V": return "view";
-                case "P": case "PC": return "procedure";
+                case "P": case "PC": case "X": return "procedure";
                 case "FN": case "FS": return "scalar_function";
                 case "IF": case "TF": case "FT": return "table_function";
                 case "SN": return "synonym";
@@ -124,7 +140,7 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
                     r.NextResult();
                     while (r.Read())
                     {
-                        objects[r.GetInt32(0)] = new DbObject { Schema = r.GetString(1), Name = r.GetString(2), Kind = KindOf(r.GetString(3)) };
+                        objects[r.GetInt32(0)] = new DbObject { Schema = r.GetString(1), Name = r.GetString(2), Kind = KindOf(r.GetString(3)), Description = r.IsDBNull(4) ? null : r.GetString(4) };
                     }
                     r.NextResult();
                     while (r.Read())
@@ -133,7 +149,9 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
                         {
                             var type = r.IsDBNull(2) ? "" : TypeText(r.GetString(2), r.GetInt16(3), r.GetByte(4), r.GetByte(5));
                             o.Columns.Add("{\"name\":" + Json.Str(r.GetString(1)) + ",\"type\":" + Json.Str(type)
-                                + ",\"nullable\":" + Bool(r.GetBoolean(6)) + ",\"identity\":" + Bool(r.GetBoolean(7)) + ",\"computed\":" + Bool(r.GetBoolean(8)) + "}");
+                                + ",\"nullable\":" + Bool(r.GetBoolean(6)) + ",\"identity\":" + Bool(r.GetBoolean(7)) + ",\"computed\":" + Bool(r.GetBoolean(8))
+                                + (r.IsDBNull(9) ? "" : ",\"default\":" + Json.Str(r.GetString(9)))
+                                + (r.IsDBNull(10) ? "" : ",\"description\":" + Json.Str(r.GetString(10))) + "}");
                         }
                     }
                     r.NextResult();
@@ -142,7 +160,8 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
                         if (objects.TryGetValue(r.GetInt32(0), out var o) && !r.IsDBNull(1))
                         {
                             var type = r.IsDBNull(2) ? "" : TypeText(r.GetString(2), r.GetInt16(3), r.GetByte(4), r.GetByte(5));
-                            o.Params.Add("{\"name\":" + Json.Str(r.GetString(1)) + ",\"type\":" + Json.Str(type) + ",\"output\":" + Bool(r.GetBoolean(6)) + "}");
+                            o.Params.Add("{\"name\":" + Json.Str(r.GetString(1)) + ",\"type\":" + Json.Str(type) + ",\"output\":" + Bool(r.GetBoolean(6))
+                                + (r.IsDBNull(7) ? "" : ",\"description\":" + Json.Str(r.GetString(7))) + "}");
                         }
                     }
                     r.NextResult();
@@ -178,6 +197,7 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
                 sb.Append("{\"schema\":").Append(Json.Str(o.Schema))
                   .Append(",\"name\":").Append(Json.Str(o.Name))
                   .Append(",\"kind\":").Append(Json.Str(o.Kind))
+                  .Append(o.Description == null ? "" : ",\"description\":" + Json.Str(o.Description))
                   .Append(",\"columns\":[").Append(string.Join(",", o.Columns)).Append(']')
                   .Append(",\"params\":[").Append(string.Join(",", o.Params)).Append("]}");
             }

@@ -257,6 +257,15 @@
           <LocCanonicalName>.QuillSQL.FindSlowQueriesWithAI</LocCanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidQuillSqlCmdSet" id="AboutCommandId" priority="0x0101" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AboutGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>About QuillSQL</ButtonText>
+          <CanonicalName>.QuillSQL.About</CanonicalName>
+          <LocCanonicalName>.QuillSQL.About</LocCanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidQuillSqlCmdSet" id="CheckUpdatesCommandId" priority="0x0100" type="Button">
         <Parent guid="guidQuillSqlCmdSet" id="AboutGroup" />
         <CommandFlag>TextChanges</CommandFlag>
@@ -521,6 +530,7 @@
 
   <KeyBindings>
     <KeyBinding guid="guidQuillSqlCmdSet" id="FormatCommandId" editor="guidVSStd97" key1="F" mod1="Control Shift Alt" />
+    <KeyBinding guid="guidQuillSqlCmdSet" id="RefreshCommandId" editor="guidVSStd97" key1="D" mod1="Control Shift" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="ScriptObjectCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="D" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="ScriptObjectCommandId" editor="guidVSStd97" key1="VK_F12" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="ShowCardCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="K" mod2="Control" />
@@ -562,6 +572,7 @@
       <IDSymbol name="AiGroup" value="0x1025" />
       <IDSymbol name="AboutGroup" value="0x1026" />
       <IDSymbol name="CheckUpdatesCommandId" value="0x0116" />
+      <IDSymbol name="AboutCommandId" value="0x013B" />
       <IDSymbol name="ScriptObjectCommandId" value="0x0120" />
       <IDSymbol name="InsertSemicolonsCommandId" value="0x0121" />
       <IDSymbol name="UnformatCommandId" value="0x0122" />

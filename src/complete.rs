@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::keywords::{is_reserved, DATA_TYPES, FUNCTIONS};
+use crate::keywords::{is_reserved, DATA_TYPES};
 use crate::lexer::{lex_partial, Kind, Token};
 use crate::snippets::Snippet;
 use crate::transform::{missing_terminators, upper_words};
@@ -45,6 +45,8 @@ pub struct DbObject {
     pub kind: String,
     pub columns: Vec<Column>,
     pub params: Vec<Param>,
+    /// The description people gave it (the MS_Description extended property).
+    pub description: Option<String>,
     /// Another database's object, named with the database (`Other.dbo.t`); empty for this one's.
     #[serde(skip)]
     pub database: String,
@@ -60,6 +62,10 @@ pub struct Column {
     /// Identity, computed and rowversion columns cannot be inserted or updated.
     pub identity: bool,
     pub computed: bool,
+    /// The definition of the column's DEFAULT constraint, as stored: `(sysdatetime())`.
+    pub default: Option<String>,
+    /// The column's MS_Description.
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -69,6 +75,8 @@ pub struct Param {
     #[serde(rename = "type")]
     pub data_type: String,
     pub output: bool,
+    /// The parameter's MS_Description.
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -482,6 +490,8 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
             "LEFT" | "RIGHT" | "FULL" if in_from => return words(&["JOIN", "OUTER JOIN"]),
             "OUTER" | "CROSS" if in_from => return words(&["JOIN", "APPLY"]),
             "ORDER" | "GROUP" | "PARTITION" => return words(&["BY"]),
+            // INTO is optional: `INSERT dbo.t`; INTO is offered with the tables.
+            "INSERT" if p == first_at => return Some(Next::Tables),
             "INSERT" => return words(&["INTO"]),
             "CREATE" => return words(CREATE_WHAT),
             "OR" if qw == "CREATE" => return words(&["ALTER"]),
@@ -1081,6 +1091,46 @@ pub(crate) fn sample_value(data_type: &str) -> &'static str {
     }
 }
 
+/// The column list and a VALUES row of an INSERT, one column a line: the column's DEFAULT where it
+/// has one, NULL where it may be null, else a value of its type; a comment names each column.
+pub(crate) fn insert_body(cols: &[&Column], indent: &str, nl: &str) -> String {
+    let mut body = format!("{nl}{indent}({nl}");
+    for (i, c) in cols.iter().enumerate() {
+        let comma = if i + 1 < cols.len() { "," } else { "" };
+        body.push_str(&format!("{indent}    {}{comma}{nl}", quote(&c.name)));
+    }
+    body.push_str(&format!("{indent}){nl}{indent}VALUES{nl}{indent}({nl}"));
+    for (i, c) in cols.iter().enumerate() {
+        let comma = if i + 1 < cols.len() { "," } else { "" };
+        let (value, note) = match &c.default {
+            Some(d) => ("DEFAULT", format!(" (default {})", unwrap_parens(d))),
+            None if c.nullable => ("NULL", String::new()),
+            None => (sample_value(&c.data_type), String::new()),
+        };
+        body.push_str(&format!("{indent}    {value}{comma} -- {} - {}{note}{nl}", c.name, c.data_type));
+    }
+    body.push_str(&format!("{indent})"));
+    body
+}
+
+/// `((0))` and `(getdate())` as `0` and `getdate()`.
+fn unwrap_parens(definition: &str) -> &str {
+    let mut d = definition.trim();
+    while d.len() >= 2 && d.starts_with('(') && d.ends_with(')') {
+        // Only parentheses that wrap the whole text: `(a) + (b)` keeps its own.
+        let inner = &d[1..d.len() - 1];
+        let mut depth = 0i32;
+        if inner.chars().any(|ch| {
+            depth += match ch { '(' => 1, ')' => -1, _ => 0 };
+            depth < 0
+        }) {
+            break;
+        }
+        d = inner.trim();
+    }
+    d
+}
+
 /// A short alias from a name's initials (`OrderLines` -> `ol`), unique among `taken`.
 /// The alias for a table picked in a suggestion: the user's own for that name, or else one made
 /// from the name without its prefix.
@@ -1187,7 +1237,8 @@ pub(crate) fn object_matches(o: &DbObject, parts: &[String], schema: &Schema) ->
         return false;
     }
     match parts {
-        [name] => eq(&o.name, name) && (eq(&o.schema, &schema.default_schema) || schema.default_schema.is_empty()),
+        // System procedures (sp_who2) are called without their schema, from any database.
+        [name] => eq(&o.name, name) && (eq(&o.schema, &schema.default_schema) || schema.default_schema.is_empty() || (o.kind == "procedure" && eq(&o.schema, "sys"))),
         [.., s, name] if s.is_empty() => eq(&o.name, name),
         [.., s, name] => eq(&o.name, name) && eq(&o.schema, s),
         [] => false,
@@ -1420,7 +1471,7 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
         _ if matches!(next, Some(Next::Columns(..))) => Context::TableColumns,
         _ if matches!(next, Some(Next::Tables)) => Context::TableSource,
         _ if matches!(next, Some(Next::Securables)) => Context::Securables,
-        Some((Kind::Word, w)) if matches!(w.as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO" | "TABLE" | "MERGE" | "USING" | "APPLY") => Context::TableSource,
+        Some((Kind::Word, w)) if matches!(w.as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO" | "INSERT" | "TABLE" | "MERGE" | "USING" | "APPLY") => Context::TableSource,
         Some((Kind::Word, w)) if matches!(w.as_str(), "EXEC" | "EXECUTE" | "PROC" | "PROCEDURE") => Context::Procedure,
         Some((Kind::Word, w)) if w == "VIEW" => Context::Views,
         Some((Kind::Word, w)) if w == "FUNCTION" => Context::Functions,
@@ -1568,9 +1619,14 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
     } else {
         match context {
             Context::TableSource | Context::Procedure | Context::Views | Context::Functions | Context::Securables => {
-                for o in meta.objects.iter().filter(|o| wants(context, &o.kind) && o.database.is_empty() && (options.show_system_objects || !is_system(o))) {
+                // After EXEC, the system procedures too (sp_who2, sp_helptext): they are called
+                // without their schema, and sort after the database's own.
+                let system_procedure = |o: &DbObject| context == Context::Procedure && o.kind == "procedure" && eq(&o.schema, "sys");
+                for o in meta.objects.iter().filter(|o| wants(context, &o.kind) && o.database.is_empty() && (options.show_system_objects || !is_system(o) || system_procedure(o))) {
                     let mut item = object_item(o, meta, false);
-                    if qualify && !o.schema.is_empty() {
+                    if system_procedure(o) {
+                        item.insert = quote(&o.name);
+                    } else if qualify && !o.schema.is_empty() {
                         item.insert = format!("{}.{}", quote(&o.schema), quote(&o.name));
                     }
                     if aliasing && matches!(o.kind.as_str(), "table" | "view" | "synonym") {
@@ -1596,6 +1652,9 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                             }
                         }
                     }
+                }
+                if prev_upper == "INSERT" {
+                    items.push(Item { label: "INTO".into(), insert: "INTO".into(), kind: "keyword", detail: String::new() });
                 }
                 if prev_upper == "TABLE" && a.up.get(stmt_start).is_some_and(|w| w == "DROP") {
                     items.push(Item { label: "IF EXISTS".into(), insert: "IF EXISTS".into(), kind: "keyword", detail: String::new() });
@@ -1626,14 +1685,7 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                 if let Some(o) = object_at(&head, from, k, meta) {
                     let cols = writable(&o);
                     if !cols.is_empty() {
-                        let names = cols.iter().map(|c| quote(&c.name)).collect::<Vec<_>>().join(", ");
-                        let mut body = format!("({names}){nl}{indent}VALUES{nl}{indent}({nl}");
-                        for (i, c) in cols.iter().enumerate() {
-                            let comma = if i + 1 < cols.len() { "," } else { "" };
-                            body.push_str(&format!("{indent}    {}{comma} -- {} {}{nl}", sample_value(&c.data_type), c.name, c.data_type));
-                        }
-                        body.push_str(&format!("{indent})"));
-                        items.push(Item { label: "(columns) VALUES (...)".into(), insert: body, kind: "body", detail: format!("{} columns of {}.{}", cols.len(), o.schema, o.name) });
+                        items.push(Item { label: "(columns) VALUES (...)".into(), insert: insert_body(&cols, &indent, nl), kind: "body", detail: format!("{} columns of {}.{}", cols.len(), o.schema, o.name) });
                     }
                 }
             }
@@ -1685,17 +1737,21 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                             items.push(Item { label: "(all columns)".into(), insert: body, kind: "body", detail: format!("{}.{}", o.schema, o.name) });
                         }
                     }
-                // Columns of every source; a name in more than one source is qualified.
-                let all: Vec<(String, String, String)> = sources
+                // Columns of every source. A column of a source with an alias (`dbo.JitBin AS jb`) is
+                // written with it (`jb.Name`), and so is a name in more than one source.
+                let all: Vec<(String, String, String, bool)> = sources
                     .iter()
-                    .flat_map(|s| source_columns(s, schema).into_iter().map(move |(c, t)| (s.reference.clone(), c, t)))
+                    .flat_map(|s| {
+                        let aliased = s.parts.last().is_none_or(|p| !eq(p, &s.reference));
+                        source_columns(s, schema).into_iter().map(move |(c, t)| (s.reference.clone(), c, t, aliased))
+                    })
                     .collect();
                 if picking && all.len() > 1 {
                     items.push(picker());
                 }
-                for (reference, name, ty) in &all {
-                    let ambiguous = all.iter().filter(|(_, n, _)| eq(n, name)).count() > 1;
-                    let insert = if ambiguous { format!("{}.{}", quote(reference), quote(name)) } else { quote(name) };
+                for (reference, name, ty, aliased) in &all {
+                    let ambiguous = all.iter().filter(|(_, n, _, _)| eq(n, name)).count() > 1;
+                    let insert = if ambiguous || *aliased { format!("{}.{}", quote(reference), quote(name)) } else { quote(name) };
                     let detail = if ty.is_empty() { reference.clone() } else { format!("{reference} · {ty}") };
                     items.push(Item { label: name.clone(), insert, kind: "column", detail });
                 }
@@ -1708,10 +1764,11 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                     item.insert = format!("{}.{}()", quote(&o.schema), quote(&o.name));
                     items.push(item);
                 }
-                for f in FUNCTIONS {
+                // Reserved names (LEFT, CONVERT, COALESCE...) come with the keywords.
+                for f in crate::functions::all().iter().filter(|f| !is_reserved(&f.name)) {
                     // The editor puts the caret between the parentheses.
-                    let insert = if NILADIC.contains(f) { f.to_string() } else { format!("{f}()") };
-                    items.push(Item { label: f.to_string(), insert, kind: "function", detail: "built-in function".into() });
+                    let insert = if NILADIC.contains(&f.name.as_str()) { f.name.clone() } else { format!("{}()", f.name) };
+                    items.push(Item { label: f.name.clone(), insert, kind: "function", detail: "built-in function".into() });
                 }
                 for kw in STATEMENT_KEYWORDS.iter().chain(EXPRESSION_KEYWORDS) {
                     items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
@@ -1771,6 +1828,23 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
         (Context::Expression, _) => COMMON_FUNCTIONS.to_vec(),
         _ => Vec::new(),
     };
+    // `INSERT INTO |`: picking a table or view writes the whole statement, its columns and a VALUES
+    // row, unless the statement already goes on after the name.
+    let insert_into = matches!(context, Context::TableSource)
+        && matches!(prev_upper, "INTO" | "INSERT")
+        && a.up.get(stmt_start).is_some_and(|w| w == "INSERT")
+        && after.is_none_or(|j| j >= stmt_end);
+    if insert_into {
+        for it in items.iter_mut().filter(|it| matches!(it.kind, "table" | "view")) {
+            let parts: Vec<String> = it.detail.split('.').map(str::to_string).collect();
+            if let Some(o) = meta.objects.iter().find(|o| object_matches(o, &parts, meta)) {
+                let cols = writable(o);
+                if !cols.is_empty() {
+                    it.insert = format!("{}{}", it.insert, insert_body(&cols, &indent, nl));
+                }
+            }
+        }
+    }
     let likely = |it: &Item| if it.kind == "column" { usize::MAX } else { likely.iter().position(|w| w.eq_ignore_ascii_case(&it.label)).unwrap_or(usize::MAX) };
 
     // Rank: prefix matches, then substring matches; then by kind, how likely, and name.

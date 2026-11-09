@@ -58,15 +58,19 @@ namespace QuillSql.Vsix
         private static Type FindType(string fullName) =>
             AppDomain.CurrentDomain.GetAssemblies().Select(a => { try { return a.GetType(fullName, false); } catch (Exception) { return null; } }).FirstOrDefault(t => t != null);
 
-        /// <summary>SSMS's sign-in kinds (UIConnectionInfo.AuthenticationType) for our authentication values.</summary>
+        /// <summary>
+        /// SSMS's sign-in kinds (UIConnectionInfo.AuthenticationType) for our authentication values:
+        /// 1 SQL Server, 2 Entra password, 3 Entra integrated, 5 Entra MFA. An access token has no
+        /// kind of its own; the window signs in with MFA as SSMS does.
+        /// </summary>
         private static int SsmsAuthentication(string auth)
         {
             switch (auth)
             {
                 case "sql": return 1;
-                case "entraInteractive": case "entra": return 2;
-                case "entraPassword": return 3;
-                case "entraIntegrated": return 4;
+                case "entraPassword": return 2;
+                case "entraIntegrated": return 3;
+                case "entraInteractive": case "entra": return 5;
                 default: return 0;
             }
         }

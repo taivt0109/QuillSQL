@@ -48,6 +48,8 @@ namespace QuillSql.Vsix
         [DataMember(Name = "parameterHints")] public bool ParameterHints { get; set; }
         /// <summary>A keyword, function or data type typed in lower case becomes upper case once something ends it.</summary>
         [DataMember(Name = "uppercaseKeywords")] public bool UppercaseKeywords { get; set; }
+        /// <summary>Offer to reopen the query windows of an SSMS that closed without shutting down.</summary>
+        [DataMember(Name = "restoreTabs")] public bool RestoreTabs { get; set; }
 
         // Typing
         [DataMember(Name = "closeSingleQuote")] public bool CloseSingleQuote { get; set; }
@@ -99,6 +101,7 @@ namespace QuillSql.Vsix
             OwnAliases = "";
             ParameterHints = true;
             UppercaseKeywords = true;
+            RestoreTabs = true;
             CloseSingleQuote = true;
             CloseSquareBracket = true;
             CloseParenthesis = false;

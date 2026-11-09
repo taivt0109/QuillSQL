@@ -78,7 +78,7 @@ Mỗi ngày một lần, QuillSQL kiểm tra GitHub xem có bản mới không. 
 - **What's new**: xem có gì mới;
 - **Skip this version**: bỏ qua phiên bản này.
 
-SSMS không cho thay extension khi đang chạy, nên bản cập nhật được cài ngay sau khi SSMS đóng.
+SSMS không cho thay extension khi đang chạy, nên bản cập nhật được cài ngay sau khi SSMS đóng, trong một cửa sổ nhỏ: nó chờ mọi cửa sổ SSMS tắt hết, nhắc đừng mở SSMS trong lúc cài, rồi báo kết quả (có nút Thử lại nếu SSMS bị mở giữa chừng). Lần mở SSMS sau sẽ báo bản cập nhật đã được cài hay chưa.
 - Kiểm tra ngay: **Tools > QuillSQL > Check for Updates**.
 - Tắt kiểm tra hằng ngày: tạo file `%LOCALAPPDATA%\QuillSQL\settings.json` với nội dung `{ "autoUpdate": false }`, hoặc bỏ chọn trong Options.
 
@@ -104,6 +104,7 @@ SSMS không cho thay extension khi đang chạy, nên bản cập nhật đượ
 | Ctrl+B, Ctrl+I | Khung chat AI |
 | Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Hỏi AI / phân tích plan bằng AI |
 | Ctrl+B, Ctrl+O | Tùy chọn |
+| Ctrl+Shift+D | Làm mới gợi ý (đọc lại object của database) |
 
 Đổi phím trong Tools > Options > Environment > Keyboard (tìm `QuillSQL`). Mọi lệnh đều có trong
 **Tools > QuillSQL** và trong menu chuột phải của editor.
@@ -163,7 +164,7 @@ Từ khóa gõ bằng chữ thường được tự viết hoa khi gõ dấu cá
 
 Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách. Bên cạnh danh sách có ô hiện card của bảng, view, procedure hoặc function đang chọn, giống như khi rê chuột lên tên: số dòng, dung lượng, cột, index, partition và script. Phím nào dùng để chèn (Tab, Enter, Space, `.`, `,`, `(`) do bạn chọn trong Options.
 
-Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** nạp lại toàn bộ.
+Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D) nạp lại toàn bộ.
 
 Danh sách còn viết code giúp bạn:
 
@@ -172,18 +173,23 @@ Danh sách còn viết code giúp bạn:
 - **Sau `ALTER PROCEDURE`, `ALTER VIEW`, `ALTER FUNCTION`:** điền sẵn toàn bộ định nghĩa của object.
 - **Hàm:** hàm có sẵn và hàm scalar được chèn kèm ngoặc, con trỏ nằm giữa: `GETDATE()`.
 - **Sau `EXEC`:** procedure kèm đủ tham số, mỗi tham số một dòng có ghi kiểu dữ liệu.
-- **Sau `INSERT INTO table `:** danh sách cột và một dòng `VALUES` có sẵn chỗ điền cho từng cột.
+- **Chọn bảng sau `INSERT INTO` (hoặc `INSERT`):** chèn cả câu, gồm danh sách cột và một dòng `VALUES`, mỗi cột một dòng: `DEFAULT` cho cột có giá trị mặc định, `NULL` cho cột cho phép NULL, còn lại là giá trị mẫu theo kiểu dữ liệu, kèm comment tên cột và kiểu. Sau `INSERT INTO table ` cũng có danh sách và dòng đó.
+- **Cột của bảng có alias** được chèn kèm alias: `Name` trong `FROM dbo.JitBin AS jb` thành `jb.Name`.
 - **Sau `UPDATE table SET `:** tất cả các cột. Cột identity, computed và rowversion được bỏ qua.
 - **Trong danh sách SELECT:** mục **(choose columns…)** mở danh sách checkbox để chèn nhiều cột một lúc.
 - **Alias:** bỏ qua tiền tố như `tbl` (`tblCustomer AS c`), hoặc dùng alias riêng cho từng bảng; cả hai chỉnh trong Options.
 
 Khi gõ đối số của hàm hoặc procedure, một tooltip phía trên dòng hiện các tham số, tham số hiện tại in đậm (Esc để đóng).
 
+Bên cạnh danh sách gợi ý, hàm có sẵn hiện tham số, kiểu trả về và hàm đó làm gì. SQL Server không có danh mục nào chứa các hàm có sẵn, nên chúng đi kèm QuillSQL (`src/data/functions.json`, khoảng 190 hàm); thêm hoặc sửa trong `%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int", "what": "..." }]`). Procedure và hàm hệ thống (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`) cùng tham số được đọc từ server và gợi ý sau `EXEC`. Mô tả mà người dùng đặt cho bảng, cột, procedure và tham số (`MS_Description`) hiện bên cạnh danh sách.
+
+Nếu SSMS bị tắt ngang (crash, bị kill), lần mở sau sẽ hỏi có mở lại các cửa sổ query không, kèm nội dung và kết nối (không lưu mật khẩu). Tắt trong Options.
+
 F12 trên procedure, view hoặc function tạo bằng `WITH ENCRYPTION` sẽ hỏi có giải mã không. QuillSQL đọc định nghĩa qua kết nối quản trị riêng (DAC): cần login sysadmin, và nếu SSMS chạy trên máy khác thì server phải bật "remote admin connections". Không có gì bị thay đổi trên server. SQL Server Express và LocalDB mặc định không bật DAC.
 
 Khi gõ, `'`, `[` và `/*` được tự đóng (cả `(` nếu bạn bật); gõ ký tự đóng thì con trỏ chỉ nhảy qua nó.
 
-QuillSQL tắt "Auto list members" của SSMS để không hiện hai danh sách cùng lúc. Muốn bật lại thì vào Tools > Options > Text Editor > Transact-SQL > IntelliSense.
+QuillSQL tắt "Auto list members" của SSMS để không hiện hai danh sách cùng lúc. Muốn bật lại thì vào Tools > Options > Text Editor > Transact-SQL > IntelliSense. SSMS 22 lưu cài đặt này ở chỗ QuillSQL không chạm tới được: nếu thấy hai danh sách cùng hiện, hãy tự tắt "Auto list members".
 
 ### Snippet
 
@@ -422,7 +428,10 @@ Cần Rust (bản stable) và Visual Studio 2022 có MSBuild; VS SDK được t�
 cargo test
 .\vsix\build.ps1                 # build quill.exe và vsix\QuillSql.Vsix\bin\Release\QuillSql.Vsix.vsix
 .\vsix\install.ps1               # đóng SSMS trước; -RootSuffix Exp để cài vào instance thử, -Uninstall để gỡ
+.\vsix\e2e\run-e2e.ps1 -Version 22   # đóng SSMS trước: test đầu-cuối trong instance thử của SSMS 22 (hoặc 21)
 ```
+
+Test đầu-cuối không cần màn hình: nó mở SSMS với cổng test của extension (một named pipe, chỉ mở khi có biến `QUILLSQL_TEST_PIPE`), tạo `QuillTest` trên `(localdb)\MSSQLLocalDB`, gõ qua chuỗi lệnh của editor và kiểm tra kết quả, rồi trả lại settings của bạn.
 
 ```
 src/      Engine Rust: lexer, format, IntelliSense, refactor, phân tích code, plan, snippet
@@ -447,7 +456,7 @@ Workflow Release sẽ chạy test, build và đăng `QuillSQL.vsix`, `quill.exe`
 - Với đăng nhập Microsoft Entra, QuillSQL kết nối bằng phiên đăng nhập mà SSMS đang giữ cho cửa sổ query, và xin SSMS một access token mới mỗi lần kết nối, nên token hết hạn được làm mới giống như SSMS tự làm mới. Nếu SSMS không làm mới được mà không cần hỏi lại, hãy chạy một query trong cửa sổ đó để đăng nhập lại. Khi SSMS không giữ token cho cửa sổ (Microsoft Entra MFA, Integrated, Default, Password, Managed Identity, Service Principal), QuillSQL kết nối giống SSMS, cùng phương thức và tài khoản, dùng lại phiên đăng nhập SSMS đã có; nếu bị hỏi đăng nhập và bạn huỷ, nó chỉ thử lại khi chạy Refresh T-SQL Suggestions. Đăng nhập bằng device code không được dùng. Cách này dựa vào phần nội bộ của SSMS và còn mới: báo lại nếu có cửa sổ không đọc được.
 - `insertSemicolons` bỏ qua những chỗ không chắc chắn, ví dụ trước `THROW`.
 - Smart Rename với object trong database chỉ tạo script; nó không tự sửa các object khác.
-- Compare chỉ ghi certificate và key dưới dạng comment (không đọc được private key), giống SQL Compare. Object full-text, PolyBase và file của SQL Backup (`.sqb`) mới được kiểm tra bằng unit test, chưa chạy trên server thật hay file SQL Backup thật.
+- Compare chỉ ghi certificate và key dưới dạng comment (không đọc được private key), giống SQL Compare. Object full-text, PolyBase và file SQL Backup (`.sqb`) mới được kiểm tra bằng unit test, chưa chạy trên server thật hay file SQL Backup thật.
 - Cửa sổ Compare hiện chỉ có tiếng Anh.
 - Tô màu tab phụ thuộc vào cấu trúc tab tài liệu của SSMS 21; một phiên bản SSMS sau này có thể cần cập nhật lại.
 

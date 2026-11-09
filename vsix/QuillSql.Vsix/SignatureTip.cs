@@ -38,6 +38,9 @@ namespace QuillSql.Vsix
 
         public bool IsOpen => _popup.IsOpen;
 
+        /// <summary>The signature shown, as plain text.</summary>
+        public string Text => _text.Text + (string.IsNullOrEmpty(_returns.Text) ? "" : " " + _returns.Text);
+
         /// <summary>Shows the signature with its bottom at `lineTop`, the top of the caret's line (physical pixels).</summary>
         public void Show(SignatureResult signature, IntPtr window, int screenX, int lineTop)
         {

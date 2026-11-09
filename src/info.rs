@@ -36,6 +36,14 @@ pub fn describe_object(o: &DbObject) -> String {
         let params: Vec<String> = o.params.iter().map(|p| format!("{} {}{}", p.name, p.data_type, if p.output { " OUTPUT" } else { "" })).collect();
         out.push_str(&format!(" ({})", params.join(", ")));
     }
+    if let Some(d) = o.description.as_deref().filter(|d| !d.trim().is_empty()) {
+        out.push_str(&format!("\n{}", d.trim()));
+    }
+    for p in &o.params {
+        if let Some(d) = p.description.as_deref().filter(|d| !d.trim().is_empty()) {
+            out.push_str(&format!("\n    {}: {}", p.name, d.trim()));
+        }
+    }
     const SHOWN: usize = 25;
     for c in o.columns.iter().take(SHOWN) {
         let mut flags = String::new();
@@ -45,7 +53,8 @@ pub fn describe_object(o: &DbObject) -> String {
         if c.computed {
             flags.push_str(" computed");
         }
-        out.push_str(&format!("\n    {} {}{}{}", c.name, c.data_type, if c.nullable { " NULL" } else { " NOT NULL" }, flags));
+        let note = c.description.as_deref().filter(|d| !d.trim().is_empty()).map_or(String::new(), |d| format!("  -- {}", d.trim()));
+        out.push_str(&format!("\n    {} {}{}{}{note}", c.name, c.data_type, if c.nullable { " NULL" } else { " NOT NULL" }, flags));
     }
     if o.columns.len() > SHOWN {
         out.push_str(&format!("\n    ... {} more columns", o.columns.len() - SHOWN));

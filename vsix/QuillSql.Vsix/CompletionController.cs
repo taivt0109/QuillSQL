@@ -56,7 +56,33 @@ namespace QuillSql.Vsix
         {
             _view = view;
             _popup.Committed += Commit;
+            _popup.Clicked += () =>
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+                // After the click's own work (a tab, Copy): the keyboard goes back to the editor.
+                _ = System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(new Action(() =>
+                {
+                    ThreadHelper.ThrowIfNotOnUIThread();
+                    // Not when the click opened something else (the script in a new window).
+                    if (_popup.HasKeyboard)
+                    {
+                        _view.SendExplicitFocus();
+                    }
+                }), System.Windows.Threading.DispatcherPriority.Input);
+            };
         }
+
+        /// <summary>The controller of each attached view, for the test hook.</summary>
+        private static readonly Dictionary<IVsTextView, CompletionController> Attached = new Dictionary<IVsTextView, CompletionController>();
+
+        public static CompletionController ForView(IVsTextView view) => Attached.TryGetValue(view, out var controller) ? controller : null;
+
+        /// <summary>The suggestions showing, the selected one marked with *; "closed" when the list is closed.</summary>
+        public string ListState() => !_popup.IsOpen ? "closed"
+            : string.Join(",", _popup.Items.Select(i => (ReferenceEquals(i, _popup.Selected) ? "*" : "") + i.Label));
+
+        /// <summary>The parameter hints showing, or "closed".</summary>
+        public string TipState() => _signature.IsOpen ? "open " + _signature.Text : "closed";
 
         public static CompletionController Attach(IVsTextView view)
         {
@@ -66,6 +92,7 @@ namespace QuillSql.Vsix
             {
                 return null;
             }
+            Attached[view] = controller;
             if (view is IConnectionPointContainer container)
             {
                 var iid = typeof(IVsTextViewEvents).GUID;
@@ -78,6 +105,7 @@ namespace QuillSql.Vsix
         public void Detach()
         {
             ThreadHelper.ThrowIfNotOnUIThread();
+            Attached.Remove(_view);
             _popup.Close();
             _signature.Close();
             _view.RemoveCommandFilter(this);
@@ -794,7 +822,11 @@ namespace QuillSql.Vsix
             {
                 Log.Verbose("parameter hints closed: focus lost");
             }
-            _popup.Close();
+            // A click in the list or its card takes the focus for a moment; the list stays open.
+            if (!_popup.IsMouseOver)
+            {
+                _popup.Close();
+            }
             _signature.Close();
         }
 

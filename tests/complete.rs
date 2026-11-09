@@ -84,7 +84,10 @@ fn columns_through_alias_and_table_name() {
 fn columns_of_all_sources_with_ambiguous_names_qualified() {
     let i = inserts("select | from Customers c join sales.Orders o on o.CustomerId = c.CustomerId");
     assert!(i.contains(&"c.CustomerId".into()) && i.contains(&"o.CustomerId".into()), "{i:?}");
-    assert!(i.contains(&"Total".into()) && i.contains(&"Name".into()));
+    // With an alias, every column is written with it.
+    assert!(i.contains(&"o.Total".into()) && i.contains(&"c.Name".into()), "{i:?}");
+    let i = inserts("select | from dbo.Customers");
+    assert!(i.contains(&"Name".into()), "{i:?}");
 }
 
 #[test]
@@ -163,7 +166,7 @@ fn exec_inserts_the_parameter_list() {
 #[test]
 fn insert_and_update_bodies_skip_identity_columns() {
     let i = inserts("insert into dbo.Customers |");
-    let expected = "(Name, [Order])\nVALUES\n(\n    N'', -- Name nvarchar(100)\n    0 -- Order int\n)";
+    let expected = "\n(\n    Name,\n    [Order]\n)\nVALUES\n(\n    N'', -- Name - nvarchar(100)\n    0 -- Order - int\n)";
     assert_eq!(i.first().map(String::as_str), Some(expected), "{i:?}");
     let u = inserts("update Customers set |");
     let expected = "Name = N'', -- nvarchar(100)\n                     [Order] = 0 -- int";
@@ -195,7 +198,7 @@ fn tables_get_an_alias_unless_one_is_written() {
     assert_eq!(inserts("select * from Cust|").first().map(String::as_str), Some("dbo.Customers AS c"));
     assert_eq!(inserts("select * from Customers c join sales.Ord|").first().map(String::as_str), Some("Orders AS o"));
     assert_eq!(inserts("select * from Cust| x").first().map(String::as_str), Some("dbo.Customers"));
-    assert_eq!(inserts("insert into Cust|").first().map(String::as_str), Some("dbo.Customers"));
+    assert!(inserts("insert into Cust|").first().is_some_and(|i| i.starts_with("dbo.Customers\n(\n    Name,") && i.contains("VALUES")));
     let text = "select * from Cust";
     let plain = quillsql::complete::CompleteOptions { assign_aliases: false, qualify_object_names: false, ..Default::default() };
     let c = quillsql::complete::complete_full(text, text.len(), Some(&schema()), &[], plain);
@@ -313,7 +316,7 @@ fn words_that_must_follow_a_keyword() {
     assert_eq!(labels("select * from dbo.Customers c left |"), ["JOIN", "OUTER JOIN"]);
     assert_eq!(labels("select * from dbo.Customers c where c.Name is |"), ["NULL", "NOT NULL"]);
     assert_eq!(labels("select * from dbo.Customers c order |"), ["BY"]);
-    assert_eq!(labels("insert |"), ["INTO"]);
+    assert_eq!(labels("insert in|"), ["INTO"]);
     assert_eq!(labels("select * from dbo.Customers c union |"), ["ALL", "SELECT"]);
     assert_eq!(labels("select * from dbo.Customers c where exists (|"), ["SELECT"]);
     assert_eq!(labels("select row_number() over (|"), ["PARTITION BY", "ORDER BY"]);
@@ -483,4 +486,115 @@ fn a_parameter_given_by_name_is_not_offered_again_nor_taken_for_a_variable() {
     assert!(!l.contains(&"@CustomerId".into()), "{l:?}");
     let l = labels("declare @CustomerId int = 1;\nexec dbo.usp_GetOrders @CustomerId = @|");
     assert!(l.contains(&"@CustomerId".into()), "{l:?}");
+}
+
+#[test]
+fn picking_the_table_of_an_insert_writes_the_whole_statement() {
+    let s: Schema = serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo", "schemas": ["dbo"],
+        "objects": [{"schema": "dbo", "name": "JitBin", "kind": "table", "columns": [
+            {"name": "Id", "type": "int", "identity": true},
+            {"name": "Name", "type": "varchar(100)"},
+            {"name": "Note", "type": "nvarchar(max)", "nullable": true},
+            {"name": "IsActive", "type": "bit", "default": "((1))"},
+            {"name": "CreatedOnUtc", "type": "datetime", "default": "(getutcdate())"}]}]
+    }))
+    .unwrap();
+    let at = |sql: &str| {
+        let caret = sql.find('|').unwrap();
+        let text = sql.replace('|', "");
+        complete(&text, caret, Some(&s)).items.into_iter().next().map(|i| i.insert)
+    };
+    let expected = "dbo.JitBin
+(
+    Name,
+    Note,
+    IsActive,
+    CreatedOnUtc
+)
+VALUES
+(
+    '', -- Name - varchar(100)
+    NULL, -- Note - nvarchar(max)
+    DEFAULT, -- IsActive - bit (default 1)
+    DEFAULT -- CreatedOnUtc - datetime (default getutcdate())
+)";
+    assert_eq!(at("insert into Jit|").as_deref(), Some(expected));
+    assert_eq!(at("INSERT dbo.Jit|").as_deref(), Some(expected.trim_start_matches("dbo.")));
+    // Written further already: only the name.
+    assert_eq!(at("insert into Jit| (Name) values ('a')").as_deref(), Some("dbo.JitBin"));
+}
+
+#[test]
+fn tables_and_into_after_insert() {
+    let l = labels("insert |");
+    assert!(l.contains(&"INTO".into()) && l.contains(&"Customers".into()), "{l:?}");
+    assert!(inserts("insert Custo|").first().is_some_and(|i| i.starts_with("dbo.Customers
+(") || i.starts_with("dbo.Customers
+(")), "{:?}", inserts("insert Custo|"));
+}
+
+#[test]
+fn a_column_of_a_table_with_an_alias_is_written_with_it() {
+    let i = inserts("select top 10 Na| from dbo.Customers AS c");
+    assert_eq!(i.first().map(String::as_str), Some("c.Name"), "{i:?}");
+}
+
+#[test]
+fn system_procedures_after_exec_and_their_parameters() {
+    let s: Schema = serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo", "schemas": ["dbo", "sys"],
+        "objects": [
+            {"schema": "dbo", "name": "usp_Sync", "kind": "procedure"},
+            {"schema": "sys", "name": "sp_who2", "kind": "procedure", "params": [{"name": "@loginame", "type": "sysname"}]},
+            {"schema": "sys", "name": "sp_helptext", "kind": "procedure", "params": [{"name": "@objname", "type": "nvarchar(776)"}, {"name": "@columnname", "type": "sysname"}]}
+        ]
+    }))
+    .unwrap();
+    let at = |sql: &str| {
+        let caret = sql.find('|').unwrap();
+        let text = sql.replace('|', "");
+        complete(&text, caret, Some(&s)).items
+    };
+    let items = at("exec sp_w|");
+    assert_eq!(items.first().map(|i| i.label.as_str()), Some("sp_who2"), "{items:?}");
+    assert!(items[0].insert.starts_with("sp_who2"), "{:?}", items[0].insert);
+    // The database's own procedures come first.
+    let all: Vec<String> = at("exec |").into_iter().map(|i| i.label).collect();
+    assert!(all.iter().position(|l| l == "usp_Sync") < all.iter().position(|l| l == "sp_who2"), "{all:?}");
+    let text = "exec sp_helptext 'dbo.t', ";
+    let sig = quillsql::signature::signature_at(text, text.len(), Some(&s)).expect("signature");
+    assert_eq!((sig.params.len(), sig.active), (2, 1), "{sig:?}");
+}
+
+#[test]
+fn built_in_functions_come_from_the_data_file_with_what_they_do() {
+    let all = quillsql::functions::all();
+    assert!(all.len() >= 180, "{}", all.len());
+    for f in all {
+        assert!(!f.what.is_empty() && !f.returns.is_empty(), "{f:?}");
+    }
+    let d = quillsql::functions::describe("dateadd").unwrap();
+    assert!(d.starts_with("DATEADD(datepart, number, date)") && d.contains("Adds"), "{d}");
+    let text = "select type_name(";
+    let sig = quillsql::signature::signature_at(text, text.len(), None).expect("signature");
+    assert_eq!(sig.name, "TYPE_NAME");
+}
+
+#[test]
+fn descriptions_people_gave_objects_columns_and_parameters_are_shown() {
+    let s: Schema = serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo", "schemas": ["dbo"],
+        "objects": [
+            {"schema": "dbo", "name": "JitBin", "kind": "table", "description": "Bins of the just-in-time warehouse",
+             "columns": [{"name": "Code", "type": "varchar(20)", "description": "Printed on the label"}]},
+            {"schema": "dbo", "name": "usp_Move", "kind": "procedure", "description": "Moves a bin",
+             "params": [{"name": "@BinId", "type": "int", "description": "The bin to move"}]}
+        ]
+    }))
+    .unwrap();
+    let table = quillsql::info::describe_object(&s.objects[0]);
+    assert!(table.contains("Bins of the just-in-time warehouse") && !table.contains("Code varchar(20) NULL") && table.contains("-- Printed on the label"), "{table}");
+    let procedure = quillsql::info::describe_object(&s.objects[1]);
+    assert!(procedure.contains("Moves a bin") && procedure.contains("@BinId: The bin to move"), "{procedure}");
 }
