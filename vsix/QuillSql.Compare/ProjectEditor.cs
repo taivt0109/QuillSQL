@@ -207,13 +207,13 @@ namespace QuillSql.Compare
         private JsonObject _lastPreview;
 
         /// <summary>The pairs as the comparison will make them, from the project as edited so far.</summary>
-        private async System.Threading.Tasks.Task<JsonObject> Preview()
+        private async System.Threading.Tasks.Task<JsonObject> Preview(bool refresh)
         {
             Collect();
             // Nothing to read until both sides are chosen.
             bool incomplete(JsonObject s) => s == null || (s.Str("type") == "empty" ? false : s.Str("type") == "database" || string.IsNullOrEmpty(s.Str("type")) ? string.IsNullOrEmpty(s.Str("server")) || string.IsNullOrEmpty(s.Str("database")) : string.IsNullOrEmpty(s.Str("path")));
             if (incomplete(_project.Obj("source")) || incomplete(_project.Obj("target"))) return null;
-            _lastPreview = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("mapping_preview", new JsonObject { ["project"] = _session.WithPasswords() }));
+            _lastPreview = await Ui.Try(_session.Host.Owner, () => _session.Engine.RequestObject("mapping_preview", new JsonObject { ["project"] = _session.WithPasswords(), ["refresh"] = refresh }));
             return _lastPreview;
         }
 

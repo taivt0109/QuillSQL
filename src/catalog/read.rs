@@ -21,7 +21,7 @@ pub fn read_database_with(spec: &ConnectionSpec, decrypt: bool) -> Result<Databa
     let rt = db::runtime()?;
     rt.block_on(async {
         let mut conn = db::connect_async(spec).await?;
-        let mut model = read(&mut conn).await?;
+        let mut model = read_ahead(&mut conn, Some(spec)).await?;
         if decrypt {
             super::decrypt::decrypt_modules(&mut conn, spec, &mut model).await?;
         }
@@ -31,32 +31,118 @@ pub fn read_database_with(spec: &ConnectionSpec, decrypt: bool) -> Result<Databa
 
 /// Reads the connection's current database.
 pub async fn read(conn: &mut Connection) -> Result<Database, String> {
-    db::execute(conn, "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SET LOCK_TIMEOUT 30000;").await?;
+    read_ahead(conn, None).await
+}
+
+/// Isolation for every connection of a read.
+const SESSION: &str = "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SET LOCK_TIMEOUT 30000;";
+
+/// Connections that run catalog queries at the same time, the reader's own included.
+const AHEAD: usize = 4;
+
+/// Reads the database. With `spec`, the catalog queries run first on several connections at
+/// once (the queries depend only on the server's version, so a dry run lists them); the model is
+/// then built from their rows in the usual order. A query that was not fetched, or failed, runs
+/// on the reader's connection then, so the result is the same either way.
+async fn read_ahead(conn: &mut Connection, spec: Option<&ConnectionSpec>) -> Result<Database, String> {
+    db::execute(conn, SESSION).await?;
+    let started = std::time::Instant::now();
     let mut r = Reader { db: Database { model_version: MODEL_VERSION, ..Default::default() }, ..Default::default() };
-    r.server_info(conn).await?;
-    let v = Version::of(&r.db.server);
-    r.schemas(conn).await?;
-    r.objects(conn).await?;
-    r.types(conn, &v).await?;
-    r.tables(conn, &v).await?;
-    r.external_tables(conn, &v).await?;
-    r.columns(conn, &v).await?;
-    r.indexes(conn, &v).await?;
-    r.partitions(conn).await?;
-    r.foreign_keys(conn).await?;
-    r.check_constraints(conn).await?;
-    r.file_tables(conn).await?;
-    r.modules(conn, &v).await?;
-    r.triggers(conn).await?;
-    r.sequences(conn).await?;
-    r.synonyms(conn).await?;
-    r.extended_properties(conn).await?;
-    r.principals(conn).await?;
-    r.permissions(conn).await?;
-    r.more_objects(conn, &v).await?;
-    r.dependencies(conn).await?;
-    r.object_dependencies();
+    let mut c = Conn { live: Some(conn), ready: HashMap::new(), noted: None };
+    r.server_info(&mut c).await?;
+    let mut timings = Vec::new();
+    if let Some(spec) = spec {
+        let mut dry = Reader { db: r.db.clone(), ..Default::default() };
+        let mut list = Conn { live: None, ready: HashMap::new(), noted: Some(Vec::new()) };
+        let _ = dry.steps(&mut list).await;
+        let sqls = list.noted.unwrap_or_default();
+        let live = c.live.take().expect("the reader's connection");
+        (c.ready, timings) = fetch_ahead(live, spec, &sqls).await;
+        c.live = Some(live);
+    }
+    r.steps(&mut c).await?;
+    log_timings(&r.db, started.elapsed(), &timings);
     Ok(r.finish())
+}
+
+/// The reader's connection: rows fetched ahead are answered from memory, other queries run on
+/// the server. In a dry run (`noted`) queries are only listed and return no rows.
+pub(super) struct Conn<'a> {
+    live: Option<&'a mut Connection>,
+    ready: HashMap<String, Vec<Row>>,
+    noted: Option<Vec<String>>,
+}
+
+impl Conn<'_> {
+    pub(super) async fn query(&mut self, sql: &str) -> Result<Vec<Row>, String> {
+        if let Some(noted) = &mut self.noted {
+            noted.push(sql.to_string());
+            return Ok(Vec::new());
+        }
+        if let Some(rows) = self.ready.remove(sql) {
+            return Ok(rows);
+        }
+        db::query(self.live.as_deref_mut().ok_or("no connection")?, sql).await
+    }
+}
+
+/// Runs `sqls` on the reader's connection and AHEAD - 1 more, each taking the next query not yet
+/// started; the rows of those that succeed, and how long each took.
+async fn fetch_ahead(live: &mut Connection, spec: &ConnectionSpec, sqls: &[String]) -> Fetched {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::Mutex::new((HashMap::new(), Vec::new()));
+    let extra = async {
+        // More connections while there is work for them; one that fails to open just isn't used.
+        let opened = futures_util::future::join_all((1..AHEAD.min(sqls.len())).map(|_| async {
+            let mut c = db::connect_async(spec).await.ok()?;
+            db::execute(&mut c, SESSION).await.ok()?;
+            Some(c)
+        }))
+        .await;
+        let mut conns: Vec<Connection> = opened.into_iter().flatten().collect();
+        futures_util::future::join_all(conns.iter_mut().map(|c| run_queue(c, sqls, &next, &done))).await;
+    };
+    futures_util::future::join(run_queue(live, sqls, &next, &done), extra).await;
+    done.into_inner().unwrap()
+}
+
+/// Rows by query, and how long each query took.
+type Fetched = (HashMap<String, Vec<Row>>, Vec<(String, u128)>);
+
+/// Takes the next query not yet started until none is left.
+async fn run_queue(conn: &mut Connection, sqls: &[String], next: &std::sync::atomic::AtomicUsize, done: &std::sync::Mutex<Fetched>) {
+    loop {
+        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some(sql) = sqls.get(i) else { break };
+        let t = std::time::Instant::now();
+        let rows = db::query(conn, sql).await;
+        let mut d = done.lock().unwrap();
+        d.1.push((sql.clone(), t.elapsed().as_millis()));
+        if let Ok(rows) = rows {
+            d.0.insert(sql.clone(), rows);
+        }
+    }
+}
+
+/// Notes how long a read took, and its slowest queries, in `%LOCALAPPDATA%\QuillSQL\Logs\QuillCompare-read.log`.
+fn log_timings(db: &Database, total: std::time::Duration, timings: &[(String, u128)]) {
+    use std::io::Write;
+    let Some(dir) = std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("QuillSQL").join("Logs")) else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("QuillCompare-read.log");
+    // Kept small: started again past 1 MB.
+    let append = std::fs::metadata(&path).map(|m| m.len() < 1 << 20).unwrap_or(false);
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).write(true).append(append).truncate(!append).open(&path) else { return };
+    let mut slow: Vec<&(String, u128)> = timings.iter().collect();
+    slow.sort_by_key(|t| std::cmp::Reverse(t.1));
+    let mut text = format!("{} UTC [{}]: read in {} ms, {} queries ahead
+", crate::schema::backup::utc_stamp(), db.name, total.as_millis(), timings.len());
+    for (sql, ms) in slow.iter().take(8) {
+        let head: String = sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(150).collect();
+        text.push_str(&format!("  {ms:>7} ms  {head}
+"));
+    }
+    let _ = f.write_all(text.as_bytes());
 }
 
 /// Which catalog columns exist. Azure SQL Database has every feature of the newest box version.
@@ -167,9 +253,35 @@ pub(super) fn flag(row: &Row, i: usize) -> bool {
 }
 
 impl Reader {
-    async fn server_info(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    /// Everything after the server's version, in the order the model needs.
+    async fn steps(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let v = Version::of(&self.db.server);
+        self.schemas(conn).await?;
+        self.objects(conn).await?;
+        self.types(conn, &v).await?;
+        self.tables(conn, &v).await?;
+        self.external_tables(conn, &v).await?;
+        self.columns(conn, &v).await?;
+        self.indexes(conn, &v).await?;
+        self.partitions(conn).await?;
+        self.foreign_keys(conn).await?;
+        self.check_constraints(conn).await?;
+        self.file_tables(conn).await?;
+        self.modules(conn, &v).await?;
+        self.triggers(conn).await?;
+        self.sequences(conn).await?;
+        self.synonyms(conn).await?;
+        self.extended_properties(conn).await?;
+        self.principals(conn).await?;
+        self.permissions(conn).await?;
+        self.more_objects(conn, &v).await?;
+        self.dependencies(conn).await?;
+        self.object_dependencies();
+        Ok(())
+    }
+
+    async fn server_info(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)),
                     CAST(SERVERPROPERTY('Edition') AS nvarchar(128)),
                     CAST(SERVERPROPERTY('EngineEdition') AS int),
@@ -190,15 +302,14 @@ impl Reader {
         self.db.compatibility_level = i(row, 5) as u32;
         // Azure SQL Database refuses SUSER_SNAME with an argument (error 40507); the owner stays unknown there.
         if !self.db.server.is_azure_sql_database() {
-            let rows = db::query(conn, "SELECT SUSER_SNAME(owner_sid) FROM sys.databases WHERE database_id = DB_ID()").await?;
+            let rows = conn.query("SELECT SUSER_SNAME(owner_sid) FROM sys.databases WHERE database_id = DB_ID()").await?;
             self.db.owner = rows.first().and_then(|r| text(r, 0));
         }
         Ok(())
     }
 
-    async fn schemas(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn schemas(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT s.name, USER_NAME(s.principal_id), s.schema_id FROM sys.schemas AS s
              WHERE s.schema_id < 16384 AND s.name NOT IN (N'sys', N'INFORMATION_SCHEMA', N'guest')
              ORDER BY s.name",
@@ -210,9 +321,8 @@ impl Reader {
     }
 
     /// Names of every object, so later queries can resolve ids without joins.
-    async fn objects(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn objects(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT o.object_id, RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name, o.parent_object_id,
                     CONVERT(nvarchar(23), o.modify_date, 121), USER_NAME(o.principal_id)
              FROM sys.objects AS o WHERE o.type NOT IN ('S', 'IT')",
@@ -235,7 +345,7 @@ impl Reader {
         self.objects.get(&id).map(|(_, n)| n.clone())
     }
 
-    async fn types(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn types(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let sql = format!(
             "SELECT SCHEMA_NAME(t.schema_id), t.name, t.is_table_type, t.is_assembly_type,
                     TYPE_NAME(t.system_type_id), CAST(t.max_length AS int), CAST(t.precision AS int),
@@ -252,7 +362,7 @@ impl Reader {
              ORDER BY 1, 2",
             mo = v.pick(SQL2014, "ISNULL(tt.is_memory_optimized, 0)", "CAST(0 AS bit)"),
         );
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let mut ty = UserType { schema: s(&r, 0), name: s(&r, 1), nullable: flag(&r, 8), owner: text(&r, 12), ..Default::default() };
             if flag(&r, 2) {
                 ty.kind = UserTypeKind::Table;
@@ -272,7 +382,7 @@ impl Reader {
         Ok(())
     }
 
-    async fn tables(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn tables(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let sql = format!(
             "SELECT t.object_id, SCHEMA_NAME(t.schema_id), t.name, t.lock_escalation_desc,
                     ds.name, RTRIM(ds.type), lob.name, fs.name,
@@ -307,7 +417,7 @@ impl Reader {
             stretch = if (SQL2016..=16).contains(&v.major) { "t.is_remote_data_archive_enabled" } else { "CAST(0 AS bit)" },
         );
         let mut history: Vec<(usize, i32)> = Vec::new();
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let mut t = Table {
                 schema: s(&r, 1),
                 name: s(&r, 2),
@@ -349,8 +459,7 @@ impl Reader {
             }
         }
         // Views are owners of columns and indexes too.
-        let views = db::query(
-            conn,
+        let views = conn.query(
             &format!(
                 "SELECT o.object_id, SCHEMA_NAME(o.schema_id), o.name FROM sys.views AS o WHERE {USER_OBJECT} ORDER BY 2, 3"
             ),
@@ -381,7 +490,7 @@ impl Reader {
         }
     }
 
-    async fn columns(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn columns(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let sql = format!(
             "SELECT c.object_id, c.column_id, c.name,
                     ty.name, CASE WHEN ty.is_user_defined = 1 THEN SCHEMA_NAME(ty.schema_id) END,
@@ -419,7 +528,7 @@ impl Reader {
                 "",
             ),
         );
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let Some(&owner) = self.owners.get(&i(&r, 0)) else { continue };
             let schema = text(&r, 4);
             let mut data_type = if schema.is_some() {
@@ -467,7 +576,7 @@ impl Reader {
         Ok(())
     }
 
-    async fn indexes(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn indexes(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let sql = format!(
             "SELECT i.object_id, i.index_id, i.name, CAST(i.type AS int), i.is_unique, i.is_primary_key,
                     i.is_unique_constraint, ISNULL(kc.is_system_named, 0), CAST(i.fill_factor AS int), i.is_padded,
@@ -490,7 +599,7 @@ impl Reader {
                 "",
             ),
         );
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let object = i(&r, 0);
             let Some(&owner) = self.owners.get(&object) else { continue };
             let kind = match i(&r, 3) {
@@ -530,8 +639,7 @@ impl Reader {
             self.index_slots.insert((object, i(&r, 1)), (owner, slot));
         }
 
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT ic.object_id, ic.index_id, c.name, CAST(ic.key_ordinal AS int), ic.is_descending_key,
                     ic.is_included_column, CAST(ic.partition_ordinal AS int)
              FROM sys.index_columns AS ic
@@ -570,7 +678,7 @@ impl Reader {
     }
 
     /// The parts of XML and spatial indexes that sys.indexes does not show.
-    async fn xml_and_spatial_indexes(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn xml_and_spatial_indexes(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         // Selective XML indexes came with SQL Server 2012 SP1.
         let selective = v.major >= SQL2014;
         let sql = format!(
@@ -586,7 +694,7 @@ impl Reader {
                 ""
             },
         );
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let Some(&(owner, slot)) = self.index_slots.get(&(i(&r, 0), i(&r, 1))) else { continue };
             let kind = match i(&r, 2) {
                 1 => XmlIndexKind::Secondary,
@@ -604,8 +712,7 @@ impl Reader {
             self.indexes_of(owner)[slot].xml = Some(xml);
         }
         if selective {
-            let rows = db::query(
-                conn,
+            let rows = conn.query(
                 "SELECT p.object_id, p.index_id, p.path_id, p.name, p.path, CAST(p.path_type AS int),
                         p.xquery_type_description, CAST(p.xquery_max_length AS int), p.is_node, p.is_singleton,
                         t.name, CAST(p.max_length AS int),
@@ -633,8 +740,7 @@ impl Reader {
                     x.paths.push(path);
                 }
             }
-            let rows = db::query(
-                conn,
+            let rows = conn.query(
                 "SELECT n.object_id, n.index_id, n.is_default_uri, n.prefix, n.uri
                  FROM sys.selective_xml_index_namespaces AS n ORDER BY n.object_id, n.index_id, n.prefix",
             )
@@ -647,8 +753,7 @@ impl Reader {
                 }
             }
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT si.object_id, si.index_id, CAST(si.spatial_index_type AS int), st.tessellation_scheme,
                     CONVERT(float, st.bounding_box_xmin), CONVERT(float, st.bounding_box_ymin),
                     CONVERT(float, st.bounding_box_xmax), CONVERT(float, st.bounding_box_ymax),
@@ -680,9 +785,8 @@ impl Reader {
     }
 
     /// Data compression per partition of tables and indexes.
-    async fn partitions(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn partitions(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT p.object_id, p.index_id, p.partition_number, p.data_compression_desc,
                     COUNT(*) OVER (PARTITION BY p.object_id, p.index_id)
              FROM sys.partitions AS p
@@ -729,9 +833,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn foreign_keys(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn foreign_keys(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT fk.object_id, fk.parent_object_id, fk.name, fk.is_system_named, fk.referenced_object_id,
                     fk.delete_referential_action_desc, fk.update_referential_action_desc,
                     fk.is_disabled, fk.is_not_trusted, fk.is_not_for_replication
@@ -756,8 +859,7 @@ impl Reader {
             });
             slots.insert(i(&r, 0), (t, table.foreign_keys.len() - 1));
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT fkc.constraint_object_id, pc.name, rc.name
              FROM sys.foreign_key_columns AS fkc
              JOIN sys.columns AS pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
@@ -775,9 +877,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn check_constraints(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn check_constraints(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT cc.parent_object_id, cc.name, cc.is_system_named, cc.definition,
                     CASE WHEN cc.parent_column_id > 0 THEN COL_NAME(cc.parent_object_id, cc.parent_column_id) END,
                     cc.is_disabled, cc.is_not_trusted, cc.is_not_for_replication
@@ -803,7 +904,7 @@ impl Reader {
         Ok(())
     }
 
-    async fn modules(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn modules(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let sql = format!(
             "SELECT o.object_id, RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name,
                     m.definition, ISNULL(m.uses_ansi_nulls, 1), ISNULL(m.uses_quoted_identifier, 1),
@@ -823,7 +924,7 @@ impl Reader {
             native = v.pick(SQL2014, "ISNULL(m.uses_native_compilation, 0)", "CAST(0 AS bit)"),
             user = USER_OBJECT,
         );
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let id = i(&r, 0);
             let kind = s(&r, 1);
             let definition = text(&r, 4);
@@ -872,9 +973,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn triggers(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn triggers(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT tr.object_id, tr.parent_id, tr.name, tr.is_disabled, tr.is_instead_of_trigger,
                     tr.is_not_for_replication,
                     MAX(CASE WHEN te.type = 1 THEN 1 ELSE 0 END), MAX(CASE WHEN te.type = 2 THEN 1 ELSE 0 END),
@@ -927,8 +1027,7 @@ impl Reader {
                 _ => {}
             }
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT tr.name, m.definition, tr.is_disabled, ISNULL(m.uses_ansi_nulls, 1), ISNULL(m.uses_quoted_identifier, 1),
                     CASE WHEN am.object_id IS NOT NULL THEN QUOTENAME(a.name) COLLATE DATABASE_DEFAULT + N'.' + QUOTENAME(am.assembly_class) COLLATE DATABASE_DEFAULT
                          + N'.' + QUOTENAME(am.assembly_method) COLLATE DATABASE_DEFAULT END,
@@ -960,9 +1059,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn sequences(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn sequences(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT SCHEMA_NAME(sq.schema_id), sq.name, TYPE_NAME(sq.user_type_id),
                     CASE WHEN ty.is_user_defined = 1 THEN SCHEMA_NAME(ty.schema_id) END,
                     CAST(sq.precision AS int), CAST(sq.scale AS int),
@@ -997,9 +1095,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn synonyms(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn synonyms(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT SCHEMA_NAME(o.schema_id), o.name, o.base_object_name FROM sys.synonyms AS o
              WHERE o.is_ms_shipped = 0 ORDER BY 1, 2",
         )
@@ -1010,9 +1107,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn extended_properties(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn extended_properties(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT ep.class, ep.major_id, ep.minor_id, ep.name,
                     CASE WHEN SQL_VARIANT_PROPERTY(ep.value, 'BaseType') IN ('binary', 'varbinary')
                          THEN CONVERT(nvarchar(max), CONVERT(varbinary(max), ep.value), 1) ELSE CONVERT(nvarchar(max), ep.value) END,
@@ -1144,11 +1240,10 @@ impl Reader {
         Ok(())
     }
 
-    async fn principals(&mut self, conn: &mut Connection) -> Result<(), String> {
+    async fn principals(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
         // Azure SQL Database cannot name a user's login (SUSER_SNAME takes no argument there), as in SQL Compare.
         let login = if self.db.server.is_azure_sql_database() { "NULL" } else { "SUSER_SNAME(p.sid)" };
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             &format!(
                 "SELECT p.name, p.type_desc, {login}, p.default_schema_name, USER_NAME(p.owning_principal_id),
                     CASE WHEN p.type IN ('S', 'U', 'G') AND p.authentication_type = 0 THEN 1 ELSE 0 END,
@@ -1180,8 +1275,7 @@ impl Reader {
                 no_connect: false,
             });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT m.name, r.name FROM sys.database_role_members AS rm
              JOIN sys.database_principals AS r ON r.principal_id = rm.role_principal_id
              JOIN sys.database_principals AS m ON m.principal_id = rm.member_principal_id
@@ -1197,12 +1291,11 @@ impl Reader {
         Ok(())
     }
 
-    async fn permissions(&mut self, conn: &mut Connection) -> Result<(), String> {
+    async fn permissions(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
         // CONNECT for users comes with CREATE USER: only its absence (no_connect), DENY and WITH
         // GRANT OPTION are kept. Other securables are named in the query: (schema, name) for types
         // and XML schema collections, the name for the rest.
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT p.class, p.major_id, p.permission_name, p.state_desc, g.name,
                     CASE WHEN p.class = 1 AND p.minor_id > 0 THEN COL_NAME(p.major_id, p.minor_id) END,
                     CASE p.class WHEN 6 THEN (SELECT SCHEMA_NAME(t.schema_id) FROM sys.types AS t WHERE t.user_type_id = p.major_id)
@@ -1229,8 +1322,7 @@ impl Reader {
              ORDER BY p.class, p.major_id, g.name, p.permission_name, p.minor_id",
         )
         .await?;
-        let connected = db::query(
-            conn,
+        let connected = conn.query(
             "SELECT g.name FROM sys.database_permissions AS p
              JOIN sys.database_principals AS g ON g.principal_id = p.grantee_principal_id
              WHERE p.class = 0 AND p.permission_name = 'CONNECT'",
@@ -1272,12 +1364,11 @@ impl Reader {
 
     /// FileTables: their options, and the constraints and indexes SQL Server made for them,
     /// which are left out (they come with `AS FILETABLE`).
-    async fn file_tables(&mut self, conn: &mut Connection) -> Result<(), String> {
+    async fn file_tables(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
         if matches!(self.db.server.engine_edition, 5 | 8) {
             return Ok(());
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT f.object_id, f.directory_name, f.filename_collation_name FROM sys.filetables AS f",
         )
         .await?;
@@ -1285,8 +1376,7 @@ impl Reader {
             let Some(Owner::Table(t)) = self.owners.get(&i(&r, 0)).copied() else { continue };
             self.db.tables[t].file_table = Some(FileTable { directory: s(&r, 1), filename_collation: s(&r, 2), primary_key: None });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT d.parent_object_id, o.name, RTRIM(o.type) FROM sys.filetable_system_defined_objects AS d
              JOIN sys.objects AS o ON o.object_id = d.object_id",
         )
@@ -1316,9 +1406,8 @@ impl Reader {
         self.parents.get(&id).and_then(|p| self.objects.get(p)).cloned()
     }
 
-    async fn dependencies(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn dependencies(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT DISTINCT d.referencing_id, d.referenced_id, d.is_schema_bound_reference
              FROM sys.sql_expression_dependencies AS d
              WHERE d.referencing_class = 1 AND d.referenced_class = 1 AND d.referenced_id IS NOT NULL
@@ -1356,8 +1445,7 @@ impl Reader {
         }
         // Modules that use a user-defined type or an XML schema collection through a parameter
         // (or a result column) can't outlive it.
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT p.object_id, SCHEMA_NAME(t.schema_id), t.name FROM sys.parameters AS p
              JOIN sys.types AS t ON t.user_type_id = p.user_type_id AND t.is_user_defined = 1
              UNION

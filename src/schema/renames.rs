@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use super::compare::Mappings;
+use super::compare::{Mappings, ObjectType};
 use super::ddl;
 use crate::catalog::{Database, ObjectName, Table};
 
@@ -56,9 +56,11 @@ pub fn detect(db1: &Database, db2: &Database, mappings: &Mappings) -> Vec<Rename
     if only1.is_empty() || only2.is_empty() {
         return Vec::new();
     }
-    let script = |t: &Table| ddl::create_table(t, None, false);
-    let scripts1: Vec<String> = only1.iter().map(|t| script(t)).collect();
-    let scripts2: Vec<String> = only2.iter().map(|t| script(t)).collect();
+    // The whole table as SQL Compare scripts it (keys, indexes, constraints too), not only its
+    // columns: small tables of a few nvarchar columns would otherwise all look alike.
+    let script = |db: &Database, t: &Table| super::ddl_objects::object_sql(db, ObjectType::Table, &t.object_name()).unwrap_or_else(|| ddl::create_table(t, None, false));
+    let scripts1: Vec<String> = only1.iter().map(|t| script(db1, t)).collect();
+    let scripts2: Vec<String> = only2.iter().map(|t| script(db2, t)).collect();
     let mut found = Vec::new();
     for (a, s1) in only1.iter().zip(&scripts1) {
         for (b, s2) in only2.iter().zip(&scripts2) {

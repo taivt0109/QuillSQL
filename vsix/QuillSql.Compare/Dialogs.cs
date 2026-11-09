@@ -636,9 +636,10 @@ namespace QuillSql.Compare
             {
                 Source = QName(r.Obj("source")),
                 Target = QName(r.Obj("target")),
-                Reason = r.Str("reason") == "identical" ? "identical except for the name" : r.Str("reason") == "script" ? "similar definition (" + r.Long("similarity") + "%)" : "similar name (" + r.Long("similarity") + "% alike)",
+                Reason = r.Str("reason") == "identical" ? "identical except for the name" : r.Str("reason") == "script" ? "similar definition (" + r.Long("similarity") + "%)" : "similar name only",
                 Data = r,
-                Map = r.Str("reason") != "name",
+                // Only a table that differs in nothing but its name is mapped unless the user ticks it.
+                Map = r.Str("reason") == "identical",
             }).ToList();
             var w = Ui.Dialog(owner, "Table renames", null, 820, 480);
             var grid = new DataGrid { ItemsSource = rows, AutoGenerateColumns = false, CanUserAddRows = false, HeadersVisibility = DataGridHeadersVisibility.Column };

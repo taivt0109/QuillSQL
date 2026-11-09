@@ -253,10 +253,27 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         common::check_output(Path::new(path), args)?;
     }
 
-    let (db1, folder1) = load(&source1, args, &options)?;
-    let (db2, folder2) = match &side2 {
-        Side::Source(s) => load(s, args, &options)?,
-        Side::Empty => (Database { name: String::new(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }, None),
+    // Two live databases are read at the same time, as SQL Compare does; other sources in order,
+    // so that what their readers print keeps its order.
+    let (db1, folder1, loaded2) = match &side2 {
+        Side::Source(s @ Source::Live(_)) if matches!(source1, Source::Live(_)) => {
+            let (r1, r2) = std::thread::scope(|scope| {
+                let t2 = scope.spawn(|| load(s, args, &options));
+                let r1 = load(&source1, args, &options);
+                (r1, t2.join().unwrap_or_else(|_| Err(ArgError::new(exit::EXECUTION_FAILED, "reading database 2 failed".to_string()))))
+            });
+            let (db1, folder1) = r1?;
+            (db1, folder1, Some(r2?))
+        }
+        _ => {
+            let (db1, folder1) = load(&source1, args, &options)?;
+            (db1, folder1, None)
+        }
+    };
+    let (db2, folder2) = match (&side2, loaded2) {
+        (_, Some(loaded)) => loaded,
+        (Side::Source(s), None) => load(s, args, &options)?,
+        (Side::Empty, None) => (Database { name: String::new(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }, None),
     };
     // SSDT folders change how the comparison is made, not how scripts and files are written.
     let compare_options = sources::ssdt_options(options.clone(), &[folder1.as_ref(), folder2.as_ref()]);

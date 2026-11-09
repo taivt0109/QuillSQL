@@ -36,7 +36,7 @@ namespace QuillSql.Compare
         }
 
         private readonly bool _tables;
-        private readonly Func<Task<JsonObject>> _load;
+        private readonly Func<bool, Task<JsonObject>> _load;
         private readonly Action<string, string> _map;
         private readonly Action<string> _unmap;
         private readonly Action _restore;
@@ -51,7 +51,7 @@ namespace QuillSql.Compare
 
         /// <param name="tables">Tables (else owners).</param>
         /// <param name="columns">Opens the column mapping of a mapped table; null for owners.</param>
-        public MappingPane(bool tables, Func<Task<JsonObject>> load, Action<string, string> map, Action<string> unmap, Action restore, Action<JsonObject> columns)
+        public MappingPane(bool tables, Func<bool, Task<JsonObject>> load, Action<string, string> map, Action<string> unmap, Action restore, Action<JsonObject> columns)
         {
             _tables = tables;
             _load = load;
@@ -76,7 +76,7 @@ namespace QuillSql.Compare
                 _mapped.Columns.Add(new DataGridTextColumn { Header = "", Binding = new Binding("How"), Width = 90 });
                 _mapped.Columns.Add(new DataGridTextColumn { Header = "Owner", Binding = new Binding("Target"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
             }
-            var refresh = Ui.Button("Refresh", async () => await Reload(), glyph: Glyph.Refresh);
+            var refresh = Ui.Button("Refresh", async () => await Reload(true), glyph: Glyph.Refresh);
             var restoreButton = Ui.Button("Restore defaults", async () => { _restore(); await Reload(); });
             restoreButton.ToolTip = "Forget your mappings and pair everything by name again";
             var unmapButton = Ui.Button("Unmap", async () =>
@@ -153,10 +153,11 @@ namespace QuillSql.Compare
 
         private static string Q(JsonObject n) => n == null ? "" : "[" + n.Str("schema") + "].[" + n.Str("name") + "]";
 
-        public async Task Reload()
+        /// <summary>Shows the pairs again; <paramref name="refresh"/> reads the data sources again instead of reusing them.</summary>
+        public async Task Reload(bool refresh = false)
         {
             _status.Text = "Reading the data sources…";
-            var reply = await _load();
+            var reply = await _load(refresh);
             if (reply == null)
             {
                 _status.Text = "Choose both data sources, then Refresh.";

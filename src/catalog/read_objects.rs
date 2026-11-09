@@ -5,8 +5,7 @@ use std::collections::HashMap;
 
 use super::model::*;
 use super::objects::*;
-use super::read::{Owner, Reader, SQL2012, SQL2016, SQL2019, USER_OBJECT, Version, flag, i, int, s, system_type, text};
-use crate::db::{self, Connection};
+use super::read::{Conn, Owner, Reader, SQL2012, SQL2016, SQL2019, USER_OBJECT, Version, flag, i, int, s, system_type, text};
 
 /// A boundary value or parameter default (an sql_variant `v`) as a T-SQL literal.
 const VARIANT_LITERAL: &str = "CASE WHEN {v} IS NULL THEN N'NULL'
@@ -117,12 +116,11 @@ fn permission_set(desc: &str) -> String {
 
 impl Reader {
     /// External tables own columns like tables do, so they are read before the columns.
-    pub(super) async fn external_tables(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    pub(super) async fn external_tables(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         if v.major < SQL2016 {
             return Ok(());
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT et.object_id, SCHEMA_NAME(et.schema_id), et.name, ds.name, ff.name, et.location,
                     et.reject_type, CONVERT(nvarchar(40), et.reject_value), CONVERT(nvarchar(40), et.reject_sample_value),
                     et.remote_schema_name, et.remote_object_name, CAST(et.distribution_type AS int), COL_NAME(et.object_id, et.sharding_col_id)
@@ -161,7 +159,7 @@ impl Reader {
     }
 
     /// Everything else of [`super::objects`], once tables, modules and principals are read.
-    pub(super) async fn more_objects(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    pub(super) async fn more_objects(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let azure_db = self.db.server.is_azure_sql_database();
         self.assemblies(conn).await?;
         self.clr_signatures(conn).await?;
@@ -185,9 +183,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn assemblies(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn assemblies(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT a.assembly_id, a.name, USER_NAME(a.principal_id), a.clr_name, a.is_visible, a.permission_set_desc
              FROM sys.assemblies AS a WHERE a.is_user_defined = 1 ORDER BY a.name",
         )
@@ -208,8 +205,7 @@ impl Reader {
         if ids.is_empty() {
             return Ok(());
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT f.assembly_id, f.name, CONVERT(varchar(max), f.content, 2)
              FROM sys.assembly_files AS f JOIN sys.assemblies AS a ON a.assembly_id = f.assembly_id
              WHERE a.is_user_defined = 1 ORDER BY f.assembly_id, f.file_id",
@@ -220,8 +216,7 @@ impl Reader {
                 self.db.assemblies[a].files.push(AssemblyFile { name: s(&r, 1), content: s(&r, 2) });
             }
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT ar.assembly_id, ra.name FROM sys.assembly_references AS ar
              JOIN sys.assemblies AS ra ON ra.assembly_id = ar.referenced_assembly_id
              WHERE ra.is_user_defined = 1 ORDER BY ar.assembly_id, ra.name",
@@ -236,7 +231,7 @@ impl Reader {
     }
 
     /// Parameters, return types and result columns of CLR modules (T-SQL modules have them in their text).
-    async fn clr_signatures(&mut self, conn: &mut Connection) -> Result<(), String> {
+    async fn clr_signatures(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
         if !self.db.routines.iter().any(|r| r.clr_method.is_some()) {
             return Ok(());
         }
@@ -251,7 +246,7 @@ impl Reader {
              ORDER BY p.object_id, p.parameter_id",
             default = variant_literal("p.default_value"),
         );
-        let rows = db::query(conn, &sql).await?;
+        let rows = conn.query(&sql).await?;
         let index: HashMap<ObjectName, usize> =
             self.db.routines.iter().enumerate().map(|(k, r)| (ObjectName::new(&r.schema, &r.name), k)).collect();
         for r in rows {
@@ -270,8 +265,7 @@ impl Reader {
                 default: if flag(&r, 9) { text(&r, 10) } else { None },
             });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT c.object_id, c.name, TYPE_NAME(c.user_type_id), CASE WHEN t.is_user_defined = 1 THEN SCHEMA_NAME(t.schema_id) END,
                     CAST(c.max_length AS int), CAST(c.precision AS int), CAST(c.scale AS int), c.is_nullable, c.collation_name
              FROM sys.columns AS c
@@ -297,9 +291,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn xml_schema_collections(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn xml_schema_collections(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT SCHEMA_NAME(x.schema_id), x.name, USER_NAME(x.principal_id),
                     CONVERT(nvarchar(max), XML_SCHEMA_NAMESPACE(SCHEMA_NAME(x.schema_id), x.name))
              FROM sys.xml_schema_collections AS x WHERE x.xml_collection_id > 65535 ORDER BY 1, 2",
@@ -312,9 +305,8 @@ impl Reader {
     }
 
     /// CREATE DEFAULT and CREATE RULE objects (default constraints have a parent).
-    async fn bindables(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn bindables(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             &format!(
                 "SELECT RTRIM(o.type), SCHEMA_NAME(o.schema_id), o.name, m.definition
                  FROM sys.objects AS o JOIN sys.sql_modules AS m ON m.object_id = o.object_id
@@ -330,10 +322,9 @@ impl Reader {
         Ok(())
     }
 
-    async fn partitioning(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn partitioning(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let system = v.pick(SQL2012, "WHERE pf.is_system = 0", "");
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             &format!(
                 "SELECT pf.function_id, pf.name, pf.boundary_value_on_right, TYPE_NAME(pp.system_type_id),
                         CAST(pp.max_length AS int), CAST(pp.precision AS int), CAST(pp.scale AS int)
@@ -356,8 +347,7 @@ impl Reader {
         if ids.is_empty() {
             return Ok(());
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             &format!(
                 "SELECT rv.function_id, {value} FROM sys.partition_range_values AS rv
                  WHERE rv.parameter_id = 1 ORDER BY rv.function_id, rv.boundary_id",
@@ -371,8 +361,7 @@ impl Reader {
             }
         }
         let system = v.pick(SQL2012, "WHERE ps.is_system = 0", "");
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             &format!(
                 "SELECT ps.name, pf.name, ds.name FROM sys.partition_schemes AS ps
                  JOIN sys.partition_functions AS pf ON pf.function_id = ps.function_id
@@ -393,7 +382,7 @@ impl Reader {
     }
 
     /// CREATE STATISTICS objects: user-created statistics that no index stands behind.
-    async fn statistics(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn statistics(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let sql = format!(
             "SELECT st.object_id, st.stats_id, st.name, st.filter_definition, st.no_recompute, {incremental}
              FROM sys.stats AS st JOIN sys.objects AS o ON o.object_id = st.object_id AND o.type IN ('U', 'V')
@@ -402,7 +391,7 @@ impl Reader {
             incremental = v.pick(super::read::SQL2014, "st.is_incremental", "CAST(0 AS bit)"),
         );
         let mut slots = HashMap::new();
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let stat = Statistic { name: s(&r, 2), filter: text(&r, 3), no_recompute: flag(&r, 4), incremental: flag(&r, 5), columns: Vec::new() };
             let list = match self.owners.get(&i(&r, 0)).copied() {
                 Some(Owner::Table(t)) => &mut self.db.tables[t].statistics,
@@ -415,8 +404,7 @@ impl Reader {
         if slots.is_empty() {
             return Ok(());
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT sc.object_id, sc.stats_id, c.name FROM sys.stats_columns AS sc
              JOIN sys.stats AS st ON st.object_id = sc.object_id AND st.stats_id = sc.stats_id AND st.user_created = 1
              JOIN sys.columns AS c ON c.object_id = sc.object_id AND c.column_id = sc.column_id
@@ -435,22 +423,20 @@ impl Reader {
         Ok(())
     }
 
-    async fn fulltext(&mut self, conn: &mut Connection, v: &Version, azure_db: bool) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn fulltext(&mut self, conn: &mut Conn<'_>, v: &Version, azure_db: bool) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT c.name, USER_NAME(c.principal_id), c.is_default, c.is_accent_sensitivity_on FROM sys.fulltext_catalogs AS c ORDER BY c.name",
         )
         .await?;
         for r in rows {
             self.db.fulltext_catalogs.push(FullTextCatalog { name: s(&r, 0), owner: text(&r, 1), is_default: flag(&r, 2), accent_sensitive: flag(&r, 3) });
         }
-        let rows = db::query(conn, "SELECT sl.name, USER_NAME(sl.principal_id) FROM sys.fulltext_stoplists AS sl ORDER BY sl.name").await?;
+        let rows = conn.query("SELECT sl.name, USER_NAME(sl.principal_id) FROM sys.fulltext_stoplists AS sl ORDER BY sl.name").await?;
         for r in rows {
             self.db.fulltext_stoplists.push(FullTextStoplist { name: s(&r, 0), owner: text(&r, 1), words: Vec::new() });
         }
         if !self.db.fulltext_stoplists.is_empty() {
-            let rows = db::query(
-                conn,
+            let rows = conn.query(
                 "SELECT sl.name, sw.stopword, sw.language_id FROM sys.fulltext_stopwords AS sw
                  JOIN sys.fulltext_stoplists AS sl ON sl.stoplist_id = sw.stoplist_id",
             )
@@ -466,8 +452,7 @@ impl Reader {
         }
         let property_lists = v.major >= SQL2012 && !azure_db;
         if property_lists {
-            let rows = db::query(
-                conn,
+            let rows = conn.query(
                 "SELECT pl.name, USER_NAME(pl.principal_id), p.property_name, CONVERT(nvarchar(36), p.property_set_guid), p.property_int_id, p.property_description
                  FROM sys.registered_search_property_lists AS pl
                  LEFT JOIN sys.registered_search_properties AS p ON p.property_list_id = pl.property_list_id
@@ -497,7 +482,7 @@ impl Reader {
             pl_join = if property_lists { "LEFT JOIN sys.registered_search_property_lists AS pl ON pl.property_list_id = fi.property_list_id" } else { "" },
         );
         let mut any = false;
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             let stoplist = match int(&r, 5) {
                 None => "OFF".to_string(),
                 Some(0) => "SYSTEM".to_string(),
@@ -527,8 +512,7 @@ impl Reader {
         if !any {
             return Ok(());
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT fc.object_id, c.name, tc.name, fc.language_id FROM sys.fulltext_index_columns AS fc
              JOIN sys.columns AS c ON c.object_id = fc.object_id AND c.column_id = fc.column_id
              LEFT JOIN sys.columns AS tc ON tc.object_id = fc.object_id AND tc.column_id = fc.type_column_id
@@ -549,9 +533,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn edge_constraints(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn edge_constraints(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT ec.parent_object_id, ec.name, ec.is_system_named, ec.is_disabled, ec.is_not_trusted,
                     CAST(ec.delete_referential_action AS int), ecc.from_object_id, ecc.to_object_id
              FROM sys.edge_constraints AS ec JOIN sys.edge_constraint_clauses AS ecc ON ecc.object_id = ec.object_id
@@ -580,11 +563,10 @@ impl Reader {
 
     /// Sensitivity classification: the catalog view from SQL Server 2019, and the extended
     /// properties older tools wrote (taken out of the extended property list).
-    async fn sensitivity(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
+    async fn sensitivity(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
         let mut found: Vec<(i32, i32, Sensitivity)> = Vec::new();
         if v.major >= SQL2019 {
-            let rows = db::query(
-                conn,
+            let rows = conn.query(
                 "SELECT sc.major_id, sc.minor_id, CONVERT(nvarchar(128), sc.label), CONVERT(nvarchar(128), sc.label_id),
                         CONVERT(nvarchar(128), sc.information_type), CONVERT(nvarchar(128), sc.information_type_id), sc.rank_desc
                  FROM sys.sensitivity_classifications AS sc WHERE sc.class = 1 AND sc.minor_id > 0",
@@ -595,8 +577,7 @@ impl Reader {
                 found.push((i(&r, 0), i(&r, 1), Sensitivity { label: text(&r, 2), label_id: text(&r, 3), information_type: text(&r, 4), information_type_id: text(&r, 5), rank }));
             }
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT ep.major_id, ep.minor_id, ep.name, CONVERT(nvarchar(128), ep.value) FROM sys.extended_properties AS ep
              WHERE ep.class = 1 AND ep.minor_id > 0
                AND ep.name IN (N'sys_sensitivity_label_name', N'sys_sensitivity_label_id', N'sys_information_type_name', N'sys_information_type_id')",
@@ -635,9 +616,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn service_broker(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn service_broker(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT mt.name, USER_NAME(mt.principal_id), RTRIM(mt.validation), QUOTENAME(SCHEMA_NAME(x.schema_id)) + N'.' + QUOTENAME(x.name)
              FROM sys.service_message_types AS mt
              LEFT JOIN sys.xml_schema_collections AS x ON x.xml_collection_id = mt.xml_collection_id
@@ -654,8 +634,7 @@ impl Reader {
             };
             self.db.message_types.push(MessageType { name: s(&r, 0), owner: text(&r, 1), validation: validation.into(), xml_collection: collection });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT c.name, USER_NAME(c.principal_id), mt.name, u.is_sent_by_initiator, u.is_sent_by_target
              FROM sys.service_contracts AS c
              LEFT JOIN sys.service_contract_message_usages AS u ON u.service_contract_id = c.service_contract_id
@@ -688,7 +667,7 @@ impl Reader {
                           WHERE it.parent_object_id = q.object_id) AS fg
              WHERE q.is_ms_shipped = 0 ORDER BY 2, 3";
         let mut queues = HashMap::new();
-        for r in db::query(conn, sql).await? {
+        for r in conn.query(sql).await? {
             let activation = text(&r, 8).map(|procedure| QueueActivation {
                 enabled: flag(&r, 7),
                 procedure,
@@ -708,8 +687,7 @@ impl Reader {
                 event_notifications: Vec::new(),
             });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT s.name, USER_NAME(s.principal_id), SCHEMA_NAME(o.schema_id), o.name, c.name
              FROM sys.services AS s
              JOIN sys.objects AS o ON o.object_id = s.service_queue_id
@@ -728,8 +706,7 @@ impl Reader {
                 self.db.services.last_mut().unwrap().contracts.push(c);
             }
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT r.name, USER_NAME(r.principal_id), r.remote_service_name, r.broker_instance, CONVERT(nvarchar(30), r.lifetime, 121),
                     r.address, r.mirror_address
              FROM sys.routes AS r WHERE r.name <> N'AutoCreatedLocal' ORDER BY r.name",
@@ -746,8 +723,7 @@ impl Reader {
                 mirror_address: text(&r, 6),
             });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT b.name, USER_NAME(b.principal_id), b.remote_service_name, USER_NAME(b.remote_principal_id), b.is_anonymous_on
              FROM sys.remote_service_bindings AS b ORDER BY b.name",
         )
@@ -755,8 +731,7 @@ impl Reader {
         for r in rows {
             self.db.service_bindings.push(ServiceBinding { name: s(&r, 0), owner: text(&r, 1), remote_service: s(&r, 2), user: s(&r, 3), anonymous: flag(&r, 4) });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT en.object_id, en.name, en.parent_class, en.parent_id, en.service_name, en.broker_instance, e.type_desc
              FROM sys.event_notifications AS en LEFT JOIN sys.events AS e ON e.object_id = en.object_id
              WHERE en.parent_class IN (0, 1) ORDER BY en.object_id, e.type_desc",
@@ -798,9 +773,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn keys(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn keys(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT c.name, USER_NAME(c.principal_id), c.subject, c.issuer_name, CONVERT(nvarchar(100), c.thumbprint, 1),
                     CONVERT(nvarchar(30), c.start_date, 120), CONVERT(nvarchar(30), c.expiry_date, 120), c.pvt_key_encryption_type,
                     c.is_active_for_begin_dialog, c.cert_serial_number
@@ -821,8 +795,7 @@ impl Reader {
                 serial_number: s(&r, 9),
             });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT k.name, USER_NAME(k.principal_id), CONVERT(nvarchar(100), k.thumbprint, 1), k.algorithm_desc, k.key_length, k.pvt_key_encryption_type
              FROM sys.asymmetric_keys AS k ORDER BY k.name",
         )
@@ -837,8 +810,7 @@ impl Reader {
                 private_key: s(&r, 5),
             });
         }
-        let rows = db::query(
-            conn,
+        let rows = conn.query(
             "SELECT k.name, USER_NAME(k.principal_id), k.algorithm_desc, k.key_length, CONVERT(nvarchar(36), k.key_guid),
                     CONVERT(nvarchar(30), k.create_date, 120), CONVERT(nvarchar(30), k.modify_date, 120)
              FROM sys.symmetric_keys AS k WHERE k.name NOT LIKE N'##%' ORDER BY k.name",
@@ -858,9 +830,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn security_policies(&mut self, conn: &mut Connection) -> Result<(), String> {
-        let rows = db::query(
-            conn,
+    async fn security_policies(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
+        let rows = conn.query(
             "SELECT SCHEMA_NAME(sp.schema_id), sp.name, sp.is_enabled, sp.is_schema_bound, sp.is_not_for_replication,
                     p.predicate_type_desc, p.predicate_definition, OBJECT_SCHEMA_NAME(p.target_object_id), OBJECT_NAME(p.target_object_id),
                     p.operation_desc
@@ -895,8 +866,8 @@ impl Reader {
         Ok(())
     }
 
-    async fn polybase(&mut self, conn: &mut Connection, v: &Version) -> Result<(), String> {
-        let rows = db::query(conn, "SELECT c.name FROM sys.database_scoped_credentials AS c ORDER BY c.name").await?;
+    async fn polybase(&mut self, conn: &mut Conn<'_>, v: &Version) -> Result<(), String> {
+        let rows = conn.query("SELECT c.name FROM sys.database_scoped_credentials AS c ORDER BY c.name").await?;
         self.db.credentials = rows.iter().map(|r| s(r, 0)).collect();
         let sql = format!(
             "SELECT ds.name, ds.location, ds.type_desc, ds.resource_manager_location, c.name, ds.database_name, ds.shard_map_name, {more}
@@ -904,7 +875,7 @@ impl Reader {
              ORDER BY ds.name",
             more = v.pick(SQL2019, "ds.connection_options, CASE ds.pushdown WHEN N'ON' THEN 1 WHEN N'OFF' THEN 0 END", "CAST(NULL AS nvarchar(4000)), CAST(NULL AS int)"),
         );
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             self.db.external_data_sources.push(ExternalDataSource {
                 name: s(&r, 0),
                 location: s(&r, 1),
@@ -923,7 +894,7 @@ impl Reader {
              FROM sys.external_file_formats AS f ORDER BY f.name",
             first_row = v.pick(SQL2019, "f.first_row", "CAST(NULL AS int)"),
         );
-        for r in db::query(conn, &sql).await? {
+        for r in conn.query(&sql).await? {
             self.db.external_file_formats.push(ExternalFileFormat {
                 name: s(&r, 0),
                 format_type: s(&r, 1).to_ascii_uppercase(),
