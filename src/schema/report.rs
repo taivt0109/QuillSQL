@@ -1,6 +1,6 @@
-//! Comparison reports for `/report`, in SQL Compare's formats: its XML layout (so existing
+//! Comparison reports for `/report`, in the classic compare tool's formats: its XML layout (so existing
 //! parsers keep working), an HTML page and a classic HTML page with the same information, and
-//! Excel (SpreadsheetML as SQL Compare writes it, or an .xlsx workbook).
+//! Excel (SpreadsheetML as the classic compare tool writes it, or an .xlsx workbook).
 
 use std::fmt::Write;
 
@@ -41,7 +41,7 @@ pub struct Report {
     pub include_identical: bool,
 }
 
-/// SQL Compare's name of the object type (`StoredProcedure`).
+/// The classic compare tool's name of the object type (`StoredProcedure`).
 pub fn type_name(t: ObjectType) -> &'static str {
     match t {
         ObjectType::Schema => "Schema",
@@ -82,7 +82,7 @@ pub fn type_name(t: ObjectType) -> &'static str {
     }
 }
 
-/// The type as people read it, as in SQL Compare's Excel report.
+/// The type as people read it, as in the classic compare tool's Excel report.
 fn readable_type(t: ObjectType) -> &'static str {
     match t {
         ObjectType::StoredProcedure => "Stored Procedure",
@@ -128,7 +128,7 @@ fn status_rank(k: DiffKind) -> u8 {
     }
 }
 
-/// SQL Compare's report order of object types; types without a rank come first.
+/// The classic compare tool's report order of object types; types without a rank come first.
 fn type_rank(t: ObjectType) -> u8 {
     match t {
         ObjectType::Table => 1,
@@ -219,7 +219,7 @@ fn datasource(out: &mut String, s: &DataSource, id: &str) {
     out.push_str("</datasource>");
 }
 
-/// The report XML, in SQL Compare's layout (not indented).
+/// The report XML, in the classic compare tool's layout (not indented).
 pub fn xml_text(r: &Report) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-16\"?>");
     let _ = write!(out, "<comparison direction=\"1to2\" timestamp=\"{}\"><datasources>", attr(&r.timestamp));
@@ -453,7 +453,7 @@ fn source_cell(s: &DataSource) -> String {
 const TITLE: &str = "QuillSQL Compare Report:";
 const HEADINGS: [&str; 6] = ["Type", "Owner", "Object", "Status", "Object", "Owner"];
 
-/// The Excel report as SQL Compare writes it: an XML Spreadsheet 2003 workbook.
+/// The Excel report as the classic compare tool writes it: an XML Spreadsheet 2003 workbook.
 pub fn excel(r: &Report) -> String {
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?><?mso-application progid=\"Excel.Sheet\"?>\

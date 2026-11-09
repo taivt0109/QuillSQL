@@ -1,5 +1,5 @@
 //! `quill data`: compare the data of two databases and deploy the differences, with the
-//! switches, console summary, CSV export and exit codes of SQLDataCompare.exe.
+//! switches, console summary, CSV export and exit codes of the classic data compare command line.
 
 use std::path::Path;
 
@@ -18,7 +18,7 @@ use crate::data::{DataOpt, DataOptions, sync};
 use crate::db::ConnectionSpec;
 use crate::schema::deploy;
 
-/// SQLDataCompare.exe's own exit codes.
+/// the classic data compare command line's own exit codes.
 const NOTHING_TO_COMPARE: u8 = 60;
 const CANNOT_CREATE: u8 = 73;
 
@@ -99,7 +99,7 @@ fn switches() -> Vec<Switch> {
 
 const SUMMARY: &str = "Compares the data of two databases table by table and deploys the differences.";
 
-/// SQLDataCompare.exe's own rules, after the shared ones.
+/// the classic data compare command line's own rules, after the shared ones.
 const RULES: [Rule; 4] = [
     Rule { name: "options", values: enums::DATA_OPTIONS, list: true, ..Rule::NONE },
     Rule {
@@ -282,7 +282,7 @@ fn live(source: Source, n: u8) -> Result<ConnectionSpec, ArgError> {
 }
 
 fn execute(args: &Args) -> Result<u8, ArgError> {
-    // Dependency checks first, as SQLDataCompare.exe does.
+    // Dependency checks first, as the classic data compare command line does.
     if !["project", "database2", "connection2", "snapshot2", "backup2", "makescripts", "scripts2", "sourcecontrol2", "sca2", "empty2"].iter().any(|s| args.has(s)) {
         return Err(ArgError::new(
             exit::USAGE,
@@ -333,7 +333,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     let project_sides = (common::spec_of(Some(&source1), args, 1), common::spec_of(source2.as_ref(), args, 2));
     // /empty2 (or a project's EmptyDatabaseSource): database 1's tables with no rows.
     let empty2 = args.has("empty2") || (source2.is_none() && project.as_ref().is_some_and(|p| p.target.is_empty_database()));
-    // A scripts folder is read without a server, as SQL Data Compare reads it.
+    // A scripts folder is read without a server, as the classic data compare tool reads it.
     let open = |s: Source, n: u8| -> Result<Opened, ArgError> {
         if let Source::Backup(b) = &s {
             return Ok(Opened::Backup(Box::new(super::backups::open(b)?)));
@@ -343,7 +343,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             eprintln!("Reading database scripts from '{}'...", path.display());
         }
         let f = crate::sources::datafolder::read(&path, revision.as_deref()).map_err(|e| ArgError::new(exit::NOTHING_TO_COMPARE, e))?;
-        // What the folder's parser skipped and QuillDatabaseInfo.xml problems, as SQL Compare prints them.
+        // What the folder's parser skipped and QuillDatabaseInfo.xml problems, as the classic compare tool prints them.
         for w in f.folder.warnings.iter().cloned().chain(f.folder.messages.iter().map(|m| m.text())) {
             console::warn(&w);
         }
@@ -366,7 +366,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
     } else {
         open(source2.ok_or_else(|| ArgError::new(exit::USAGE, "give database 2: /server2 and /database2"))?, 2)?
     };
-    // A scripts folder is named by its folder, as SQL Data Compare does.
+    // A scripts folder is named by its folder, as the classic data compare tool does.
     let model = |side: &Opened| -> Result<(Database, String), ArgError> {
         Ok(match side {
             Opened::Live(spec) => {
@@ -429,7 +429,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
             console::log("OK");
         }
     }
-    // SQLDataCompare.exe prints no mapping or deployment warnings; they are shown with /verbose.
+    // the classic data compare command line prints no mapping or deployment warnings; they are shown with /verbose.
     if verbose {
         for p in result.tables.iter().map(|t| &t.pair).chain(&result.excluded) {
             for n in &p.notes {
@@ -656,7 +656,7 @@ fn make_scripts(spec: &ConnectionSpec, db: &Database, opts: &DataOptions, dir: &
     Ok(exit::SUCCESS)
 }
 
-/// The left `max` characters kept around `...`, as SQLDataCompare.exe shortens long names.
+/// The left `max` characters kept around `...`, as the classic data compare command line shortens long names.
 fn left_truncate(s: &str, prefix: usize, max: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max {
@@ -741,7 +741,7 @@ fn csv(field: &str) -> String {
 
 /// `Results Summary.csv` and one CSV per table with rows of an included kind, as SQL Data
 /// Compare writes them (UTF-8 with BOM, CRLF, every field quoted).
-/// Key columns come first (in key order), then the others, as SQL Data Compare's results store
+/// Key columns come first (in key order), then the others, as the classic data compare tool's results store
 /// holds them; values compared by hash are read again from the live database in `specs`.
 fn export(result: &DataComparison, rules: &Rules, dir: &Path, db1: &str, db2: &str, specs: [Option<&ConnectionSpec>; 2]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;

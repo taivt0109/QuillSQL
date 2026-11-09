@@ -33,7 +33,7 @@ fn backup_switches() {
         assert_eq!(o.status.code(), Some(64), "{}", text(&o));
         assert!(text(&o).contains("The number of passwords specified should equal the number of backup files supplied."), "{}", text(&o));
     }
-    // An encrypted SQL Backup file and no (or a wrong) password.
+    // An encrypted the .sqb backup tool file and no (or a wrong) password.
     let sqb = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sqb/v5_aes128_lz.sqb");
     for extra in [None, Some("/backuppasswords1:wrong")] {
         let mut args = vec![format!("/backup1:{sqb}"), format!("/backup2:{junk}")];

@@ -11,7 +11,7 @@ using Microsoft.Win32;
 namespace QuillSql.Compare
 {
     /// <summary>
-    /// A backup as a data source, as SQL Compare offers it: the backup files (several for a striped
+    /// A backup as a data source, as the classic compare tool offers it: the backup files (several for a striped
     /// backup), their passwords, and the backup set to read, picked from what the files hold
     /// (`backup_sets`).
     /// </summary>
@@ -91,7 +91,7 @@ namespace QuillSql.Compare
             _status.Text = _files.Items.Count == 0 ? "No files selected" : "";
         }
 
-        /// <summary>Reads the sets in the files; SQL Backup files cannot be read yet.</summary>
+        /// <summary>Reads the sets in the files; .sqb backup files cannot be read yet.</summary>
         public async Task Read()
         {
             if (_files.Items.Count == 0)

@@ -1,4 +1,4 @@
-//! SQL Compare filters: per object type, include or exclude objects by a boolean expression
+//! The classic compare tool filters: per object type, include or exclude objects by a boolean expression
 //! over `@NAME` and `@SCHEMA` (`=`, `!=`, `LIKE`, `NOT LIKE ... ESCAPE`, `AND`, `OR`, `NOT`,
 //! parentheses). Read from `.scpf` files (`/filter`) and from the filter section of `.scp`
 //! projects.
@@ -9,7 +9,7 @@ use regex::{Regex, RegexBuilder};
 
 use super::compare::{Difference, DiffKind, ObjectType};
 
-/// The element name SQL Compare uses for each object type in a filter.
+/// The element name the classic compare tool uses for each object type in a filter.
 pub fn type_key(t: ObjectType) -> &'static str {
     super::report::type_name(t)
 }
@@ -458,10 +458,10 @@ mod tests {
         let xml = format!(
             r#"<?xml version="1.0" encoding="utf-16" standalone="yes"?>
 <!--
-SQL Compare
+The classic compare tool
 Version:15.4.17.28422-->
-<NamedFilter version="1" type="SQLCompareFilter">
-  <!--This filter can be loaded using the SQL Compare UI or used with a SQL Compare command line session using the /filter switch-->
+<NamedFilter version="1" type="QuillSQLFilter">
+  <!--This filter can be loaded in QuillSQL Compare or used on the command line with the /filter switch-->
   <FilterName>Sales only</FilterName>
   <Filter version="1" type="DifferenceFilter">
     <FilterCaseSensitive>False</FilterCaseSensitive>

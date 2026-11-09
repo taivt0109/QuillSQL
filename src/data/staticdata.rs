@@ -1,8 +1,8 @@
 //! Static data for `quill schema /include:StaticData`: the rows of the tables that have a data
 //! script in database 1's scripts folder are compared with database 2 and deployed with the
-//! schema, as SQL Compare does.
+//! schema, as the classic compare tool does.
 //!
-//! The data options start from SQL Data Compare's defaults without the comment header and
+//! The data options start from the classic data compare tool's defaults without the comment header and
 //! transactions (the schema script has its own) and without timestamp columns; tables the
 //! schema deployment creates get all their rows inserted. The data script goes inside the
 //! schema script's transaction, just before its COMMIT.
@@ -69,7 +69,7 @@ impl StaticData {
         self.result.tables.iter().all(|t| t.error.is_some() || t.identical())
     }
 
-    /// The summary rows ("Table data") with SQL Compare's static-data widths: type 16, name
+    /// The summary rows ("Table data") with the classic compare tool's static-data widths: type 16, name
     /// `name_width`, records 8.
     pub fn summary_rows(&self, name_width: usize) -> Vec<String> {
         let identical = self.options.has(DataOpt::IncludeIdenticalRecords);

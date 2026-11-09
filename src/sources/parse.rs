@@ -56,7 +56,7 @@ pub struct Message {
 }
 
 impl Message {
-    /// The warning SQL Compare prints for it.
+    /// The warning the classic compare tool prints for it.
     pub fn text(&self) -> String {
         let f = self.file.display();
         match self.kind {
@@ -212,7 +212,7 @@ impl Reader {
     }
 }
 
-/// A module's stored text from its batch. SQL Compare writes the text and then a line break
+/// A module's stored text from its batch. The classic compare tool writes the text and then a line break
 /// before `GO` unless the text already ends with one; that line break is not part of the text.
 fn module_text(batch: &str) -> String {
     let start = batch.len() - batch.trim_start_matches(['\r', '\n']).len();
@@ -566,7 +566,7 @@ fn unquote(t: &Tk) -> String {
     }
 }
 
-/// `DECLARE @xp varbinary (2)` followed by `SELECT @xp=0x0a0b` (or `SET`), as SQL Compare
+/// `DECLARE @xp varbinary (2)` followed by `SELECT @xp=0x0a0b` (or `SET`), as the classic compare tool
 /// writes a typed extended property value. Binary values are kept as upper-case hex.
 fn declared(c: &Cur, a: usize, b: usize) -> Option<Var> {
     let mut s = c.sub(a, b + 1);
@@ -2202,7 +2202,7 @@ impl Builder {
                         _ => RoutineKind::ClrTableFunction,
                     };
                     self.clr_signature(&definition, &mut r);
-                    // The SET statements SQL Compare writes before a CLR module (both OFF) are
+                    // The SET statements the classic compare tool writes before a CLR module (both OFF) are
                     // not its settings: the catalog has none for it.
                     r.settings = ModuleSettings::default();
                 } else if !r.encrypted {
@@ -2513,7 +2513,7 @@ impl Builder {
                         && x.name == p.name
                 };
                 self.db.extended_properties.retain(|x| !same(x));
-                // SQL Clone's marker is not part of the schema.
+                // a database-cloning tool's marker is not part of the schema.
                 if !p.is_clone_marker(self.db.case_sensitive()) {
                     self.db.extended_properties.push(p);
                 }
@@ -2624,7 +2624,7 @@ impl Builder {
             if t.memory_optimized {
                 t.storage = Storage::default();
                 t.text_filegroup = None;
-                // What the catalog shows for what SQL Compare leaves out: the default
+                // What the catalog shows for what the classic compare tool leaves out: the default
                 // durability, and no row or page locks on the indexes.
                 t.durability.get_or_insert_with(|| "SCHEMA_AND_DATA".into());
                 for ix in &mut t.indexes {
@@ -3216,7 +3216,7 @@ CREATE TABLE Sales.[Order] (a int)\nGO\n",
             assert!(r.messages.is_empty(), "{:?}", r.messages);
             let back: Vec<(&str, bool)> = r.database.principals.iter().map(|p| (p.name.as_str(), p.no_connect)).collect();
             // Read back, a user is connected unless revoked: Data Tools style loses NoConnect,
-            // as in SQL Compare.
+            // as in the classic compare tool.
             assert_eq!(back, [("NoConnect", !data_tools), ("Plain", false)]);
             assert!(r.database.permissions.is_empty());
         }

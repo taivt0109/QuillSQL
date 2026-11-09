@@ -1,5 +1,5 @@
 //! The data deployment script: makes the rows of database 2 match database 1, in the layout
-//! SQL Data Compare writes.
+//! The classic data compare tool writes.
 //!
 //! Inside one transaction (unless split by size): triggers, foreign keys and (if asked)
 //! indexes of the deployed tables are disabled or dropped, rows are deleted and updated from
@@ -62,7 +62,7 @@ pub struct SyncSettings {
     pub max_transaction_bytes: Option<u64>,
     /// Database 1, to read values that were compared by hash.
     pub source_connection: Option<ConnectionSpec>,
-    /// Row messages without counts (`Add row to …`), as SQL Data Compare's command line writes
+    /// Row messages without counts (`Add row to …`), as the classic data compare tool's command line writes
     /// them: it always deploys through a row-selection callback.
     pub row_messages: bool,
 }
@@ -171,7 +171,7 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
     if !plans.iter().any(Plan::synced) {
         return Ok(DeploymentScript { sql: String::new(), warnings, batches: Vec::new() });
     }
-    // Row-level choices change the messages of every table, as in SQL Data Compare.
+    // Row-level choices change the messages of every table, as in the classic data compare tool.
     let by_row = settings.row_messages || plans.iter().any(|p| p.rows.is_some_and(|r| r.iter().any(|k| !k.toggled.is_empty() || !k.included)));
     let (order, extra_fks) = dependency_order(&plans, target, opts, &mut warnings);
     if result.kinds[1] == SideKind::Backup {
@@ -187,7 +187,7 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
         warnings.push(Warning {
             severity: Severity::Low,
             object: first.pair.target.to_string(),
-            message: "A future version of SQL Compare and SQL Data Compare will no longer support SQL Server 2008 and SQL Server 2008R2.".into(),
+            message: "A future version of QuillSQL Compare and QuillSQL Data Compare will no longer support SQL Server 2008 and SQL Server 2008R2.".into(),
         });
     }
     // Masked values read without UNMASK would be deployed as their masks.
@@ -514,7 +514,7 @@ pub fn generate(result: &DataComparison, target: &Database, opts: &DataOptions, 
     Ok(DeploymentScript { sql: w.text, warnings, batches: w.batches })
 }
 
-/// The High warning SQL Data Compare raises for rows deployed by a non-unique comparison key.
+/// The High warning the classic data compare tool raises for rows deployed by a non-unique comparison key.
 fn repeated_warning(table: &ObjectName, text: String) -> Warning {
     Warning { severity: Severity::High, object: table.to_string(), message: text }
 }
@@ -613,7 +613,7 @@ fn hint(target: &Database, table: &ObjectName, transactions: bool) -> &'static s
 }
 
 /// The WHERE condition for a row of the target: the key, or every comparable column when keys
-/// repeat, then the table's filter. As SQL Data Compare writes it, a string literal of a deleted
+/// repeat, then the table's filter. As the classic data compare tool writes it, a string literal of a deleted
 /// row is N'' (and cast) when the source column needs it and the cast takes the target column's
 /// collation and type; for an updated row the two columns swap roles.
 fn where_sql(p: &TablePair, repeated: bool, values: &[Value], update: bool, warnings: &mut Vec<Warning>) -> String {
@@ -1067,7 +1067,7 @@ fn dependency_order(plans: &[Plan], target: &Database, opts: &DataOptions, warni
     (out.into_iter().flatten().collect(), extra)
 }
 
-/// Builds the script the way SQL Data Compare's execution block does: each statement on its
+/// Builds the script the way the classic data compare tool's execution block does: each statement on its
 /// own line(s), `GO` only when something was written since the last one, PRINT comments
 /// preceded by a blank line.
 struct Writer {
@@ -1313,7 +1313,7 @@ COMMIT TRANSACTION\r\nGO\r\n";
         let script = generate(&result, &db, &DataOptions::default_set(), &settings).unwrap();
         let has = |sev: Severity, text: &str| script.warnings.iter().any(|w| w.severity == sev && w.message == text);
         assert!(has(Severity::High, "When the target data source is a backup, the SQL script does not take into account dependencies or foreign keys. If the script references multiple tables you are not recommended to run it against a live database."));
-        assert!(has(Severity::Low, "A future version of SQL Compare and SQL Data Compare will no longer support SQL Server 2008 and SQL Server 2008R2."));
+        assert!(has(Severity::Low, "A future version of QuillSQL Compare and QuillSQL Data Compare will no longer support SQL Server 2008 and SQL Server 2008R2."));
         assert!(has(Severity::High, "Column Name of table [dbo].[Customers] has a data mask applied and the current user does not have UNMASK permission. The deployment may contain invalid data."));
         assert!(has(Severity::High, "Update 1 row in [dbo].[Customers] with non-unique comparison key"), "{:?}", script.warnings);
         assert!(has(Severity::High, "Add 1 row to [dbo].[Customers] with non-unique comparison key"));

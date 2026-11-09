@@ -318,7 +318,7 @@ INSERT INTO dbo.T VALUES (1, N'a', 0x01, '2025-04-03T13:00:00', 1), (2, N'b', NU
     let (code, out, err) = call(db("QD_data_C1", "QD_data_C2"), &[&format!("/scriptfile:{s}"), "/MaxTransactionSizeMB:1", &format!("/outputProject:{p}"), "/force"]);
     assert_eq!(code, 0, "{out}{err}");
     let text = std::fs::read_to_string(&script).unwrap();
-    // SQL Data Compare's command line prints row messages without counts.
+    // The classic data compare tool's command line prints row messages without counts.
     assert!(text.contains("PRINT(N'Update row in [dbo].[T]')") && text.contains("PRINT(N'Delete row from [dbo].[T]')"), "{text}");
     assert_eq!(call(db("QD_data_C1", "QD_data_C2"), &[&format!("/outputProject:{p}")]).0, 73);
     let _ = std::fs::remove_file(&script);

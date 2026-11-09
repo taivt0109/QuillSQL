@@ -90,7 +90,7 @@ impl ObjectType {
         ObjectType::ExtendedProperty,
     ];
 
-    /// The name SQL Compare uses in reports and in `/include:<type>`.
+    /// The name the classic compare tool uses in reports and in `/include:<type>`.
     pub fn label(self) -> &'static str {
         match self {
             ObjectType::Schema => "Schema",
@@ -171,7 +171,7 @@ pub enum DiffKind {
 }
 
 impl DiffKind {
-    /// The markers SQL Compare prints: `==`, `<>`, `>>`, `<<`.
+    /// The markers the classic compare tool prints: `==`, `<>`, `>>`, `<<`.
     pub fn marker(self) -> &'static str {
         match self {
             DiffKind::Equal => "==",
@@ -1009,9 +1009,7 @@ impl<'a> Comparer<'a> {
 
     fn triggers(&self, d: &mut Diffs, a: &[Trigger], b: &[Trigger]) {
         let o = self.opts;
-        let keep = |t: &&Trigger| {
-            !(o.has(Opt::IgnoreInsteadOfTriggers) && t.instead_of) && !(o.has(Opt::IgnoreReplicationTriggers) && is_replication_trigger(&t.name))
-        };
+        let keep = |t: &&Trigger| trigger_compared(t, o);
         let left: Vec<&Trigger> = a.iter().filter(keep).collect();
         let right: Vec<&Trigger> = b.iter().filter(keep).collect();
         let mut used = vec![false; right.len()];
@@ -1072,7 +1070,7 @@ impl<'a> Comparer<'a> {
 
     pub(super) fn module_text(&self, d: &mut Diffs, a: &str, b: &str, enc_a: bool, enc_b: bool) {
         let o = self.opts;
-        // AddWithEncryption changes only the deployment: SQL Compare 15 still reports an
+        // AddWithEncryption changes only the deployment: The classic compare tool 15 still reports an
         // unencrypted pair identical (differential scenario schema-add-with-encryption).
         if enc_a || enc_b {
             // Without decryption only the flag can be compared.
@@ -1619,6 +1617,17 @@ fn is_builtin_grant(p: &Permission) -> bool {
 /// `DOMAIN\name` without the domain.
 fn without_domain(name: &str) -> &str {
     name.rsplit('\\').next().unwrap_or(name)
+}
+
+/// Whether a DML trigger takes part in the comparison (IgnoreInsteadOfTriggers, IgnoreReplicationTriggers).
+pub fn trigger_compared(t: &Trigger, o: &Options) -> bool {
+    !(o.has(Opt::IgnoreInsteadOfTriggers) && t.instead_of) && !(o.has(Opt::IgnoreReplicationTriggers) && is_replication_trigger(&t.name))
+}
+
+/// The options that shape an object's SQL in the side-by-side view: what the comparison ignores,
+/// without the deployment-only ones (ONLINE = ON, ...).
+pub fn shown_options(o: &Options) -> Options {
+    o.iter().filter(|x| x.kind() == super::options::Kind::Compare).fold(Options::none(), |acc, x| acc.with(x))
 }
 
 /// Merge replication and sync triggers (IgnoreReplicationTriggers).

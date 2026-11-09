@@ -61,7 +61,7 @@ macro_rules! source_switches {
                 aliases: &[],
                 takes_value: true,
                 repeatable: false,
-                help: "true or false (default, as in SQL Compare)",
+                help: "true or false (default)",
             },
             Switch {
                 name: concat!("trustServerCertificate", $n),
@@ -110,7 +110,7 @@ macro_rules! source_switches {
                 aliases: &[],
                 takes_value: true,
                 repeatable: false,
-                help: "A SQL Change Automation project (.sqlproj) in place of the database: its programmable objects and offline schema model",
+                help: "A migrations project (.sqlproj) in place of the database: its programmable objects and offline schema model",
             },
             Switch {
                 name: concat!("sourcecontrol", $n),
@@ -241,10 +241,10 @@ pub const DEPLOY: [Switch; 21] = [
     Switch { name: "backupfolder", aliases: &["bd"], takes_value: true, repeatable: false, help: "Folder for the backup" },
     Switch { name: "backupfile", aliases: &["bf"], takes_value: true, repeatable: false, help: "File name of the backup" },
     Switch { name: "backupoverwriteexisting", aliases: &["boe"], takes_value: false, repeatable: false, help: "Overwrite an existing backup file" },
-    Switch { name: "backupcompression", aliases: &["bc"], takes_value: true, repeatable: false, help: "Compression level 0 to 4 (SQL Backup)" },
-    Switch { name: "backupencryption", aliases: &["be"], takes_value: false, repeatable: false, help: "Encrypt the backup (SQL Backup)" },
+    Switch { name: "backupcompression", aliases: &["bc"], takes_value: true, repeatable: false, help: "Compression level 0 to 4 (.sqb backups)" },
+    Switch { name: "backupencryption", aliases: &["be"], takes_value: false, repeatable: false, help: "Encrypt the backup (.sqb backups)" },
     Switch { name: "backuppassword", aliases: &["bp"], takes_value: true, repeatable: false, help: "Password of the encrypted backup" },
-    Switch { name: "backupnumberofthreads", aliases: &["bth"], takes_value: true, repeatable: false, help: "Backup threads, 0 to 32 (SQL Backup)" },
+    Switch { name: "backupnumberofthreads", aliases: &["bth"], takes_value: true, repeatable: false, help: "Backup threads, 0 to 32 (.sqb backups)" },
 ];
 
 pub const GENERAL: [Switch; 15] = [
@@ -477,7 +477,7 @@ pub fn run(cli: &Cli, argv: &[String], execute: impl Fn(&Args) -> Result<u8, Arg
     }
 }
 
-/// A parse error: printed on standard output with a pointer to the help, as SQL Compare does.
+/// A parse error: printed on standard output with a pointer to the help, as the classic compare tool does.
 fn usage_error(cli: &Cli, e: &ArgError, child: bool) -> u8 {
     if !child {
         console::title(cli.product);
@@ -516,7 +516,7 @@ fn redirect(cli: &Cli, argv: &[String], args: &Args, out: &str) -> u8 {
 
 /// Sources and actions QuillSQL does not have yet stop the run with exit 69.
 /// "Back up target before deployment" from `/makebackup` or the project's backup settings
-/// (`/backup…` switches override them, as SQL Compare's command line does): the backup becomes
+/// (`/backup…` switches override them, as the classic compare tool's command line does): the backup becomes
 /// the first batch of the script. `target` is database 2 when it is a live database.
 pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOptions>, target: Option<&crate::db::ConnectionSpec>, script: &mut crate::schema::deploy::DeploymentScript) -> Result<(), ArgError> {
     let mut o = project.filter(|b| b.enabled).cloned().unwrap_or_default();
@@ -559,12 +559,12 @@ pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOpt
     };
     let caps = crate::schema::backup::capabilities(target).map_err(|e| ArgError::new(exit::EXECUTION_FAILED, e))?;
     if o.sqb() && caps.sqb_version == 0 {
-        return Err(ArgError::new(exit::UNAVAILABLE, format!("SQL Backup is not installed on {}; use /backupprovider:native.", target.server)));
+        return Err(ArgError::new(exit::UNAVAILABLE, format!("The .sqb backup tool is not installed on {}; use /backupprovider:native.", target.server)));
     }
     if !o.sqb() {
         for name in ["backupcompression", "backupencryption", "backuppassword", "backupnumberofthreads"] {
             if args.has(name) {
-                console::warn(&format!("/{name} applies to SQL Backup only and is ignored for a native backup."));
+                console::warn(&format!("/{name} applies to the .sqb backup tool only and is ignored for a native backup."));
             }
         }
     }
@@ -573,7 +573,7 @@ pub fn add_backup(args: &Args, project: Option<&crate::schema::backup::BackupOpt
     plan.add_to(script);
     Ok(())
 }
-/// Every switch SQLCompare.exe and SQLDataCompare.exe accept now runs; new ones that cannot be
+/// Every switch the classic compare command lines accept now runs; new ones that cannot be
 /// refused here with exit 69.
 pub fn unsupported(_command: &str, _args: &Args) -> Result<(), ArgError> {
     Ok(())
@@ -636,7 +636,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("syncScriptEncoding", "UTF8WithPreamble"),
 ];
 
-/// Plain-text help in SQL Compare's layout; `/verbose` adds exit codes and values.
+/// Plain-text help in the classic compare tool's layout; `/verbose` adds exit codes and values.
 pub fn help(cli: &Cli) -> String {
     let w = console::width();
     let verbose = console::is_verbose();
@@ -695,7 +695,7 @@ pub enum Source {
 }
 
 /// Side `n` of the run as a project side (for `/outputProject`): a source-control folder keeps
-/// its revision and location XML, a SQL Change Automation project its own type.
+/// its revision and location XML, a migrations project its own type.
 pub fn spec_of(side: Option<&Source>, args: &Args, n: u8) -> crate::project::SourceSpec {
     use crate::project::SourceSpec;
     match side {
@@ -743,7 +743,7 @@ pub fn project_of(args: &Args, kind: crate::project::ProjectKind) -> Result<Opti
     Ok(p)
 }
 
-/// `host;Encrypt=True;TrustServerCertificate=True`: SQL Compare reads these two settings from
+/// `host;Encrypt=True;TrustServerCertificate=True`: The classic compare tool reads these two settings from
 /// the server name.
 fn server_settings(server: &str) -> (String, Option<bool>, Option<bool>) {
     let mut parts = server.split(';');
@@ -775,12 +775,12 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
     if let Some(s) = super::sources::source(args, n)? {
         return Ok(Some(s));
     }
-    // A revision of a live database means "as linked in SQL Source Control", which needs SQL
-    // Source Control itself; QuillSQL reads the linked folder with /sourcecontrolN.
+    // A revision of a live database means "as linked in source control", which needs the
+    // source-control tool itself; QuillSQL reads the linked folder with /sourcecontrolN.
     if args.has(&key("revision")) && args.has(&key("database")) {
         return Err(ArgError::new(
             exit::UNAVAILABLE,
-            format!("Using source controlled databases requires SQL Source Control to be installed. Use /sourcecontrol{n} with /scriptsfolderxml{n} and /revision{n} to compare the scripts folder the database is linked to."),
+            format!("Comparing a live database at a source control revision is not supported. Use /sourcecontrol{n} with /scriptsfolderxml{n} and /revision{n} to compare the scripts folder the database is linked to."),
         ));
     }
     if let Some(s) = super::backups::source(args, n)? {
@@ -839,7 +839,7 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
         return Err(ArgError::new(exit::EXECUTION_FAILED, "Password cannot be more than 128 characters long."));
     }
     // Microsoft Entra: a token in QUILL_ACCESS_TOKENn, else password with /usernameN, else
-    // the signed-in account (SQL Compare's MicrosoftEntraPassword / MicrosoftEntraIntegrated).
+    // the signed-in account (the classic compare tool's MicrosoftEntraPassword / MicrosoftEntraIntegrated).
     let auth = if args.has(&key("activedirectory")) {
         if let Ok(token) = std::env::var(format!("QUILL_ACCESS_TOKEN{n}")) {
             Auth::AccessToken(token)
@@ -864,7 +864,7 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
         Auth::Windows
     };
     let mut spec = ConnectionSpec::new(&server, database.trim(), auth);
-    // SQL Compare's command line encrypts only when told to (`;Encrypt=True` in the server name).
+    // The classic compare tool's command line encrypts only when told to (`;Encrypt=True` in the server name).
     spec.encrypt = false;
     spec.connection_string = connection.map(str::to_string);
     if let Some(e) = args.get(&key("encrypt")) {
@@ -916,7 +916,7 @@ pub fn write_script(args: &Args, script: &deploy::DeploymentScript) -> Result<()
     if path.exists() && !args.has("force") {
         return Err(ArgError::new(exit::IO_ERROR, format!("Unable to write migration script to file '{name}' because the file already exists.")));
     }
-    // CRLF line ends, as SQL Compare writes them.
+    // CRLF line ends, as the classic compare tool writes them.
     let sql = script.sql.replace("\r\n", "\n").replace('\n', "\r\n");
     let bytes = encode_script(&sql, args.get("syncScriptEncoding").unwrap_or("UTF8WithPreamble"));
     std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::IO_ERROR, format!("{name}: {e}")))?;
@@ -971,7 +971,7 @@ pub fn load(source: &Source, _args: &Args, decrypt: bool) -> Result<Database, Ar
     }
 }
 
-/// Writes a SQL Compare snapshot (`.snp`), or QuillSQL's JSON model for a `.json` path.
+/// Writes a .snp snapshot (`.snp`), or QuillSQL's JSON model for a `.json` path.
 pub fn save_snapshot(db: &Database, path: &Path) -> Result<(), ArgError> {
     let bytes = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
         serde_json::to_vec_pretty(db).map_err(|e| ArgError::new(exit::GENERAL_ERROR, e.to_string()))?

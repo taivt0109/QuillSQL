@@ -1,5 +1,5 @@
 //! Deployment of the objects beyond tables and modules, and of the table parts they bring.
-//! Where each kind goes in the script follows SQL Compare: certificates, keys and full-text
+//! Where each kind goes in the script follows the classic compare tool: certificates, keys and full-text
 //! work before the transaction, Service Broker objects and security policies among the
 //! dependency-ordered core objects, the rest in their own phases.
 
@@ -1241,7 +1241,7 @@ impl<'a> Planner<'a> {
         };
         let label = if d.object_type.schema_scoped() { d.name.to_string() } else { quote(&d.name.name) };
         self.warn(owarn::unsupported(kind, &label));
-        // Bindings are still created, as SQL Compare does.
+        // Bindings are still created, as the classic compare tool does.
         d.object_type != ObjectType::ServiceBinding
     }
 

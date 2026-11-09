@@ -1279,7 +1279,7 @@ impl Reader {
                 }
                 _ => continue,
             }
-            // SQL Source Control's link and SQL Clone's marker are not part of the schema.
+            // a source-control tool's link and a database-cloning tool's marker are not part of the schema.
             if p.is_source_control_marker() || p.is_clone_marker(self.db.case_sensitive()) {
                 continue;
             }
@@ -1289,7 +1289,7 @@ impl Reader {
     }
 
     async fn principals(&mut self, conn: &mut Conn<'_>) -> Result<(), String> {
-        // Azure SQL Database cannot name a user's login (SUSER_SNAME takes no argument there), as in SQL Compare.
+        // Azure SQL Database cannot name a user's login (SUSER_SNAME takes no argument there), as in the classic compare tool.
         let login = if self.db.server.is_azure_sql_database() { "NULL" } else { "SUSER_SNAME(p.sid)" };
         let rows = conn.query(
             &format!(

@@ -1,4 +1,4 @@
-//! Check constraint and computed column text as SQL Compare writes it. SQL Compare does not
+//! Check constraint and computed column text as the classic compare tool writes it. The classic compare tool does not
 //! keep SQL Server's stored text for these: it parses it and prints it again, which adds or
 //! drops parentheses (`(-100)` becomes `((-100))`, `([a]+[b]*(2))>(10)` becomes
 //! `[a]+([b]*(2))>(10)`), expands IN and BETWEEN, and spells some functions differently.
@@ -44,7 +44,7 @@ enum E {
     NextValue(Vec<String>),
 }
 
-/// The text SQL Compare writes for a stored check or computed column definition.
+/// The text the classic compare tool writes for a stored check or computed column definition.
 pub fn rewrite(stored: &str) -> String {
     let mut p = P { t: tokens(stored), i: 0 };
     let Some(e) = p.root() else { return stored.to_string() };
@@ -649,7 +649,7 @@ fn binary(out: &mut String, op: &str, l: &E, r: &E) -> Level {
 mod tests {
     use super::*;
 
-    /// Stored text (sys.check_constraints / sys.computed_columns) → what SQL Compare 15 wrote.
+    /// Stored text (sys.check_constraints / sys.computed_columns) → what the classic compare tool 15 wrote.
     const CASES: &[(&str, &str)] = &[
         ("([a]>=(-100))", "([a]>=((-100)))"),
         ("(([a]+[b]*(2))>(10) AND [c] like 'x%')", "([a]+([b]*(2))>(10) AND [c] like 'x%')"),

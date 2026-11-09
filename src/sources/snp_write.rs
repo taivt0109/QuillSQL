@@ -1,5 +1,5 @@
-//! Writes SQL Compare snapshot files (`.snp`, format version 23): the mirror of `snp::read`.
-//! Members the model has no place for get the empty or system values SQL Compare writes for a
+//! Writes .snp snapshot files (`.snp`, format version 23): the mirror of `snp::read`.
+//! Members the model has no place for get the empty or system values the classic compare tool writes for a
 //! database that does not use them; object ids are assigned here, in file order.
 
 use std::collections::{HashMap, HashSet};
@@ -22,7 +22,7 @@ const XML_TAIL: f32 = 11.1;
 const BLOBS: f32 = 7.0;
 /// First object id handed out.
 const FIRST_ID: i32 = 1_000_000;
-/// Blob id (-1) of the text SQL Compare keeps for modules with no syscomments row.
+/// Blob id (-1) of the text the classic compare tool keeps for modules with no syscomments row.
 const MISSING_ID: u64 = u64::MAX;
 const MISSING_TEXT: &str = "-- Missing syscomments entry. Please check your database";
 const ENCRYPTED_TEXT: &str = "-- Text was encrypted";
@@ -325,7 +325,7 @@ impl<'a> W<'a> {
         self.len(db.server.major_version as usize);
         self.s(&db.server.product_version);
         self.len(if db.server.engine_edition == 0 { 3 } else { db.server.engine_edition as usize });
-        self.bool(false); // no SQL Compare version
+        self.bool(false); // no compare tool version
         self.str(None); // scripts folder
         self.str(None); // migrations folder
     }
@@ -351,7 +351,7 @@ impl<'a> W<'a> {
         self.coll(&db.rules, |w, r| w.bindable(r, "RULE"));
         self.users();
         self.roles();
-        // Alias types before table types, as SQL Compare lists them.
+        // Alias types before table types, as the classic compare tool lists them.
         let mut types: Vec<&UserType> = db.types.iter().collect();
         types.sort_by_key(|t| match t.kind {
             UserTypeKind::Alias => 0,
@@ -464,7 +464,7 @@ impl<'a> W<'a> {
         if connect {
             list.push(("CONNECT", GRANT));
         }
-        // SQL Compare leaves out the grants every database gives public.
+        // The classic compare tool leaves out the grants every database gives public.
         let default = |p: &Permission| name == "public" && PUBLIC_DEFAULTS.iter().any(|d| p.permission.eq_ignore_ascii_case(d)) && p.state == "GRANT";
         for p in db.permissions.iter().filter(|p| p.class == "DATABASE" && p.grantee == name && !default(p)) {
             if let Some(st) = statement(&p.state)
@@ -667,7 +667,7 @@ impl<'a> W<'a> {
         }
     }
 
-    /// Compression by partition; partitioned storage lists every partition, as SQL Compare does.
+    /// Compression by partition; partitioned storage lists every partition, as the classic compare tool does.
     fn compression(&mut self, storage: &Storage) {
         let list = &storage.compression;
         let code = |c: &str| match c {
@@ -825,7 +825,7 @@ impl<'a> W<'a> {
         self.i32(0);
     }
 
-    /// Indexes, then statistics, which SQL Compare keeps in the same list.
+    /// Indexes, then statistics, which the classic compare tool keeps in the same list.
     fn indexes(&mut self, t: &Table, indexes: &[&Index], statistics: &[Statistic], type_table: bool) {
         let cs = self.cs;
         self.coll_head(cs, indexes.len() + statistics.len());
@@ -1083,7 +1083,7 @@ impl<'a> W<'a> {
             }
             self.bool(p.singleton);
         }
-        // The DEFAULT namespace last, as SQL Compare lists them.
+        // The DEFAULT namespace last, as the classic compare tool lists them.
         let mut namespaces: Vec<&XmlNamespace> = x.namespaces.iter().collect();
         namespaces.sort_by_key(|n| n.prefix.is_none());
         self.len(namespaces.len());
@@ -1292,7 +1292,7 @@ impl<'a> W<'a> {
         self.i16(flags);
         self.bool(cs);
         self.i32(0); // user types used
-        // SQL Compare leaves EXECUTE AS of procedures to the module text.
+        // The classic compare tool leaves EXECUTE AS of procedures to the module text.
         self.i32(0);
         self.clr_binding(r.clr_method.as_deref());
         self.params(&r.parameters);
@@ -1782,7 +1782,7 @@ fn sorted_columns(columns: &[Column]) -> Vec<&Column> {
     list
 }
 
-/// SQL Compare lists indexes by index id: the clustered index, keys, other relational
+/// The classic compare tool lists indexes by index id: the clustered index, keys, other relational
 /// indexes, then XML and spatial indexes by name.
 fn index_rank(ix: &Index) -> u8 {
     match ix.kind {
@@ -1815,7 +1815,7 @@ fn referential_action(action: &str) -> u8 {
 }
 
 /// `6 MONTHS` → (6, `MONTHS`).
-/// `6 MONTHS` → (6, `MONTH`), the singular unit SQL Compare stores.
+/// `6 MONTHS` → (6, `MONTH`), the singular unit the classic compare tool stores.
 fn split_retention(r: &str) -> Option<(i32, String)> {
     let (n, unit) = r.trim().split_once(' ')?;
     Some((n.parse().ok()?, unit.trim().to_ascii_uppercase().trim_end_matches('S').to_string()))
@@ -1980,7 +1980,7 @@ fn referenced_columns(expr: &str, columns: &[Column]) -> Vec<String> {
     out
 }
 
-/// A DML trigger's text with its own name and its table bracketed, as SQL Compare stores it.
+/// A DML trigger's text with its own name and its table bracketed, as the classic compare tool stores it.
 fn trigger_text(definition: &str, schema: &str, name: &str, on: &str) -> String {
     let text = module_sql(definition, "CREATE", &qualified(schema, name));
     let tokens = tokenize(&text);
@@ -2097,7 +2097,7 @@ mod tests {
             "CREATE TRIGGER [Sales].[Order_Audit] ON [Sales].[Order] AFTER INSERT AS SELECT 1"
         );
         assert_eq!(module_sql("CREATE VIEW Sales.V AS SELECT 1", "CREATE", "[Sales].[V]"), "CREATE VIEW [Sales].[V] AS SELECT 1");
-        // SQL Compare's printed form is stable when printed again.
+        // The classic compare tool's printed form is stable when printed again.
         for s in ["([Balance]>=(-100))", "([Status]='S' OR [Status]='P' OR [Status]='N')", "(len([Name]))"] {
             let once = super::super::expr::rewrite(s);
             assert_eq!(super::super::expr::rewrite(&once), once);
@@ -2119,13 +2119,13 @@ mod tests {
         assert_eq!(back.schemas.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["dbo"]);
     }
 
-    /// Reads, writes and reads again the snapshots SQL Compare made (rg_shop.snp, rg_shop2.snp,
-    /// rg_xml.snp) when QUILL_TEST_SNP_DIR names the folder holding them.
+    /// Reads, writes and reads again the snapshots the classic compare tool made (ref_shop.snp, ref_shop2.snp,
+    /// ref_xml.snp) when QUILL_TEST_SNP_DIR names the folder holding them.
     #[test]
     fn round_trips_sample_snapshots() {
         let Ok(dir) = std::env::var("QUILL_TEST_SNP_DIR") else { return };
         let dir = std::path::Path::new(&dir);
-        for name in ["rg_shop.snp", "rg_shop2.snp", "rg_xml.snp"] {
+        for name in ["ref_shop.snp", "ref_shop2.snp", "ref_xml.snp"] {
             let path = dir.join(name);
             let Ok(original) = std::fs::read(&path) else { continue };
             let db = snp::read(&original).unwrap();

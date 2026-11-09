@@ -1,4 +1,4 @@
-//! Deployment details checked against SQL Compare's behaviour (fix round).
+//! Deployment details checked against the classic compare tool's behaviour (fix round).
 
 use super::*;
 
@@ -68,7 +68,7 @@ fn varchar_to_nvarchar_is_altered_in_place() {
     let src = db(vec![table("T", vec![sized("B", "nvarchar", 30)])]);
     let tgt = db(vec![table("T", vec![sized("B", "varchar", 20)])]);
     let s = script(&src, &tgt, &Options::default_set());
-    assert!(s.sql.contains("ALTER TABLE [dbo].[T] ALTER COLUMN [B] [nvarchar] (30) NULL") && !s.sql.contains("RG_Recovery"), "{}", s.sql);
+    assert!(s.sql.contains("ALTER TABLE [dbo].[T] ALTER COLUMN [B] [nvarchar] (30) NULL") && !s.sql.contains("QS_Recovery"), "{}", s.sql);
     assert!(s.warnings.is_empty(), "{:?}", s.warnings);
 }
 
@@ -92,7 +92,7 @@ fn becoming_system_versioned_adds_the_period_before_the_copy() {
     h.history_table = true;
     let src = db(vec![t, h]);
     let s = script(&src, &tgt, &Options::default_set());
-    in_order(&s.sql, &["CREATE TABLE [dbo].[RG_Recovery_1_T]", "ALTER TABLE [dbo].[RG_Recovery_1_T] ADD PERIOD FOR SYSTEM_TIME ([ValidFrom], [ValidTo])", "INSERT INTO [dbo].[RG_Recovery_1_T]([Id], [A])", "SYSTEM_VERSIONING = ON"]);
+    in_order(&s.sql, &["CREATE TABLE [dbo].[QS_Recovery_1_T]", "ALTER TABLE [dbo].[QS_Recovery_1_T] ADD PERIOD FOR SYSTEM_TIME ([ValidFrom], [ValidTo])", "INSERT INTO [dbo].[QS_Recovery_1_T]([Id], [A])", "SYSTEM_VERSIONING = ON"]);
     assert!(s.sql.contains("CREATE TABLE [dbo].[T_History]"), "{}", s.sql);
 }
 

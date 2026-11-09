@@ -1,19 +1,19 @@
-//! "Back up target before deployment", as SQL Compare does it: the backup is the first batch of
+//! "Back up target before deployment", as the classic compare tool does it: the backup is the first batch of
 //! the deployment script (after the comment header), with a commented restore command at the
-//! end. Native SQL Server backups or SQL Backup through its extended procedure.
+//! end. Native SQL Server backups or the .sqb backup tool through its extended procedure.
 
 use serde::{Deserialize, Serialize};
 
 use super::deploy::DeploymentScript;
 use crate::db::{self, ConnectionSpec};
 
-/// The backup settings of a project (SQL Compare's `SC_DeploymentOptions/BackupOptions`).
+/// The backup settings of a project (the classic compare tool's `SC_DeploymentOptions/BackupOptions`).
 /// Passwords are never kept here: they come with the request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BackupOptions {
     pub enabled: bool,
-    /// `native` or `sqb` (SQL Backup).
+    /// `native` or `sqb` (.sqb backups).
     pub provider: String,
     pub differential: bool,
     /// A folder as the SQL Server sees it; empty = SQL Server's default backup folder.
@@ -22,11 +22,11 @@ pub struct BackupOptions {
     pub name_automatically: bool,
     /// WITH INIT: overwrite the backup sets already in the file.
     pub overwrite: bool,
-    /// SQL Backup: 0 (none) to 4.
+    /// The .sqb backup tool: 0 (none) to 4.
     pub compression_level: u8,
-    /// SQL Backup: `none`, `aes128` or `aes256`.
+    /// The .sqb backup tool: `none`, `aes128` or `aes256`.
     pub encryption: String,
-    /// SQL Backup: threads; 1 or less uses one.
+    /// The .sqb backup tool: threads; 1 or less uses one.
     pub thread_count: u8,
     #[serde(skip_serializing)]
     pub password: Option<String>,
@@ -61,7 +61,7 @@ impl BackupOptions {
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
     pub native_folder: String,
-    /// The SQL Backup version; 0 when it is not installed.
+    /// The .sqb backup tool version; 0 when it is not installed.
     pub sqb_version: i32,
     pub sqb_folder: String,
     pub managed_instance: bool,
@@ -84,12 +84,12 @@ fn sql_text(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Quotes inside the SQL Backup command, itself inside a string.
+/// Quotes inside the .sqb backup tool command, itself inside a string.
 fn nested(s: &str) -> String {
     s.replace('\'', "''''")
 }
 
-/// SQL Compare joins the folder and the file with a backslash; a Linux folder keeps its slashes.
+/// The classic compare tool joins the folder and the file with a backslash; a Linux folder keeps its slashes.
 fn combine(folder: &str, file: &str) -> String {
     if folder.is_empty() || folder.ends_with('\\') || folder.ends_with('/') {
         format!("{folder}{file}")
@@ -110,8 +110,8 @@ impl Plan<'_> {
         if self.database.is_empty() { "<enter your database name here>" } else { self.database }
     }
 
-    /// `<database>.<yyyy-MM-dd HH mm ss>Z.bak` for native backups, `<AUTO>.sqb` (SQL Backup's own
-    /// naming) for SQL Backup, or the given file with its extension.
+    /// `<database>.<yyyy-MM-dd HH mm ss>Z.bak` for native backups, `<AUTO>.sqb` (the .sqb tool's own
+    /// naming) for the .sqb backup tool, or the given file with its extension.
     pub fn file(&self) -> String {
         let o = self.options;
         if o.sqb() {
@@ -166,7 +166,7 @@ impl Plan<'_> {
             with.push("DIFFERENTIAL".into());
         }
         format!(
-            "-- >Backs up the target database using SQL Backup\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [{db}] TO DISK=''{}'' WITH {}\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nSQL Backup error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see the SQL Backup error codes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n",
+            "-- >Backs up the target database using the .sqb backup tool\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [{db}] TO DISK=''{}'' WITH {}\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nthe .sqb backup tool error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see the .sqb backup tool error codes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n",
             self.path(),
             with.join(", ")
         )
@@ -201,7 +201,7 @@ impl Plan<'_> {
         let with = with.join(", ");
         let v6 = self.caps.sqb_version >= 6;
         let all = nested(&combine(&o.folder, "*.sqb"));
-        s.push_str("--SQL Backup Restore command start\r\n--To Restore the database uncomment the following line\r\n");
+        s.push_str("--sqlbackup restore command start\r\n--To Restore the database uncomment the following line\r\n");
         if o.name_automatically || o.file.is_empty() {
             if !o.differential && v6 {
                 s.push_str(&cmd(format!("RESTORE DATABASE [{db}] FROM DISK=''{all}'' LATEST_FULL WITH {with}")));
@@ -225,7 +225,7 @@ impl Plan<'_> {
             s.push_str(&cmd(format!("RESTORE DATABASE [{db}] FROM DISK=''{}'' WITH {with}", nested(&self.path()))));
             s.push_str("--GO\r\n");
         }
-        s.push_str("--SQL Backup Restore command finish\r\n");
+        s.push_str("--sqlbackup restore command finish\r\n");
         s
     }
 
@@ -255,7 +255,7 @@ pub fn capabilities(spec: &ConnectionSpec) -> Result<Capabilities, String> {
     rt.block_on(async {
         let mut c = db::connect_async(spec).await?;
         let mut caps = Capabilities::default();
-        // The folder SQL Server backs up to by default (as SQL Compare reads it).
+        // The folder SQL Server backs up to by default (as the classic compare tool reads it).
         let folder = db::query(
             &mut c,
             "DECLARE @d nvarchar(4000); BEGIN TRY EXEC master.dbo.xp_instance_regread N'HKEY_LOCAL_MACHINE', N'Software\\Microsoft\\MSSQLServer\\MSSQLServer', N'BackupDirectory', @d OUTPUT END TRY BEGIN CATCH END CATCH; \
@@ -266,7 +266,7 @@ pub fn capabilities(spec: &ConnectionSpec) -> Result<Capabilities, String> {
             caps.native_folder = r.get::<&str, _>(0).unwrap_or_default().to_string();
             caps.managed_instance = r.get::<i32, _>(1) == Some(8);
         }
-        // SQL Backup is installed when master has its extended procedure.
+        // The .sqb backup tool is installed when master has its extended procedure.
         let installed = db::query(&mut c, "SELECT COUNT(*) FROM master.dbo.sysobjects WHERE name = 'sqbutility' AND OBJECTPROPERTY(id, N'IsExtendedProc') = 1").await?;
         if installed.first().and_then(|r| r.get::<i32, _>(0)).unwrap_or(0) > 0 {
             let r = db::query(
@@ -354,11 +354,11 @@ mod tests {
         let p = Plan { options: &o, database: "Sales", utc: String::new(), caps: &caps };
         assert_eq!(
             p.sql(),
-            "-- >Backs up the target database using SQL Backup\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [Sales] TO DISK=''D:\\SQB\\<AUTO>.sqb'' WITH COMPRESSION=3, KEYSIZE=256, PASSWORD=''p''''w'', THREADCOUNT=4, INIT\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nSQL Backup error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see the SQL Backup error codes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n"
+            "-- >Backs up the target database using the .sqb backup tool\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [Sales] TO DISK=''D:\\SQB\\<AUTO>.sqb'' WITH COMPRESSION=3, KEYSIZE=256, PASSWORD=''p''''w'', THREADCOUNT=4, INIT\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nthe .sqb backup tool error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see the .sqb backup tool error codes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n"
         );
         assert_eq!(
             p.restore_comment(),
-            "--SQL Backup Restore command start\r\n--To Restore the database uncomment the following line\r\n--EXECUTE master..sqlbackup N'-SQL \"RESTORE DATABASE [Sales] FROM DISK=''D:\\SQB\\*.sqb'' LATEST_FULL WITH REPLACE, PASSWORD=''p''''w''\"'\r\n--SQL Backup Restore command finish\r\n"
+            "--sqlbackup restore command start\r\n--To Restore the database uncomment the following line\r\n--EXECUTE master..sqlbackup N'-SQL \"RESTORE DATABASE [Sales] FROM DISK=''D:\\SQB\\*.sqb'' LATEST_FULL WITH REPLACE, PASSWORD=''p''''w''\"'\r\n--sqlbackup restore command finish\r\n"
         );
         let old = Capabilities { sqb_version: 4, ..Default::default() };
         let p = Plan { options: &BackupOptions { provider: "sqb".into(), thread_count: 2, differential: true, ..Default::default() }, database: "S", utc: String::new(), caps: &old };

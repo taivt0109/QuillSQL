@@ -1,5 +1,5 @@
 -- Everything the scripts-folder writer has a layout rule for that the other fixtures leave out,
--- for comparing our /makescripts folder byte for byte with SQL Compare's.
+-- for comparing our /makescripts folder byte for byte with the classic compare tool's.
 DECLARE @db sysname = DB_NAME(), @sql nvarchar(max);
 SET @sql = N'ALTER DATABASE ' + QUOTENAME(@db) + N' SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON);
 ALTER DATABASE ' + QUOTENAME(@db) + N' ADD FILEGROUP FG2;

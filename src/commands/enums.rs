@@ -1,6 +1,6 @@
-//! Values of SQL Compare's enumerated switches: the canonical name first, then its aliases.
+//! Values of the classic compare tool's enumerated switches: the canonical name first, then its aliases.
 //! Values outside a list are refused (exit 34); values inside it that QuillSQL does not
-//! implement are accepted and have no effect, as SQL Compare does with names its engine lacks.
+//! implement are accepted and have no effect, as the classic compare tool does with names its engine lacks.
 
 /// `/options` of `quill schema`.
 pub const SCHEMA_OPTIONS: &[&[&str]] = &[

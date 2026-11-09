@@ -178,8 +178,8 @@ fn compares_two_versions_of_the_shop() {
     // Users, roles and permissions.
     let app = c.differences.iter().find(|d| d.object_type == ObjectType::User && d.name.name == "app").unwrap();
     let names: Vec<&str> = app.properties.iter().map(|p| p.name.as_str()).collect();
-    // IgnoreUserProperties is a default, as in SQL Compare: the default schema is not compared.
-    // Membership is reported on the role (here the fixed role db_datareader), as SQL Compare does.
+    // IgnoreUserProperties is a default, as in the classic compare tool: the default schema is not compared.
+    // Membership is reported on the role (here the fixed role db_datareader), as the classic compare tool does.
     assert!(names.is_empty(), "{names:?}");
     let reader = find(ObjectType::Role, "db_datareader");
     assert!(reader.properties.iter().any(|p| p.name == "Member" && p.source.as_deref() == Some("app")), "{:?}", reader.properties);
@@ -265,7 +265,7 @@ fn rebuild_keeps_data() {
     server.create("QuillTest_Reb1", &source);
     server.create("QuillTest_Reb2", &format!("{SHOP}\nGO\n{SHOP_DATA}"));
     let script = converge(&server, "QuillTest_Reb1", "QuillTest_Reb2", &Options::default_set());
-    assert!(script.sql.contains("INSERT INTO [dbo].[RG_Recovery_1_Customer]("), "{}", script.sql);
+    assert!(script.sql.contains("INSERT INTO [dbo].[QS_Recovery_1_Customer]("), "{}", script.sql);
     assert!(script.sql.contains("DROP VIEW [Sales].[CustomerTotals]"), "{}", script.sql);
 
     let rt = quillsql::db::runtime().unwrap();

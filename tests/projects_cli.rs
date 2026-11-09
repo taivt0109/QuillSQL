@@ -83,7 +83,7 @@ fn data_empty2_and_qdc_output_projects() {
 #[test]
 fn revisions_need_source_control() {
     let (code, out) = quill("schema", &["/server1:.", "/database1:A", "/revision1:5", "/server2:.", "/database2:B"]);
-    assert!(code == 69 && out.contains("requires SQL Source Control"), "{code} {out}");
+    assert!(code == 69 && out.contains("revision is not supported"), "{code} {out}");
     let (code, out) = quill("schema", &["/sourcecontrol1", "/revision1:HEAD", "/server2:.", "/database2:B"]);
     assert!(code == 66 && out.contains("script folder location XML"), "{code} {out}");
 }

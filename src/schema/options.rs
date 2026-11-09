@@ -1,5 +1,5 @@
 //! Schema compare options: one table that the engine, the command line and the Options tab
-//! all read, so they cannot drift apart. Names match SQL Compare's `/options` names so that
+//! all read, so they cannot drift apart. Names match the classic compare tool's `/options` names so that
 //! existing command lines keep working.
 
 use std::collections::BTreeSet;
@@ -51,7 +51,7 @@ macro_rules! options {
                 match self { $( Opt::$variant => Kind::$kind, )* }
             }
 
-            /// Part of the default set (the same nine as SQL Compare's defaults, plus IncludeDependencies).
+            /// Part of the default set (the same nine as the classic compare tool's defaults, plus IncludeDependencies).
             pub fn is_default(self) -> bool {
                 match self { $( Opt::$variant => $default, )* }
             }
@@ -196,7 +196,7 @@ impl Opt {
     }
 }
 
-/// Names SQL Compare's command line accepts besides the flag names themselves.
+/// Names the classic compare tool's command line accepts besides the flag names themselves.
 const ALIASES: &[(&str, &[Opt])] = &[
     ("NoSQLPlumbing", &[Opt::NoTransactions, Opt::NoErrorHandling, Opt::NoDeploymentLogging]),
     ("OnlineIndexBuild", &[Opt::AddOnlineOn]),
@@ -283,7 +283,7 @@ impl Options {
     }
 
     /// Parses a `/options` value: names separated by `,` or `|`, case-insensitive.
-    /// As in SQL Compare, a list without `Default` starts from no options at all.
+    /// As in the classic compare tool, a list without `Default` starts from no options at all.
     pub fn parse(list: &str) -> Result<Options, String> {
         let names: Vec<&str> = list.split([',', '|']).map(str::trim).filter(|s| !s.is_empty()).collect();
         let mut out = if names.iter().any(|n| n.eq_ignore_ascii_case("Default")) {

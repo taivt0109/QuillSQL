@@ -36,7 +36,7 @@ runs on the command line and in CI.
 | **Safety at a glance** | Color the tab and editor of production connections; ask before `DELETE` or `UPDATE` without `WHERE`; highlight every use of a name. |
 | **Database tools** | Find procedures and views that reference objects that no longer exist; search the history of every query you ran. |
 | **Your way** | An Options window for every behavior, keyboard shortcuts for every command, English or Vietnamese. |
-| **Schema and Data Compare** | Compare two databases' schema or data, see every difference, and deploy a script that makes them match. In SSMS, as its own app, or in CI with SQL Compare's command-line switches. |
+| **Schema and Data Compare** | Compare two databases' schema or data, see every difference, and deploy a script that makes them match. In SSMS, as its own app, or in CI from the command line. |
 | **Command line** | `quill` formats folders of `.sql` files and runs the analysis in CI. |
 
 ## Install
@@ -426,9 +426,9 @@ choose).
 - **Without SSMS:** **QuillSQL Compare** in the Start menu (`QuillCompare.exe`).
 - **In CI:** `quill schema` and `quill data`, below.
 
-The window has the same four tabs as SQL Compare: **Data sources**, **Table mapping** (Data
+The window has four tabs: **Data sources**, **Table mapping** (Data
 Compare: **Tables & views**, with keys, WHERE filters and columns to leave out), **Owner mapping**
-and **Options** (every SQL Compare / Data Compare option, with QuillSQL defaults, My defaults and
+and **Options** (every compare option, with QuillSQL defaults, My defaults and
 Save as my defaults). Results show what differs; for schema, the SQL of both sides line by line.
 **Deploy** shows the script and its warnings (data loss, truncation, NOT NULL...) and runs it in
 one transaction, or opens it in a query window. QuillSQL Compare follows the Windows light or dark
@@ -445,8 +445,8 @@ Manager.
 
 ### Command line
 
-The switches, aliases and exit codes are the ones `SQLCompare.exe` and `SQLDataCompare.exe` use,
-so a pipeline can swap the executable:
+The switches, aliases and exit codes follow the classic compare command lines, so an existing
+pipeline only needs a new executable name:
 
 ```powershell
 $env:QUILL_PASSWORD1 = '...'; $env:QUILL_PASSWORD2 = '...'
@@ -459,9 +459,9 @@ quill data /s1:dev /db1:Shop /s2:test /db2:Shop /include:Table:^\[dbo\] /export:
 
 | | |
 |---|---|
-| Sources | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` or `QUILL_PASSWORD1..2` (omit for Windows authentication), `/activedirectory1..2` (Microsoft Entra: with `/username` + `/password` a password sign-in, else the account signed in to the Azure CLI; `QUILL_ACCESS_TOKEN1..2` takes a ready token), `/connection1..2` (connection string), `/encrypt1..2` (off by default, as in SQL Compare; an unencrypted connection does not validate the server certificate), `/trustServerCertificate1..2`, `/snapshot1..2`, `/backup1..2`, `/scripts1..2`, `/sca1..2`, `/sourcecontrol1..2` with `/revision1..2` and `/scriptsfolderxml1..2`, `/empty2`, `/project` (.qsc, .qdc) |
+| Sources | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` or `QUILL_PASSWORD1..2` (omit for Windows authentication), `/activedirectory1..2` (Microsoft Entra: with `/username` + `/password` a password sign-in, else the account signed in to the Azure CLI; `QUILL_ACCESS_TOKEN1..2` takes a ready token), `/connection1..2` (connection string), `/encrypt1..2` (off by default; an unencrypted connection does not validate the server certificate), `/trustServerCertificate1..2`, `/snapshot1..2`, `/backup1..2`, `/scripts1..2`, `/sca1..2`, `/sourcecontrol1..2` with `/revision1..2` and `/scriptsfolderxml1..2`, `/empty2`, `/project` (.qsc, .qdc) |
 | Choose | `/include` and `/exclude` with `type[:regex]` (object types, `Identical`, `Different`, `Missing`, `Additional`), `/options:Default,IgnoreComments,...`; data: `/comparisonkeys`, `/includeColumns`, `/excludeColumns` |
-| Output | `/scriptfile`, `/synchronize`, `/report` + `/reporttype:Xml\|Html\|Classic\|Excel` (SQL Compare's XML layout; Excel as SpreadsheetML, or .xlsx when the file name ends so), `/reportAllObjectsWithDifferences` (`/rad`), `/outputProject` (.qsc, .qdc), `/export` (data, CSV), `/json`, `/showWarnings`, `/abortOnWarnings:Medium\|High`, `/transactionIsolationLevel`, `/force`, `/out`, `/outputwidth`, `/logLevel`, `/argfile`, `/quiet`, `/verbose` |
+| Output | `/scriptfile`, `/synchronize`, `/report` + `/reporttype:Xml\|Html\|Classic\|Excel` (the classic XML report layout; Excel as SpreadsheetML, or .xlsx when the file name ends so), `/reportAllObjectsWithDifferences` (`/rad`), `/outputProject` (.qsc, .qdc), `/export` (data, CSV), `/json`, `/showWarnings`, `/abortOnWarnings:Medium\|High`, `/transactionIsolationLevel`, `/force`, `/out`, `/outputwidth`, `/logLevel`, `/argfile`, `/quiet`, `/verbose` |
 | Exit codes | 0 success · 3 switch given twice · 8 switch needs or excludes another · 11 flag given a value · 32/33/34 value out of range / overflow / invalid · 61 stopped by warnings · 63 identical · 64 usage · 65 corrupt input · 69 not supported · 73 report or project failed · 74 file exists (use `/force`) · 77 access denied · 79 `/assertidentical` and different · 126 database error · 130 Ctrl+C · 500 unexpected error |
 
 ## Formatting options
@@ -545,18 +545,18 @@ installed copies offer the update within a day.
   Azure CLI (`az login`) rather than Windows' own single sign-on, and "MFA" uses the device-code
   page (microsoft.com/devicelogin). Federated (ADFS) password sign-in is not supported. Entra
   sign-in has not been checked against a live Azure SQL server.
-- A database linked to SQL Source Control is compared through its scripts folder (git, Subversion
-  or Mercurial) with `/sourcecontrolN`; `/databaseN` with `/revisionN` needs SQL Source Control and
+- A database linked to source control is compared through its scripts folder (git, Subversion
+  or Mercurial) with `/sourcecontrolN`; `/databaseN` with `/revisionN` needs the source-control tool and
   exits 69.
 - `insertSemicolons` skips ambiguous places, for example before `THROW`.
 - Smart Rename of database objects produces a script; it does not change other objects for you.
 - Compare writes certificates and keys as comments only (their private keys can't be read), as SQL
-  Compare does. Full-text and PolyBase objects, and SQL Backup files (`.sqb`),
-  are covered by unit tests but have not been checked against a live server or real SQL Backup
+  Compare does. Full-text and PolyBase objects, and .sqb backup files (`.sqb`),
+  are covered by unit tests but have not been checked against a live server or real .sqb
   files.
 - Compare treats string literals in modules, defaults and checks as case-sensitive even when the
-  comparison is not: `'abc'` and `'ABC'` store or return different data. SQL Compare reports them
-  equal. Windows users across domains, FileTables and Stretch tables are covered by unit tests
+  comparison is not: `'abc'` and `'ABC'` store or return different data, so they are
+  reported as different. Windows users across domains, FileTables and Stretch tables are covered by unit tests
   only.
 - The Compare windows are in English only for now.
 - Tab colors depend on the layout of SSMS 21's document tabs and may need an update for a future

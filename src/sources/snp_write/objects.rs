@@ -31,7 +31,7 @@ impl W<'_> {
         for t in &db.ddl_triggers {
             let id = self.id();
             if t.clr_method.is_none() {
-                // Named as SQL Compare writes it, without the trailing line break.
+                // Named as the classic compare tool writes it, without the trailing line break.
                 let text = module_sql(&t.definition, "CREATE", &quote(&t.name));
                 self.text(id, text.trim_end().to_string(), t.encrypted);
             }
@@ -78,7 +78,7 @@ impl W<'_> {
         self.eprops_of(&props);
     }
 
-    /// Event types as their codes, in a case-sensitive list as SQL Compare keeps them.
+    /// Event types as their codes, in a case-sensitive list as the classic compare tool keeps them.
     fn events(&mut self, events: &[String]) {
         let codes: Vec<i32> = events.iter().filter_map(|e| event_code(e)).collect();
         self.coll_head(true, codes.len());
@@ -154,7 +154,7 @@ impl W<'_> {
 
     // --------------------------------------------------------------------------- tables
 
-    /// Statistics, listed with the indexes; SQL Compare files them with their table's filegroup.
+    /// Statistics, listed with the indexes; the classic compare tool files them with their table's filegroup.
     pub(super) fn statistic(&mut self, s: &Statistic, filegroup: Option<&str>) {
         let cs = self.cs;
         self.f32(VERSION);

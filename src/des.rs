@@ -1,5 +1,5 @@
-//! DES (FIPS 46-3) in CBC mode with PKCS#7 padding: only to read the passwords SQL Compare and
-//! SQL Data Compare save in project files, which use a fixed, publicly known key. Not for security.
+//! DES (FIPS 46-3) in CBC mode with PKCS#7 padding: only to read the passwords the classic compare tool and
+//! The classic data compare tool save in project files, which use a fixed, publicly known key. Not for security.
 
 const IP: [u8; 64] = [
     58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51,

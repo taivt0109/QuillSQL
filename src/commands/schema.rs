@@ -1,5 +1,5 @@
 //! `quill schema`: compare two database schemas and deploy the differences, with the switches,
-//! console output, reports and exit codes of SQL Compare's command line.
+//! console output, reports and exit codes of the classic compare tool's command line.
 
 use std::path::Path;
 
@@ -91,7 +91,7 @@ const RULES: [Rule; 12] = [
         excludes: &["backup2", "database2", "revision2", "server2", "username2", "password2", "scripts2", "sourcecontrol2", "makesnapshot", "makescripts", "synchronize"],
         ..Rule::NONE
     },
-    // A SQL Change Automation project is not written to.
+    // A migrations project is not written to.
     Rule { name: "sca2", excludes: &["synchronize"], ..Rule::NONE },
     Rule { name: "report", excludes: &["makesnapshot", "makescripts"], path: true, ..Rule::NONE },
     Rule { name: "reporttype", depends: &["report"], values: enums::REPORT_TYPES, ..Rule::NONE },
@@ -128,7 +128,7 @@ fn nontrivial_include(args: &Args) -> bool {
     args.all("include").iter().any(|i| !(i.eq_ignore_ascii_case("identical") || i.eq_ignore_ascii_case("staticdata")))
 }
 
-/// Checks the object types of `/include` and `/exclude` against SQL Compare's list.
+/// Checks the object types of `/include` and `/exclude` against the classic compare tool's list.
 fn check_rule_types(args: &Args) -> Result<(), ArgError> {
     for name in ["include", "exclude"] {
         for spec in args.all(name) {
@@ -141,7 +141,7 @@ fn check_rule_types(args: &Args) -> Result<(), ArgError> {
     Ok(())
 }
 
-/// `/options`: SQL Compare's defaults plus the project's options; a list with `Default` adds to
+/// `/options`: The classic compare tool's defaults plus the project's options; a list with `Default` adds to
 /// them, a list without it replaces them. Names QuillSQL does not implement are ignored.
 fn resolve_options(args: &Args, project: Option<&crate::project::Project>) -> Options {
     let mut base = Options::default_set();
@@ -253,7 +253,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         common::check_output(Path::new(path), args)?;
     }
 
-    // Two live databases are read at the same time, as SQL Compare does; other sources in order,
+    // Two live databases are read at the same time, as the classic compare tool does; other sources in order,
     // so that what their readers print keeps its order.
     let (db1, folder1, loaded2) = match &side2 {
         Side::Source(s @ Source::Live(_)) if matches!(source1, Source::Live(_)) => {
@@ -322,7 +322,7 @@ fn execute(args: &Args) -> Result<u8, ArgError> {
         let (id1, id2) = (identifier(&source1, &db1), side_identifier(&side2, &db2));
         print_summary(&listed, &id1, &id2, statics.as_ref());
         if console::is_verbose() {
-            print_details(&listed, &id1, &id2, &db1, &db2);
+            print_details(&listed, &id1, &id2, &db1, &db2, &options);
         }
         for (table, from, to) in &comparison.auto_mapped_columns {
             console::verbose(&format!("Column {table}.[{from}] was mapped to [{to}] because they are alike (turn off with /options:...,NoAutoColumnMapping)."));
@@ -429,7 +429,7 @@ fn static_data_of(args: &Args, source1: &Source, side2: &Side, db2: &Database) -
     staticdata::compare(&folder, target, db2, &resolved.options).map(Some).map_err(failed)
 }
 
-/// `server.database`, as SQL Compare names a data source in its output (a backup by the
+/// `server.database`, as the classic compare tool names a data source in its output (a backup by the
 /// server it was taken on; snapshots keep no server name).
 fn identifier(source: &Source, db: &Database) -> String {
     match source {
@@ -457,7 +457,7 @@ fn side_identifier(side: &Side, db: &Database) -> String {
 }
 
 /// `[schema].[name]`. Objects without a schema (principals, schemas, DDL triggers…) are named
-/// bare when the name is a regular identifier, as SQL Compare writes them: `role-AppReaders`,
+/// bare when the name is a regular identifier, as the classic compare tool writes them: `role-AppReaders`,
 /// but `contract-[//app/Contract]`.
 fn full_name(n: &ObjectName) -> String {
     let regular = |s: &str| {
@@ -554,21 +554,21 @@ fn print_summary(listed: &[&Difference], id1: &str, id2: &str, data: Option<&cra
 }
 
 /// The script lines of one difference, aligned.
-fn script_lines(d: &Difference, db1: &Database, db2: &Database, ignore_whitespace: bool) -> Vec<linediff::Line> {
-    let left = (d.kind != DiffKind::OnlyIn2).then(|| crate::compare_serve::object_sql(db1, d.object_type, &d.name)).flatten();
-    let right = (d.kind != DiffKind::OnlyIn1).then(|| crate::compare_serve::object_sql(db2, d.object_type, d.target_name.as_ref().unwrap_or(&d.name))).flatten();
-    linediff::compare(left.as_deref(), right.as_deref(), ignore_whitespace)
+fn script_lines(d: &Difference, db1: &Database, db2: &Database, opts: &Options) -> Vec<linediff::Line> {
+    let left = (d.kind != DiffKind::OnlyIn2).then(|| crate::compare_serve::object_sql(db1, d.object_type, &d.name, opts)).flatten();
+    let right = (d.kind != DiffKind::OnlyIn1).then(|| crate::compare_serve::object_sql(db2, d.object_type, d.target_name.as_ref().unwrap_or(&d.name), opts)).flatten();
+    linediff::compare(left.as_deref(), right.as_deref(), opts.has(Opt::IgnoreWhiteSpace))
 }
 
 /// `/verbose`: each object's script, line against line.
-fn print_details(listed: &[&Difference], id1: &str, id2: &str, db1: &Database, db2: &Database) {
+fn print_details(listed: &[&Difference], id1: &str, id2: &str, db1: &Database, db2: &Database, options: &Options) {
     let w = console::width();
     console::verbose("");
     console::verbose(&console::fixed_width(&format!("Details - comparing {id1} with {id2}"), w - 1, "", true));
     console::verbose(&"=".repeat(w - 1));
     for d in listed.iter().filter(|d| d.kind != DiffKind::Equal) {
         console::verbose(&format!("{} {}", report::type_name(d.object_type), full_name(&d.name)));
-        for l in script_lines(d, db1, db2, false) {
+        for l in script_lines(d, db1, db2, &options.clone().without(Opt::IgnoreWhiteSpace)) {
             match (&l.left, &l.right, l.different) {
                 (Some(a), _, false) => console::verbose(&format!("== {a}")),
                 (Some(a), Some(b), true) => {
@@ -629,7 +629,6 @@ fn write_report(
     }
     console::verbose(&format!("Writing report to file '{path}'..."));
     let all = args.has("reportAllObjectsWithDifferences");
-    let ignore_ws = options.has(Opt::IgnoreWhiteSpace);
     let mut items: Vec<Item> = comparison
         .differences
         .iter()
@@ -650,7 +649,7 @@ fn write_report(
                 name1: one.map(|n| n.name.clone()).unwrap_or_default(),
                 owner2: two.map(|n| n.schema.clone()).unwrap_or_default(),
                 name2: two.map(|n| n.name.clone()).unwrap_or_default(),
-                lines: script_lines(d, db1, db2, ignore_ws),
+                lines: script_lines(d, db1, db2, options),
             }
         })
         .collect();

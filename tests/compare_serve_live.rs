@@ -128,10 +128,10 @@ fn data_results_operations() {
     let sql = script["sql"].as_str().unwrap();
     assert!(sql.contains("DELETE") && !sql.contains("UPDATE") && !sql.contains("INSERT"), "{sql}");
 
-    // Back up target before deployment: the backup is the script's first batch, as in SQL Compare.
+    // Back up target before deployment: the backup is the script's first batch, as in the classic compare tool.
     let defaults = serve.call("backup_defaults", json!({"session": s})).unwrap();
     assert!(defaults["file"].as_str().unwrap().starts_with(&format!("{tgt}.")) && defaults["file"].as_str().unwrap().ends_with("Z.bak"), "{defaults}");
-    assert_eq!(defaults["capabilities"]["sqbVersion"], 0, "SQL Backup is not installed here");
+    assert_eq!(defaults["capabilities"]["sqbVersion"], 0, "The .sqb backup tool is not installed here");
     let folder = defaults["capabilities"]["nativeFolder"].as_str().unwrap().to_string();
     let backup = json!({"enabled": true, "folder": folder, "overwrite": true});
     let script = serve.call("data_script", json!({"session": s, "backup": backup})).unwrap();
@@ -148,7 +148,7 @@ fn data_results_operations() {
     // The backup file stays on the server otherwise (xp_delete_files: SQL Server 2019 and later).
     run(&spec("master"), &format!("BEGIN TRY EXEC master.sys.xp_delete_files N'{file}' END TRY BEGIN CATCH END CATCH"));
     let sqb = serve.call("data_script", json!({"session": s, "backup": {"enabled": true, "provider": "sqb"}}));
-    assert!(sqb.unwrap_err().contains("SQL Backup is not installed"));    std::fs::remove_dir_all(dir).ok();
+    assert!(sqb.unwrap_err().contains("The .sqb backup tool is not installed"));    std::fs::remove_dir_all(dir).ok();
     drop(serve);
     for name in [&src, &tgt] {
         run(&spec("master"), &format!("ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{name}];"));

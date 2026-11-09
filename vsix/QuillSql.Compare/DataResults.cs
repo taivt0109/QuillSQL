@@ -270,7 +270,7 @@ namespace QuillSql.Compare
             if (missing.Length > 0) summary.Children.Add(Ui.Text(missing, brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
             summary.Margin = new Thickness(28, 6, 28, 10);
 
-            // Tabs, left to right as SQL Data Compare has them; the grid below is shared.
+            // Tabs, left to right as the classic data compare tool has them; the grid below is shared.
             foreach (var (label, kind, tip) in new[]
             {
                 ("All rows", AllRows, "Every row that differs, in comparison order"),

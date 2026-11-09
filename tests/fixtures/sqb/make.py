@@ -1,8 +1,8 @@
-"""Writes the hand-built SQL Backup (.sqb) samples the reader's unit tests decode.
+"""Writes the hand-built the .sqb backup tool (.sqb) samples the reader's unit tests decode.
 
 They follow the format description in specs/gaps/backup.md, section 6, and are built with
 independent implementations (Python's zlib, lzma, hashlib and the `cryptography` package's
-AES), not with the reader's own code. No real SQL Backup file was available.
+AES), not with the reader's own code. No real .sqb file was available.
 
     python tests/fixtures/sqb/make.py
 

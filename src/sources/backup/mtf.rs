@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use super::xpress;
 
-/// Random-access bytes: a backup file, its decompressed form, or a stream of a SQL Backup file.
+/// Random-access bytes: a backup file, its decompressed form, or a stream of a .sqb backup file.
 pub trait Medium: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize>;
     fn len(&self) -> u64;
@@ -228,7 +228,7 @@ impl BackupType {
         }
     }
 
-    /// The number SQL Compare projects store (`BackupType` of a backup set).
+    /// The number the classic compare tool projects store (`BackupType` of a backup set).
     pub fn number(self) -> i32 {
         match self {
             BackupType::Full => 0,

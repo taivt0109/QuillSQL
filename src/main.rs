@@ -213,7 +213,7 @@ fn run_stdin(opts: &Options) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    // `quill schema ...` and `quill data ...` take SQL Compare style switches, not clap's.
+    // `quill schema ...` and `quill data ...` take the classic compare tool style switches, not clap's.
     let argv: Vec<String> = std::env::args().collect();
     // The database drivers' futures are deep; the main thread's 1 MB stack on Windows is too small.
     let command: Option<fn(&[String]) -> u8> = match argv.get(1).map(String::as_str) {
@@ -234,7 +234,7 @@ fn main() -> ExitCode {
             Ok(h) => h.join(),
             Err(_) => Ok(quillsql::args::exit::GENERAL_ERROR),
         };
-        // A panic (its message is already printed) ends with SQL Compare's "unhandled" code.
+        // A panic (its message is already printed) ends with the classic compare tool's "unhandled" code.
         let Ok(code) = code else { std::process::exit(quillsql::args::exit::UNHANDLED) };
         return ExitCode::from(code);
     }

@@ -204,7 +204,7 @@ fn backups_read_like_the_database() {
     assert_eq!((customer.count(RowKind::Different), customer.count(RowKind::OnlyIn2)), (3, 1), "{:?}", customer.error);
 }
 
-/// A SQL Backup file holding `stripes` as its devices, uncompressed and unencrypted, with a
+/// A .sqb backup file holding `stripes` as its devices, uncompressed and unencrypted, with a
 /// section before the extents and a padding block (specs/gaps/backup.md, section 6).
 fn to_sqb(stripes: &[PathBuf], out: &std::path::Path) {
     let images: Vec<Vec<u8>> = stripes.iter().map(|f| std::fs::read(f).unwrap()).collect();
@@ -347,7 +347,7 @@ fn backups_carry_the_followup_fields() {
     followup::assert_same_features(&from_backup, &from_live, "backup");
 }
 
-/// A TDE-encrypted database is listed as encrypted and refused, as SQL Compare does. Creates a
+/// A TDE-encrypted database is listed as encrypted and refused, as the classic compare tool does. Creates a
 /// certificate in master for the test and drops it afterwards (and the master key when the test
 /// made it).
 #[test]

@@ -1,11 +1,11 @@
-//! Command-line switches in the style of SQL Compare and SQL Data Compare: `/name:value`,
+//! Command-line switches in the style of the classic compare tool and the classic data compare tool: `/name:value`,
 //! `/name=value`, `/name value`, and the same with `-` or `--`. Names are case-insensitive and
 //! every switch has its documented aliases, so existing pipeline scripts keep working when
-//! `SQLCompare.exe` is replaced with `quill schema`. Messages and exit codes are SQL Compare's.
+//! the classic schema compare command line is replaced with `quill schema`. Messages and exit codes are the classic compare tool's.
 
 use std::collections::HashMap;
 
-/// Exit codes shared with SQL Compare's command line.
+/// Exit codes shared with the classic compare tool's command line.
 pub mod exit {
     pub const SUCCESS: u8 = 0;
     pub const GENERAL_ERROR: u8 = 1;
@@ -51,7 +51,7 @@ pub struct Switch {
     pub help: &'static str,
 }
 
-/// Checks on a switch beyond its syntax, run after parsing in SQL Compare's order.
+/// Checks on a switch beyond its syntax, run after parsing in the classic compare tool's order.
 pub struct Rule {
     pub name: &'static str,
     /// Switches that cannot be given with this one.
@@ -75,7 +75,7 @@ impl Rule {
         Rule { name: "", excludes: &[], depends: &[], values: &[], list: false, range: None, path: false, deprecated: None };
 }
 
-/// A failed parse, with the exit code SQL Compare would use.
+/// A failed parse, with the exit code the classic compare tool would use.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ArgError {
     pub code: u8,
@@ -176,7 +176,7 @@ pub fn parse(switches: &[Switch], argv: &[String]) -> Result<Args, ArgError> {
                     format!("Invalid command-line argument: \"{raw}\". Command-line arguments must begin with a forward slash."),
                 ));
             }
-            // A stray word, as in SQL Compare, is ignored.
+            // A stray word, as in the classic compare tool, is ignored.
             continue;
         };
         let switch = lookup.get(&name.to_ascii_lowercase()).ok_or_else(|| ArgError::new(exit::USAGE, format!("Invalid command-line argument: /{name}.")))?;
@@ -211,7 +211,7 @@ pub fn parse(switches: &[Switch], argv: &[String]) -> Result<Args, ArgError> {
     Ok(args)
 }
 
-/// Runs the rules in SQL Compare's order: at least one of `require_one_of`, exclusions,
+/// Runs the rules in the classic compare tool's order: at least one of `require_one_of`, exclusions,
 /// dependencies, enumerated values (replacing aliases), blank paths, numeric ranges.
 /// `defaults` are switches that count as given for dependencies (`/server1` has a default).
 pub fn validate(args: &mut Args, rules: &[Rule], require_one_of: &[&str], defaults: &[&str]) -> Result<(), ArgError> {

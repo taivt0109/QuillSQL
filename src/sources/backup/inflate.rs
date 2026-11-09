@@ -1,4 +1,4 @@
-//! Deflate decoding (RFC 1951) of the zlib streams (RFC 1950) SQL Backup compresses with at
+//! Deflate decoding (RFC 1951) of the zlib streams (RFC 1950) the .sqb backup tool compresses with at
 //! levels 2 and 3.
 
 /// Decodes a zlib stream: a 2-byte header, deflate data, the Adler-32 of the output (not

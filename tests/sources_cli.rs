@@ -31,7 +31,7 @@ const SCHEMA: &str = "CREATE SCHEMA [audit]\r\nAUTHORIZATION [dbo]\r\nGO\r\n";
 
 fn filter_file(dir: &Path, table_expr: &str) -> PathBuf {
     let xml = format!(
-        "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?>\n<NamedFilter version=\"1\" type=\"SQLCompareFilter\">\n  <FilterName>t</FilterName>\n  \
+        "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?>\n<NamedFilter version=\"1\" type=\"QuillSQLFilter\">\n  <FilterName>t</FilterName>\n  \
 <Filter version=\"1\" type=\"DifferenceFilter\">\n    <FilterCaseSensitive>False</FilterCaseSensitive>\n    <Filters version=\"1\">\n      \
 <None version=\"1\"><Include>True</Include><Expression>TRUE</Expression></None>\n      \
 <Table version=\"1\"><Include>True</Include><Expression>{table_expr}</Expression></Table>\n    </Filters>\n  </Filter>\n</NamedFilter>"
@@ -135,7 +135,7 @@ fn reports_scripts_folder_problems() {
     let _ = std::fs::remove_dir_all(bad);
 }
 
-/// A SQL Change Automation project: the programmable objects and the offline schema model are
+/// A migrations project: the programmable objects and the offline schema model are
 /// read, the migration scripts are not.
 fn sca_project(name: &str, extra: &str, subfolder: Option<&str>) -> PathBuf {
     let model = subfolder.unwrap_or("Schema-Model");

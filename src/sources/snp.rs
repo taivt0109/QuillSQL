@@ -1,4 +1,4 @@
-//! SQL Compare snapshot files (`.snp`, format version 23). The file is one little-endian stream
+//! .snp snapshot files (`.snp`, format version 23). The file is one little-endian stream
 //! of .NET `BinaryWriter` values with no framing or offsets, so every member is parsed in order
 //! to reach the next one; members the model has no place for are read and dropped.
 
@@ -56,7 +56,7 @@ pub fn is_snp(bytes: &[u8]) -> bool {
 pub fn read(bytes: &[u8]) -> Result<Database, String> {
     let mut c = Cur::new(bytes);
     if !matches!(c.str(), Ok(Some(m)) if m == MAGIC) {
-        return Err("not a SQL Compare snapshot".into());
+        return Err("not a .snp snapshot".into());
     }
     let version = c.f32()?;
     if version != VERSION {
@@ -71,7 +71,7 @@ pub fn read(bytes: &[u8]) -> Result<Database, String> {
     s.server.product_version = c.s()?;
     s.server.engine_edition = u32::try_from(c.i32()?).unwrap_or(0);
     if c.bool()? {
-        c.str()?; // SQL Compare version
+        c.str()?; // the classic compare tool version
     }
     c.str()?; // scripts folder
     c.str()?; // migrations folder
@@ -1831,7 +1831,7 @@ impl Snap {
         self.principals(&mut db, &mut permissions);
         db.permissions = permissions;
         db.extended_properties = extended_properties(&self.props);
-        // SQL Clone's marker is not part of the schema.
+        // a database-cloning tool's marker is not part of the schema.
         let cs = self.case_sensitive;
         db.extended_properties.retain(|p| !p.is_clone_marker(cs));
         db.dependencies = self.dependencies(&db);
@@ -2426,7 +2426,7 @@ mod tests {
     #[test]
     fn header_errors() {
         assert!(!is_snp(b"PK\x03\x04"));
-        assert_eq!(read(b"").unwrap_err(), "not a SQL Compare snapshot");
+        assert_eq!(read(b"").unwrap_err(), "not a .snp snapshot");
         let mut bytes = s(MAGIC);
         assert!(is_snp(&bytes));
         bytes.extend(22f32.to_le_bytes());
@@ -2437,7 +2437,7 @@ mod tests {
         assert_eq!(read(&bytes).unwrap_err(), "truncated snapshot at offset 16");
     }
 
-    /// Reads the snapshot SQL Compare made of tests/fixtures/compare/shop.sql, when
+    /// Reads the snapshot the classic compare tool made of tests/fixtures/compare/shop.sql, when
     /// QUILL_TEST_SNP points to it.
     #[test]
     fn reads_shop_snapshot() {

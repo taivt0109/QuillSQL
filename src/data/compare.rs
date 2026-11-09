@@ -142,7 +142,7 @@ impl<'a> RowSource<'a> {
     }
 }
 
-/// Why SQL Data Compare leaves a pair out with these sources: memory-optimised tables from a
+/// Why the classic data compare tool leaves a pair out with these sources: memory-optimised tables from a
 /// backup, views when either side is not live, a WHERE clause on a side that is not live.
 pub fn unsupported(p: &TablePair, kinds: [SideKind; 2], db1: &Database, db2: &Database) -> Option<String> {
     let backup = kinds.contains(&SideKind::Backup);
@@ -170,7 +170,7 @@ pub fn unsupported(p: &TablePair, kinds: [SideKind; 2], db1: &Database, db2: &Da
 }
 
 /// A backup cannot give non-persisted computed columns: they are left out on such a side, as
-/// SQL Data Compare does.
+/// The classic data compare tool does.
 fn exclude_backup_computed(p: &mut TablePair, kinds: [SideKind; 2], db1: &Database, db2: &Database) {
     let unreadable = |db: &Database, t: &ObjectName, c: &str| {
         db.tables.iter().find(|x| x.schema.eq_ignore_ascii_case(&t.schema) && x.name.eq_ignore_ascii_case(&t.name)).is_some_and(|x| {
@@ -210,7 +210,7 @@ pub fn compare(
 }
 
 /// With a scripts folder on either side, computed columns are left out of the comparison, as
-/// SQL Data Compare does (their values in the scripts are not read).
+/// The classic data compare tool does (their values in the scripts are not read).
 fn exclude_computed(p: &mut TablePair, db1: &Database, db2: &Database) {
     let computed = |db: &Database, t: &ObjectName, c: &str| {
         db.tables.iter().find(|x| x.schema.eq_ignore_ascii_case(&t.schema) && x.name.eq_ignore_ascii_case(&t.name)).is_some_and(|x| {

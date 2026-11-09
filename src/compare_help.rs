@@ -8,7 +8,7 @@ pub fn schema(name: &str) -> &'static str {
         "AddWithEncryption" => "Creates and alters stored procedures, functions, views and triggers WITH ENCRYPTION, so their text cannot be read in the target.",
         "NoAutoColumnMapping" => "When on, columns of mapped tables whose names differ only a little (case, spaces, underscores) are paired automatically. Turn it off to pair columns by exact name only.",
         "ConsiderNextFilegroupInPartitionSchemes" => "Compares the filegroup marked NEXT USED of partition schemes too; otherwise schemes that differ only in it are identical.",
-        "SsdtCompatibleOptions" => "Reads and writes scripts folders in the layout of a Visual Studio database project (SSDT) instead of SQL Compare's.",
+        "SsdtCompatibleOptions" => "Reads and writes scripts folders in the layout of a Visual Studio database project (SSDT) instead of the classic compare tool's.",
         "DecryptPost2kEncryptedObjects" => "Reads the text of encrypted modules so they can be compared and deployed. Needs a connection that may use the dedicated administrator connection or sysadmin rights.",
         "DisableAndReenableDdlTriggers" => "Disables the target's database DDL triggers while the script runs and enables them again at the end, so they do not block or log the deployment.",
         "NoErrorHandling" => "Leaves out the checks after each batch that stop the script and roll back when a statement fails.",

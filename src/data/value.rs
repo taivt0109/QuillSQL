@@ -4,7 +4,7 @@
 //! code point after the server has trimmed trailing spaces (and folded case, accents, kana and
 //! width as the collation ignores them), uniqueidentifier in SQL Server's byte order, binary
 //! with trailing zero bytes ignored and then by length (the server is asked for `DATALENGTH` as a
-//! tie-break, so 0x0102 and 0x010200 are different keys, as SQL Data Compare treats them),
+//! tie-break, so 0x0102 and 0x010200 are different keys, as the classic data compare tool treats them),
 //! datetimeoffset by its UTC instant. The merge relies on that
 //! agreement and stops with an error if a stream is ever out of order.
 
@@ -146,7 +146,7 @@ impl Value {
         }
     }
 
-    /// The text SQL Data Compare's CSV export writes for a value of a column of type `ty`.
+    /// The text the classic data compare tool's CSV export writes for a value of a column of type `ty`.
     pub fn csv_text(&self, ty: &DataType) -> String {
         match self {
             Value::Null => "<NULL>".into(),

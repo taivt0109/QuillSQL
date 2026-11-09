@@ -2,7 +2,7 @@
 //! INSERT statements of its data scripts become rows in memory, in the form a live read gives,
 //! for the data engine to compare. Deploying data to the folder writes the data scripts again.
 //!
-//! As SQL Data Compare reads them, the scripts only hold literals and nothing needs a server:
+//! As the classic data compare tool reads them, the scripts only hold literals and nothing needs a server:
 //! computed columns are not read (the comparison leaves them out), CLR, hierarchyid and spatial
 //! values are `0x…` binary, sql_variant values take their base type from the literal or its CAST,
 //! columns missing from an INSERT are NULL, and any other SQL in a VALUES list is an error.
@@ -319,7 +319,7 @@ fn all_columns(t: &Table) -> Vec<&Column> {
     t.columns.iter().collect()
 }
 
-/// The value of a literal in a column of type `t`, or SQL Data Compare's complaint about it.
+/// The value of a literal in a column of type `t`, or the classic data compare tool's complaint about it.
 fn column_value(lit: &Lit, t: &DataType, collation: &str) -> Result<Value, String> {
     if t.schema.is_none() && t.name == "sql_variant" {
         return Ok(variant(lit, collation));
@@ -450,7 +450,7 @@ fn literal(t: &[Token], k: usize) -> Result<(Lit, usize), String> {
         }
         if t.get(k).is_some_and(|x| x.text == "+") {
             let (rhs, next) = term(t, k + 1)?;
-            // Pieces are joined as text, as SQL Data Compare does (1+2 reads as 12).
+            // Pieces are joined as text, as the classic data compare tool does (1+2 reads as 12).
             let piece = |l: Lit| match strip_cast(&l) {
                 Lit::Text(s, n) => Some((s.clone(), *n)),
                 Lit::Number(s) => Some((s.clone(), false)),

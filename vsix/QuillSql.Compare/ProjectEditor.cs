@@ -624,7 +624,7 @@ namespace QuillSql.Compare
                 }
                 else if (current.Contains(name))
                 {
-                    // Unlike SQL Compare, flags without a check box are kept.
+                    // Unlike the classic compare tool, flags without a check box are kept.
                     result.Add(name);
                 }
             }
@@ -755,7 +755,7 @@ namespace QuillSql.Compare
             var names = Ui.Column(Ui.Title(title, 17), Ui.Text(key == "source" ? "Database 1" : "Database 2", 12, brush: CompareTheme.Muted));
             names.Margin = new Thickness(12, 0, 0, 0);
             _type = new ComboBox { Width = 150, VerticalAlignment = VerticalAlignment.Center };
-            // SQL Compare's other kinds of data source are listed but not available yet.
+            // The classic compare tool's other kinds of data source are listed but not available yet.
             foreach (var (name, enabled) in new[] { ("Database", true), ("Snapshot", !session.IsData), ("Empty database", !session.IsData && key == "target"), ("Backup", true), ("Scripts folder", true), ("Source control", true) })
             {
                 _type.Items.Add(new ComboBoxItem { Content = name, IsEnabled = enabled, ToolTip = enabled ? null : name == "Snapshot" || name == "Empty database" ? "Not available for this side or kind of comparison" : "Not available yet" });
@@ -815,7 +815,7 @@ namespace QuillSql.Compare
             _file = Ui.Column(Ui.Form(Ui.Field("Snapshot file", fileRow)), Ui.Text("Make a snapshot with quill schema /makesnapshot or Tools > Save snapshot.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap));
             _empty = Ui.Text("An empty database: every object of the source is created. The changes can only be scripted, and the script can then run on a new database.", brush: CompareTheme.Muted, wrap: TextWrapping.Wrap);
             Children.Add(_live);
-            // A scripts folder in SQL Compare's layout, or a revision of it in git, Mercurial or Subversion.
+            // A scripts folder in the classic compare tool's layout, or a revision of it in git, Mercurial or Subversion.
             _folder = new ComboBox { IsEditable = true, ItemsSource = settings.RecentFolders.ToList(), ToolTip = "Recently used scripts folders are in the list" };
             var browseFolder = Ui.Button("Browse…", glyph: Glyph.Folder, click: () =>
             {

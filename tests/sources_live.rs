@@ -101,7 +101,7 @@ fn makescripts_reads_back_identical() {
         assert!(f.messages.is_empty(), "{:?}", f.messages);
         assert_identical(&f.database, &live, &opts, name);
         assert_identical(&live, &f.database, &opts.clone().without(Opt::IgnoreWhiteSpace), name);
-        // A SQL Compare snapshot of the database reads back the same.
+        // A .snp snapshot of the database reads back the same.
         let snp = quillsql::sources::snp::read(&quillsql::sources::snp_write::write(&live)).unwrap();
         assert_identical(&snp, &live, &opts, &format!("{name} snapshot"));
         // DDL triggers are not compared; they still come back.
@@ -417,7 +417,7 @@ fn assemblies_written_as_dlls_read_back() {
 }
 
 /// The values that once needed a server (computed columns, hierarchyid, spatial, sql_variant,
-/// values over 1 MB) are read from the data scripts as SQL Data Compare reads them.
+/// values over 1 MB) are read from the data scripts as the classic data compare tool reads them.
 #[test]
 fn data_scripts_need_no_server_for_any_type() {
     let Some(server) = server() else { return };

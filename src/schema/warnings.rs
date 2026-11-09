@@ -1,4 +1,4 @@
-//! Deployment warnings with SQL Compare's severities and wording. `object` is the object the
+//! Deployment warnings with the classic compare tool's severities and wording. `object` is the object the
 //! warning belongs to (empty for the deployment as a whole); names are passed as written in the
 //! script (`[dbo].[T]`, column names without brackets).
 
@@ -589,7 +589,7 @@ pub mod objects {
     }
 }
 
-/// `kind` as SQL Compare names the user kind (MicrosoftEntraUser…).
+/// `kind` as the classic compare tool names the user kind (MicrosoftEntraUser…).
 pub fn user_type_unsupported(u: &str, kind: &str) -> Warning {
     w(Severity::High, u, format!("The user type {kind} is not supported in the target database version."))
 }
@@ -656,11 +656,11 @@ pub fn user_without_login_folder(u: &str) -> Warning {
     )
 }
 
-/// An SQL Change Automation project is the source: its migration scripts play no part.
+/// A migrations project is the source: its migration scripts play no part.
 pub fn sca_migrations_ignored() -> Warning {
     w(
         Severity::Medium,
         "",
-        "Be aware that any migration scripts in your SQL Change Automation project are ignored when using QuillSQL Compare.\r\nThe comparison will use the state of the project as represented by the Programmable Objects and Offline Schema Model folders.".into(),
+        "Be aware that any migration scripts in your migrations project are ignored when using QuillSQL Compare.\r\nThe comparison will use the state of the project as represented by the Programmable Objects and Offline Schema Model folders.".into(),
     )
 }

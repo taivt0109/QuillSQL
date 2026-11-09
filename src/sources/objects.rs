@@ -65,7 +65,7 @@ pub fn object_files(db: &Database, o: &Options) -> Vec<(ObjectKey, String)> {
     };
     for a in &db.assemblies {
         if o.has(crate::schema::Opt::WriteAssembliesAsDlls) {
-            // The image itself, as SQL Compare writes it; grants and properties have no place there.
+            // The image itself, as the classic compare tool writes it; grants and properties have no place there.
             images.push((key(ObjectType::Assembly, "", &a.name), super::folder::binary_script(a)));
             continue;
         }

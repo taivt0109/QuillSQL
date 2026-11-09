@@ -10,7 +10,7 @@ use super::compare::{Comparison, DiffKind, Difference, ObjectType};
 enum Rule {
     Kind(DiffKind),
     Object { ty: Option<ObjectType>, pattern: Option<Regex> },
-    /// A SQL Compare object type QuillSQL does not compare (`Assembly`): matches nothing.
+    /// A classic compare tool object type QuillSQL does not compare (`Assembly`): matches nothing.
     Unknown,
 }
 

@@ -634,13 +634,13 @@ mod tests {
     fn xml_without_layout() {
         assert_eq!(xml_key("<a>\r\n  <b x=\"1\"/>\r\n</a>"), "<a><b x=\"1\"/></a>");
         assert_eq!(xml_key("<a> text </a>"), "<a> text </a>");
-        // SQL Compare's snapshots write empty elements with a space before the slash.
+        // .snp snapshots write empty elements with a space before the slash.
         assert_eq!(xml_key("<a><b x=\"1\" /></a>"), xml_key("<a><b x=\"1\"/></a>"));
     }
 
     #[test]
     fn database_owner_is_not_compared() {
-        // dbo is a special user: SQL Compare skips its properties, the owner's login among them.
+        // dbo is a special user: The classic compare tool skips its properties, the owner's login among them.
         use crate::schema::{DiffKind, Mappings, Opt, Options, compare};
         let db = |owner: &str| Database { name: "x".into(), owner: Some(owner.into()), ..Default::default() };
         let opts = Options::default_set().without(Opt::IgnoreUserProperties);

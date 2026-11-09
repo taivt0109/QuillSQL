@@ -336,10 +336,10 @@ fn objects_round_trip_through_snapshots() {
     // The owner's login rides on dbo.
     assert!(live.owner.is_some());
     assert_eq!(ours.owner, live.owner);
-    // SQL Compare's snapshot of the same script, run by sqlcmd (QUOTED_IDENTIFIER off; keys
+    // .snp snapshot of the same script, run by sqlcmd (QUOTED_IDENTIFIER off; keys
     // made then differ).
-    let theirs = snp::read(include_bytes!("fixtures/objects/rg_objects.snp")).unwrap();
-    identical(&theirs, &options().with(Opt::IgnoreQuotedIdentifiersAndAnsiNullSettings), "SQL Compare snapshot");
+    let theirs = snp::read(include_bytes!("fixtures/objects/ref_objects.snp")).unwrap();
+    identical(&theirs, &options().with(Opt::IgnoreQuotedIdentifiersAndAnsiNullSettings), ".snp snapshot");
     server.drop(a);
 }
 

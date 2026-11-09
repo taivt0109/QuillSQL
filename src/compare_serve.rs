@@ -23,7 +23,7 @@
 //!
 //! - `backup_sets` {source} lists the backup sets of a backup side.
 //!
-//! A side is a live database, a snapshot (QuillSQL JSON or SQL Compare `.snp`), backup files
+//! A side is a live database, a snapshot (QuillSQL JSON or the classic compare tool `.snp`), backup files
 //! (`type: "backup"`, `path` with the files separated by `;`, optional `backupSet` name,
 //! `password` with the files' passwords separated by `,`), or a scripts
 //! folder (`type: "scripts"`, `path`, optional source-control `revision`). Deploying to a
@@ -83,7 +83,7 @@ struct State {
     next: u64,
     schema: HashMap<u64, SchemaSession>,
     data: HashMap<u64, DataSession>,
-    /// Sides read lately, as SQL Compare keeps its registrations: the mapping tabs and rename
+    /// Sides read lately, as the classic compare tool keeps its registrations: the mapping tabs and rename
     /// detection reuse them, Refresh and a comparison read again.
     sides: Vec<(String, Database, Vec<String>)>,
 }
@@ -171,7 +171,7 @@ fn progress_line(id: &Value, text: &str, r: Report) -> Value {
 /// A side and what its reader warned about.
 type Loaded = (Database, Vec<String>);
 
-/// Reads the project's two sides at the same time, as SQL Compare does; the target is None for
+/// Reads the project's two sides at the same time, as the classic compare tool does; the target is None for
 /// an empty database. With `fresh` both are read again, else a side read lately is reused.
 fn load_sides(state: &mut State, project: &Project, decrypt: bool, fresh: bool, progress: &Progress) -> Result<(Loaded, Option<Loaded>), String> {
     let key = |s: &SourceSpec| format!("{decrypt}|{}", serde_json::to_string(s).unwrap_or_default());
@@ -205,7 +205,7 @@ fn load_sides(state: &mut State, project: &Project, decrypt: bool, fresh: bool, 
         state.sides.retain(|c| c.0 != k);
         state.sides.push((k, db.clone(), warnings.clone()));
     }
-    // Two pairs at most, like SQL Compare's two registrations per side.
+    // Two pairs at most, like the classic compare tool's two registrations per side.
     let excess = state.sides.len().saturating_sub(4);
     state.sides.drain(..excess);
     Ok((r1, r2))
@@ -421,7 +421,7 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
             let side: SourceSpec = field(request, "source")?;
             let path: String = field(request, "path")?;
             let db = load_side(&side, 1, true, progress)?;
-            // SQL Compare's format, or QuillSQL's JSON model for a .json path.
+            // The classic compare tool's format, or QuillSQL's JSON model for a .json path.
             let bytes = if path.to_ascii_lowercase().ends_with(".json") {
                 serde_json::to_vec_pretty(&db).map_err(|e| e.to_string())?
             } else {
@@ -550,8 +550,9 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
             let index: usize = field(request, "index")?;
             let d = s.comparison.differences.get(index).ok_or("no such difference")?;
             let target = d.target_name.clone().unwrap_or_else(|| d.name.clone());
-            let source = if d.kind == DiffKind::OnlyIn2 { None } else { object_sql(&s.db1, d.object_type, &d.name) };
-            let target = if d.kind == DiffKind::OnlyIn1 { None } else { object_sql(&s.db2, d.object_type, &target) };
+            let opts = schema_options(&s.project)?;
+            let source = if d.kind == DiffKind::OnlyIn2 { None } else { object_sql(&s.db1, d.object_type, &d.name, &opts) };
+            let target = if d.kind == DiffKind::OnlyIn1 { None } else { object_sql(&s.db2, d.object_type, &target, &opts) };
             Ok(json!({"source": source, "target": target}))
         }
         "schema_script" => {
@@ -655,7 +656,7 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
         "data_compare" => {
             let project: Project = field(request, "project")?;
             let opts = data_options(&project)?;
-            // A scripts folder is read without a server, as SQL Data Compare reads it.
+            // A scripts folder is read without a server, as the classic data compare tool reads it.
             let mut backups: [Option<crate::sources::backup::Backup>; 2] = [None, None];
             let mut folders: [Option<crate::sources::datafolder::DataFolder>; 2] = [None, None];
             let mut specs: [Option<crate::db::ConnectionSpec>; 2] = [None, None];
@@ -947,8 +948,8 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
     }
 }
 
-/// "Back up target before deployment": the request's `backup` settings (with the SQL Backup
-/// password) put the backup first in the script, as SQL Compare does.
+/// "Back up target before deployment": the request's `backup` settings (with the .sqb backup tool
+/// password) put the backup first in the script, as the classic compare tool does.
 fn backup_into(request: &Value, target: &SourceSpec, script: &mut DeploymentScript) -> Result<(), String> {
     let Some(b) = request.get("backup").filter(|b| !b.is_null()) else { return Ok(()) };
     let o: schema::backup::BackupOptions = serde_json::from_value(b.clone()).map_err(|e| format!("'backup': {e}"))?;
@@ -961,7 +962,7 @@ fn backup_into(request: &Value, target: &SourceSpec, script: &mut DeploymentScri
     let spec = target.connection(2)?;
     let caps = schema::backup::capabilities(&spec)?;
     if o.sqb() && caps.sqb_version == 0 {
-        return Err(format!("SQL Backup is not installed on {}", spec.server));
+        return Err(format!("The .sqb backup tool is not installed on {}", spec.server));
     }
     schema::backup::Plan { options: &o, database: &spec.database, utc: schema::backup::utc_stamp(), caps: &caps }.add_to(script);
     Ok(())
@@ -1281,7 +1282,8 @@ fn report_side(spec: &SourceSpec, db: &Database) -> schema::report::DataSource {
 /// A report as `quill schema /report` writes it, of the chosen differences.
 fn schema_report(s: &SchemaSession, format: &str, selected: Option<&[usize]>, include_identical: bool) -> Vec<u8> {
     use schema::report::{self, Item, Report};
-    let ignore_ws = schema_options(&s.project).map(|o| o.has(Opt::IgnoreWhiteSpace)).unwrap_or(true);
+    let opts = schema_options(&s.project).unwrap_or_else(|_| Options::default_set());
+    let ignore_ws = opts.has(Opt::IgnoreWhiteSpace);
     let mut items: Vec<Item> = s
         .comparison
         .differences
@@ -1295,8 +1297,8 @@ fn schema_report(s: &SchemaSession, format: &str, selected: Option<&[usize]>, in
                 DiffKind::OnlyIn2 => (None, Some(&d.name)),
                 _ => (Some(&d.name), Some(target)),
             };
-            let left = one.and_then(|n| object_sql(&s.db1, d.object_type, n));
-            let right = two.and_then(|n| object_sql(&s.db2, d.object_type, n));
+            let left = one.and_then(|n| object_sql(&s.db1, d.object_type, n, &opts));
+            let right = two.and_then(|n| object_sql(&s.db2, d.object_type, n, &opts));
             Item {
                 object_type: d.object_type,
                 kind: d.kind,
@@ -1348,34 +1350,52 @@ fn script_json(script: &DeploymentScript) -> Value {
     })
 }
 
-/// The SQL of one object, for the side-by-side view and the comparison reports.
-pub fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<String> {
+/// The SQL of one object, for the side-by-side view and the comparison reports. What the
+/// comparison options ignore (WITH NOCHECK, fill factor, indexes, triggers, ...) is left out, so
+/// the two sides differ only where the comparison found a difference.
+pub fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName, opts: &Options) -> Option<String> {
     let same = |s: &str, n: &str| s == name.schema && n == name.name;
+    let o = schema::compare::shown_options(opts);
+    let r = ddl::Render { opts: o.clone(), features: schema::features::Features::latest() };
+    let index_shown = |ix: &catalog::Index| {
+        !(o.has(Opt::IgnoreIndexes) || (o.has(Opt::IgnorePerformanceIndexes) && !(ix.primary_key || ix.unique || ix.unique_constraint)))
+    };
+    let triggers = |ts: &[catalog::Trigger]| -> Vec<String> {
+        ts.iter().filter(|t| schema::compare::trigger_compared(t, &o)).map(|t| t.definition.trim().to_string()).collect()
+    };
     match ty {
         ObjectType::Table => db.tables.iter().find(|t| same(&t.schema, &t.name)).map(|t| {
             let table = t.object_name().quoted();
-            let mut parts = vec![ddl::create_table(t, None, false)];
-            let mut ixs: Vec<&catalog::Index> = t.indexes.iter().collect();
+            let host = ddl::Host::of_table(t);
+            let mut parts = vec![ddl::create_table_with(t, None, false, &r)];
+            let mut ixs: Vec<&catalog::Index> = t.indexes.iter().filter(|i| index_shown(i)).collect();
             ixs.sort_by_key(|i| (!i.primary_key, i.name.clone()));
             for ix in ixs {
-                parts.extend(ddl::create_index(&table, ix));
+                parts.extend(ddl::create_index_with(&table, ix, &r, &host));
             }
-            for c in &t.check_constraints {
-                parts.extend(ddl::add_check(&table, c, false));
+            if !o.has(Opt::IgnoreChecks) {
+                for c in &t.check_constraints {
+                    parts.extend(ddl::add_check_with(&table, c, &o));
+                }
             }
-            for fk in &t.foreign_keys {
-                parts.extend(ddl::add_foreign_key(&table, fk, false));
+            if !o.has(Opt::IgnoreKeys) {
+                for fk in &t.foreign_keys {
+                    parts.extend(ddl::add_foreign_key_with(&table, fk, &o));
+                }
             }
-            for tr in &t.triggers {
-                parts.push(tr.definition.trim().to_string());
+            if !o.has(Opt::IgnoreTriggers) {
+                parts.extend(triggers(&t.triggers));
             }
-            parts.extend(schema::ddl_objects::table_parts(t, false));
+            parts.extend(schema::ddl_objects::table_parts_with(t, false, &o));
             parts.join("\nGO\n")
         }),
         ObjectType::View => db.views.iter().find(|v| same(&v.schema, &v.name)).map(|v| {
             let mut parts = vec![v.definition.trim().to_string()];
-            for ix in &v.indexes {
-                parts.extend(ddl::create_index(&name.quoted(), ix));
+            for ix in v.indexes.iter().filter(|i| index_shown(i)) {
+                parts.extend(ddl::create_index_with(&name.quoted(), ix, &r, &ddl::Host::view()));
+            }
+            if !o.has(Opt::IgnoreTriggers) {
+                parts.extend(triggers(&v.triggers));
             }
             parts.join("\nGO\n")
         }),
@@ -1398,7 +1418,7 @@ pub fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<St
             for r in &p.member_of {
                 lines.push(format!("ALTER ROLE {} ADD MEMBER {}", crate::db::quote(r), crate::db::quote(&p.name)));
             }
-            for g in db.permissions.iter().filter(|g| g.class == "DATABASE" && g.grantee == p.name) {
+            for g in db.permissions.iter().filter(|g| g.class == "DATABASE" && g.grantee == p.name && !o.has(Opt::IgnorePermissions)) {
                 lines.push(g.grant_sql());
             }
             lines.join("\n")
@@ -1413,7 +1433,7 @@ pub fn object_sql(db: &Database, ty: ObjectType, name: &ObjectName) -> Option<St
             .iter()
             .find(|p| p.class == "DATABASE" && p.name == name.name)
             .map(|p| ddl::add_xprop(p, "NULL, NULL, NULL, NULL, NULL, NULL")),
-        other => schema::ddl_objects::object_sql(db, other, name),
+        other => schema::ddl_objects::object_sql(db, other, name, &o),
     }
 }
 
@@ -1532,7 +1552,7 @@ fn only_selected(request: &Value) -> Option<Vec<ObjectName>> {
 }
 
 /// A scripts folder without database information is read as the side's `sqlVersion` and
-/// `defaultCollation` (what SQL Compare asks for such a folder).
+/// `defaultCollation` (what the classic compare tool asks for such a folder).
 fn folder_defaults(request: &Value, key: &str, db: &mut Database) {
     let Some(side) = request.get("project").and_then(|p| p.get(key)) else { return };
     if side["type"] != "scripts" || side.get("revision").and_then(Value::as_str).is_some_and(|r| !r.is_empty()) {
@@ -1633,7 +1653,7 @@ fn script_actions(batches: &[String]) -> Vec<Value> {
                     };
                     (format!("{action} {kind}"), g(2), String::new())
                 }
-                "create table" if g(1).contains("RG_Recovery_") => ("rebuild table".to_string(), g(1).replace("RG_Recovery_", ""), String::new()),
+                "create table" if g(1).contains("QS_Recovery_") => ("rebuild table".to_string(), g(1).replace("QS_Recovery_", ""), String::new()),
                 "create index" | "drop index" | "alter index" => (action.to_string(), g(2), g(1)),
                 "rename" | "role membership" => (action.to_string(), g(1), g(2)),
                 "permissions" => (format!("{} permissions", g(1).to_ascii_lowercase()), g(3), g(2)),
@@ -1693,6 +1713,56 @@ fn revisions(path: &std::path::Path) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T with a foreign key and a check, created WITH NOCHECK on the first side only; `nullable`
+    /// gives the two sides another difference so the table is listed either way.
+    fn nocheck_side(not_trusted: bool, nullable: bool) -> Database {
+        let int = catalog::DataType { name: "int".into(), ..Default::default() };
+        let col = |n: &str, ordinal: u32| catalog::Column { name: n.into(), ordinal, data_type: int.clone(), nullable, ..Default::default() };
+        let fk = catalog::ForeignKey {
+            name: "FK_T_P".into(),
+            columns: vec!["P".into()],
+            referenced_table: ObjectName::new("dbo", "P"),
+            referenced_columns: vec!["Id".into()],
+            on_delete: "NO_ACTION".into(),
+            on_update: "NO_ACTION".into(),
+            not_trusted,
+            ..Default::default()
+        };
+        let ck = catalog::CheckConstraint { name: "CK_T".into(), definition: "([P]>(0))".into(), not_trusted, ..Default::default() };
+        let t = catalog::Table {
+            schema: "dbo".into(),
+            name: "T".into(),
+            lock_escalation: "TABLE".into(),
+            columns: vec![col("Id", 1), col("P", 2)],
+            foreign_keys: vec![fk],
+            check_constraints: vec![ck],
+            ..Default::default()
+        };
+        Database { tables: vec![t], ..Default::default() }
+    }
+
+    #[test]
+    fn ignored_with_nocheck_is_neither_a_difference_nor_in_the_sql() {
+        let o = Options::default_set().with(Opt::IgnoreWithNocheck);
+        let c = schema::compare(&nocheck_side(true, false), &nocheck_side(false, false), &o, &schema::Mappings::default());
+        assert!(c.differences.iter().all(|d| d.kind == DiffKind::Equal), "{:?}", c.differences);
+        let (a, b) = (nocheck_side(true, true), nocheck_side(false, false));
+        let c = schema::compare(&a, &b, &o, &schema::Mappings::default());
+        let d = c.differences.iter().find(|d| d.name.name == "T").unwrap();
+        assert!(d.properties.iter().all(|p| !p.name.contains("NOCHECK")), "{:?}", d.properties);
+        let name = ObjectName::new("dbo", "T");
+        let sql = object_sql(&a, ObjectType::Table, &name, &o).unwrap();
+        assert!(!sql.contains("NOCHECK") && sql.contains("FK_T_P") && sql.contains("CK_T"), "{sql}");
+        // Not ignored: shown, and a difference.
+        let plain = Options::default_set();
+        assert!(object_sql(&a, ObjectType::Table, &name, &plain).unwrap().contains("WITH NOCHECK"));
+        let c = schema::compare(&a, &b, &plain, &schema::Mappings::default());
+        assert!(c.differences.iter().find(|d| d.name.name == "T").unwrap().properties.iter().any(|p| p.name.contains("NOCHECK")));
+        // Ignored keys and checks leave the constraints out of the view altogether.
+        let none = object_sql(&a, ObjectType::Table, &name, &plain.with(Opt::IgnoreKeys).with(Opt::IgnoreChecks)).unwrap();
+        assert!(!none.contains("FK_T_P") && !none.contains("CK_T"), "{none}");
+    }
 
     #[test]
     fn options_and_projects() {
@@ -1794,7 +1864,7 @@ mod tests {
         let none = |_: &str, _: Report| {};
         let r = handle(&mut state, &json!({"op": "schema_compare", "project": project}), &none).unwrap();
         let s = r["session"].clone();
-        // No rename suggestions: SQL Compare's UI makes none; tables are mapped by hand.
+        // No rename suggestions: The classic compare tool's UI makes none; tables are mapped by hand.
         assert!(r.get("renames").is_none());
         let index = |r: &Value, name: &str| r["differences"].as_array().unwrap().iter().find(|d| d["name"] == name).unwrap()["index"].as_u64().unwrap();
         let (report, orders) = (index(&r, "Report"), index(&r, "Orders"));
@@ -1980,9 +2050,9 @@ mod tests {
             "PRINT N'Dropping foreign keys from [dbo].[Orders]'".to_string(),
             "ALTER TABLE [dbo].[Orders] DROP CONSTRAINT [FK_Orders_Customer]".to_string(),
             "IF @@ERROR <> 0 SET NOEXEC ON".to_string(),
-            "CREATE TABLE [dbo].[RG_Recovery_1_Customer]\n(\n[Id] [int] NOT NULL\n)".to_string(),
-            "INSERT INTO [dbo].[RG_Recovery_1_Customer]([Id]) SELECT [Id] FROM [dbo].[Customer]".to_string(),
-            "EXEC sp_rename N'[dbo].[RG_Recovery_1_Customer]', N'Customer', N'OBJECT'".to_string(),
+            "CREATE TABLE [dbo].[QS_Recovery_1_Customer]\n(\n[Id] [int] NOT NULL\n)".to_string(),
+            "INSERT INTO [dbo].[QS_Recovery_1_Customer]([Id]) SELECT [Id] FROM [dbo].[Customer]".to_string(),
+            "EXEC sp_rename N'[dbo].[QS_Recovery_1_Customer]', N'Customer', N'OBJECT'".to_string(),
             "CREATE NONCLUSTERED INDEX [IX_A] ON [dbo].[Customer] ([Id])".to_string(),
             "ALTER TABLE [dbo].[Orders] WITH NOCHECK ADD CONSTRAINT [FK_Orders_Customer] FOREIGN KEY ([C]) REFERENCES [dbo].[Customer] ([Id])".to_string(),
             "CREATE PROCEDURE [dbo].[Report] AS SELECT 1".to_string(),
@@ -1994,8 +2064,8 @@ mod tests {
         let expected = [
             ("drop constraint", "[dbo].[Orders]"),
             ("rebuild table", "[dbo].[1_Customer]"),
-            ("insert rows", "[dbo].[RG_Recovery_1_Customer]"),
-            ("rename", "[dbo].[RG_Recovery_1_Customer]"),
+            ("insert rows", "[dbo].[QS_Recovery_1_Customer]"),
+            ("rename", "[dbo].[QS_Recovery_1_Customer]"),
             ("create index", "[dbo].[Customer]"),
             ("add foreign key", "[dbo].[Orders]"),
             ("create procedure", "[dbo].[Report]"),

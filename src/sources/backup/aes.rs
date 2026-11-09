@@ -1,4 +1,4 @@
-//! AES (FIPS-197) forward cipher and the counter mode SQL Backup encrypts with: before each
+//! AES (FIPS-197) forward cipher and the counter mode the .sqb backup tool encrypts with: before each
 //! 16-byte block the counter, a 128-bit big-endian number, is incremented, and the block is
 //! XORed with the encrypted counter. Decrypting is the same operation.
 

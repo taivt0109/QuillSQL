@@ -1,7 +1,8 @@
-//! T-SQL for the objects of `catalog::objects` and the table parts they bring, in SQL Compare's
+//! T-SQL for the objects of `catalog::objects` and the table parts they bring, in the classic compare tool's
 //! layout (CRLF between the clauses of one statement).
 
 use super::ddl::{qname, sql_string, type_sql};
+use super::options::{Opt, Options};
 use crate::catalog::*;
 use crate::db::{literal, quote};
 
@@ -21,7 +22,7 @@ pub fn hex_literal(hex: &str) -> String {
             out.push_str("\\\r\n");
         }
     }
-    // SQL Compare ends an image of a whole number of 128-byte lines with a line break.
+    // The classic compare tool ends an image of a whole number of 128-byte lines with a line break.
     if !hex.is_empty() && hex.len().is_multiple_of(256) {
         out.push_str("\r\n");
     }
@@ -777,22 +778,33 @@ pub fn create_external_table(x: &ExternalTable) -> String {
 /// The statements for a table's statistics, full-text index and edge constraints;
 /// `inline_fulltext` is InlineFulltextFields.
 pub fn table_parts(t: &Table, inline_fulltext: bool) -> Vec<String> {
+    table_parts_with(t, inline_fulltext, &Options::none())
+}
+
+/// [`table_parts`] without what the options ignore (statistics, full-text, WITH NOCHECK, ...).
+pub fn table_parts_with(t: &Table, inline_fulltext: bool, o: &Options) -> Vec<String> {
     let name = t.object_name();
-    let mut out: Vec<String> = t.statistics.iter().map(|s| create_statistics(&name, s, true)).collect();
-    out.extend(t.edge_constraints.iter().map(|e| add_edge_constraint(&name, e, false)));
-    if let Some(f) = &t.fulltext_index {
+    let mut out: Vec<String> = Vec::new();
+    if !o.has(Opt::IgnoreStatistics) {
+        out.extend(t.statistics.iter().map(|s| create_statistics(&name, s, true)));
+    }
+    let nocheck = !(o.has(Opt::IgnoreWithNocheck) || o.has(Opt::IgnoreNocheckAndWithNocheck));
+    out.extend(t.edge_constraints.iter().map(|e| add_edge_constraint(&name, e, e.not_trusted && nocheck)));
+    if let Some(f) = t.fulltext_index.as_ref().filter(|_| !o.has(Opt::IgnoreFullTextIndexing)) {
         out.extend(create_fulltext_index(&name, f, true, false, true, inline_fulltext));
     }
-    for c in &t.columns {
-        if let Some(s) = &c.sensitivity {
-            out.push(add_sensitivity(&name, &c.name, s));
+    if !o.has(Opt::IgnoreSensitivityClassification) {
+        for c in &t.columns {
+            if let Some(s) = &c.sensitivity {
+                out.push(add_sensitivity(&name, &c.name, s));
+            }
         }
     }
     out
 }
 
 /// The SQL of one of the objects of this module, for the side-by-side view.
-pub fn object_sql(db: &Database, ty: super::compare::ObjectType, name: &ObjectName) -> Option<String> {
+pub fn object_sql(db: &Database, ty: super::compare::ObjectType, name: &ObjectName, o: &Options) -> Option<String> {
     use super::compare::ObjectType as T;
     let same = |s: &str, n: &str| s == name.schema && n == name.name;
     let named = |n: &str| n == name.name;
@@ -814,7 +826,9 @@ pub fn object_sql(db: &Database, ty: super::compare::ObjectType, name: &ObjectNa
         T::Contract => db.contracts.iter().find(|f| named(&f.name)).map(create_contract),
         T::Queue => db.queues.iter().find(|q| same(&q.schema, &q.name)).map(|q| {
             let mut v = vec![create_queue(q, true, true)];
-            v.extend(q.event_notifications.iter().map(create_event_notification));
+            if !o.has(Opt::IgnoreQueueEventNotifications) {
+                v.extend(q.event_notifications.iter().map(create_event_notification));
+            }
             join(v)
         }),
         T::Service => db.services.iter().find(|f| named(&f.name)).map(create_service),

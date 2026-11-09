@@ -1,4 +1,4 @@
-//! Console output shared by `quill schema` and `quill data`, laid out as SQL Compare's command
+//! Console output shared by `quill schema` and `quill data`, laid out as the classic compare tool's command
 //! line does: a title block, normal lines on standard output, `Warning:` and `Error:` lines on
 //! standard error, `/quiet` and `/verbose`, the `/outputwidth` used for tables, and the
 //! `/logLevel` log file.
@@ -110,14 +110,14 @@ pub fn exit_on_ctrl_c() {
     }
 }
 
-/// Starts the `/logLevel` log: `QUILL_COMPARE_LOGPATH` or SQL Compare's `RG-COMPARE-LOGPATH`
+/// Starts the `/logLevel` log: `QUILL_COMPARE_LOGPATH`
 /// (a file or folder), else
 /// `%LOCALAPPDATA%\QuillSQL\Logs`.
 pub fn start_log(level: LogLevel, product: &str) {
     if level == LogLevel::None {
         return;
     }
-    let path = match std::env::var_os("QUILL_COMPARE_LOGPATH").or_else(|| std::env::var_os("RG-COMPARE-LOGPATH")).map(std::path::PathBuf::from) {
+    let path = match std::env::var_os("QUILL_COMPARE_LOGPATH").map(std::path::PathBuf::from) {
         Some(p) if p.is_dir() => p.join("QuillCompare-CLI.log"),
         Some(p) => p,
         None => std::env::var_os("LOCALAPPDATA")
@@ -164,7 +164,7 @@ pub struct Stamp {
 }
 
 impl Stamp {
-    /// `7 Nov 2026 2:41 PM`, the timestamp format of SQL Compare's reports.
+    /// `7 Nov 2026 2:41 PM`, the timestamp format of the classic compare tool's reports.
     pub fn report_format(&self) -> String {
         const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         let h12 = match self.hour % 12 {
@@ -310,7 +310,7 @@ pub fn fixed_width(source: &str, width: usize, prefix: &str, collapse: bool) -> 
                 }
             }
             let piece: String = chars[start..end].iter().collect();
-            // Each piece is trimmed, as SQL Compare does (so wrapped script lines lose their indent).
+            // Each piece is trimmed, as the classic compare tool does (so wrapped script lines lose their indent).
             out.push(format!("{prefix}{}", piece.trim()));
             start = end;
         }

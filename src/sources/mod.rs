@@ -1,4 +1,4 @@
-//! Comparison sources besides live databases: scripts folders, source control and SQL Compare
+//! Comparison sources besides live databases: scripts folders, source control and the classic compare tool
 //! snapshots.
 
 pub mod backup;

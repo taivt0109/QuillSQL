@@ -1794,6 +1794,11 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                             } else if qualify && !o.schema.is_empty() {
                                 item.insert = format!("{}.{}", quote(&o.schema), quote(&o.name));
                             }
+                            // Its parameters, as after EXEC.
+                            if !o.params.is_empty() {
+                                let align = " ".repeat(column + item.insert.chars().count() + 1);
+                                item.insert = format!("{} {}", item.insert, parameter_list(&o.params, &align, nl));
+                            }
                             items.push(item);
                         }
                     }

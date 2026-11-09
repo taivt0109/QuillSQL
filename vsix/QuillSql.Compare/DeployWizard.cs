@@ -134,7 +134,7 @@ namespace QuillSql.Compare
             var snapshotPath = new TextBox { Text = SnapshotName ?? "", Width = 460, IsEnabled = snapshot.IsChecked == true };
             var snapshotBrowse = Ui.Button("Browse…", () =>
             {
-                var d = new SaveFileDialog { Filter = "SQL Compare snapshot (*.snp)|*.snp|QuillSQL snapshot (*.json)|*.json", FileName = Path.GetFileName(snapshotPath.Text), InitialDirectory = Directory.Exists(Path.GetDirectoryName(snapshotPath.Text)) ? Path.GetDirectoryName(snapshotPath.Text) : null };
+                var d = new SaveFileDialog { Filter = "Snapshot (*.snp)|*.snp|QuillSQL snapshot (*.json)|*.json", FileName = Path.GetFileName(snapshotPath.Text), InitialDirectory = Directory.Exists(Path.GetDirectoryName(snapshotPath.Text)) ? Path.GetDirectoryName(snapshotPath.Text) : null };
                 if (Dialogs.Show(d, window) == true) snapshotPath.Text = d.FileName;
             });
             snapshotBrowse.IsEnabled = snapshot.IsChecked == true;
@@ -216,10 +216,10 @@ namespace QuillSql.Compare
             reviewBody.Children.Add(Ui.Card(review, 0));
             JsonObject made = null;
 
-            // Backup of target: SQL Compare's options for a native backup or SQL Backup.
+            // Backup of target: The classic compare tool's options for a native backup or the .sqb backup tool.
             var provider = new ComboBox { Width = 260, HorizontalAlignment = HorizontalAlignment.Left };
             provider.Items.Add(new ComboBoxItem { Content = "Native SQL Server" });
-            provider.Items.Add(new ComboBoxItem { Content = "SQL Backup", IsEnabled = false, ToolTip = "SQL Backup is not installed on the target's server" });
+            provider.Items.Add(new ComboBoxItem { Content = "The .sqb backup tool", IsEnabled = false, ToolTip = "The .sqb backup tool is not installed on the target's server" });
             provider.SelectedIndex = 0;
             var folderBox = new TextBox { Text = saved.Str("folder") ?? "" };
             var fileBox = new TextBox { Text = saved.Str("file") ?? "", IsEnabled = saved.ContainsKey("nameAutomatically") && !saved.Bool("nameAutomatically") };
@@ -358,7 +358,7 @@ namespace QuillSql.Compare
                             caps = d.Obj("capabilities") ?? new JsonObject();
                             var installed = caps.Long("sqbVersion") > 0;
                             ((ComboBoxItem)provider.Items[1]).IsEnabled = installed;
-                            if (installed) ((ComboBoxItem)provider.Items[1]).ToolTip = "SQL Backup " + caps.Long("sqbVersion") + " is installed on the target's server";
+                            if (installed) ((ComboBoxItem)provider.Items[1]).ToolTip = "The .sqb backup tool " + caps.Long("sqbVersion") + " is installed on the target's server";
                             if (installed && saved.Str("provider") == "sqb") provider.SelectedIndex = 1;
                             if (folderBox.Text.Length == 0) folderBox.Text = (provider.SelectedIndex == 1 ? caps.Str("sqbFolder") : caps.Str("nativeFolder")) ?? "";
                             if (fileBox.Text.Length == 0) fileBox.Text = d.Str("file") ?? "";

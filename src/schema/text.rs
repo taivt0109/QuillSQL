@@ -151,7 +151,7 @@ pub fn compare(a: &str, b: &str, kind: TextKind, opts: &Options) -> Option<TextD
     let ta = normalize(a, kind, opts);
     let tb = normalize(b, kind, opts);
     let case_sensitive = opts.has(Opt::CaseSensitiveObjectDefinition);
-    // String literals always compare exactly: unlike SQL Compare, 'abc' and 'ABC' in a default
+    // String literals always compare exactly: unlike the classic compare tool, 'abc' and 'ABC' in a default
     // or a procedure body are reported, because they store or return different data.
     let same = |x: &Token, y: &Token| {
         x.kind == y.kind
@@ -328,7 +328,7 @@ fn sort_with_clause(tokens: Vec<Token>) -> Vec<Token> {
         }
         if t.text == "," {
             elements.push(std::mem::take(&mut cur));
-        } else if (t.is_word("AS") && !cur.iter().any(|&c| tokens[c].is_word("EXECUTE") || tokens[c].is_word("EXEC")))
+        } else if (t.is_word("AS") && !cur.last().is_some_and(|&c| tokens[c].is_word("EXECUTE") || tokens[c].is_word("EXEC")))
             || t.is_word("FOR")
             || t.is_word("BEGIN")
             || t.text == "("

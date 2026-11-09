@@ -1,6 +1,6 @@
 //! Enough of an assembly's PE/CLI metadata (ECMA-335 §II.24–25) to tell whether a new build
 //! changes what SQL Server binds to: its public surface — types with their flags, methods with
-//! their parameter types, and fields. SQL Compare alters an assembly in place when the surface
+//! their parameter types, and fields. The classic compare tool alters an assembly in place when the surface
 //! is the same and drops and creates it otherwise.
 
 /// One type of the surface.

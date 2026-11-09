@@ -197,7 +197,7 @@ impl SqlProj {
     /// Adds `Build` items for new files and removes those of deleted files (SDK-style projects
     /// build every file anyway).
     /// `assemblies` gives the assembly behind each `.dll` among them: a `.dll` is a `None` item
-    /// with a `Reference` holding its CLR metadata, as SQL Compare adds it.
+    /// with a `Reference` holding its CLR metadata, as the classic compare tool adds it.
     pub fn update(&self, added: &[PathBuf], removed: &[PathBuf], assemblies: &[(PathBuf, &crate::catalog::Assembly)]) -> Result<(), String> {
         if self.sdk || (added.is_empty() && removed.is_empty()) {
             return Ok(());

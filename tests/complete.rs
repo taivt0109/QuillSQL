@@ -615,7 +615,9 @@ fn procedures_where_a_statement_starts_without_exec() {
         let text = sql.replace('|', "");
         complete(&text, caret, Some(&s)).items.into_iter().next().map(|i| i.insert)
     };
-    assert_eq!(first("sp_w|").as_deref(), Some("sp_who2"));
+    // Tab or Enter brings its parameters, as after EXEC.
+    let who = first("sp_w|").unwrap();
+    assert!(who.starts_with("sp_who2 @loginame = ") && who.contains("-- sysname"), "{who}");
     assert_eq!(first("select 1;\nusp|").as_deref(), Some("dbo.usp_Sync"));
     // Not inside an expression.
     assert_eq!(first("select * from dbo.Customers where sp_w|"), None);

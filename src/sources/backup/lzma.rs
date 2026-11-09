@@ -1,4 +1,4 @@
-//! LZMA decoding of SQL Backup's level 4 compression: 5 property bytes (lc/lp/pb, dictionary
+//! LZMA decoding of the .sqb tool's level 4 compression: 5 property bytes (lc/lp/pb, dictionary
 //! size), then the range-coded stream, which ends with the end marker or when the output is
 //! complete.
 

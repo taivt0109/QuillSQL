@@ -19,6 +19,8 @@ pub mod report;
 pub mod select;
 pub mod text;
 pub mod warnings;
+#[cfg(test)]
+mod option_tests;
 
 pub use compare::{Comparison, DiffKind, Difference, Mappings, ObjectType, PropDiff, TableMapping, compare};
 pub use options::{Opt, Options};

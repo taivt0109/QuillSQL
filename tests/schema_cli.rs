@@ -1,4 +1,4 @@
-//! `quill schema` as a replacement for SQLCompare.exe: switches, exit codes, console output,
+//! `quill schema` as a replacement for the classic schema compare command line: switches, exit codes, console output,
 //! reports and project files. The tests that need SQL Server run only when QUILL_TEST_SERVER is
 //! set (see compare_live.rs); their databases are named `QD_schemacli_*`.
 
@@ -214,7 +214,7 @@ fn live_compare_report_project_and_deploy() {
     assert_eq!(code(&quill_owned(&both(&["/assertidentical"]))), 79);
     assert_eq!(code(&quill_owned(&both(&["/assertidentical", "/include:Table:Same"]))), 0);
 
-    // XML report: SQL Compare's layout; /rad adds the deselected differences.
+    // XML report: The classic compare tool's layout; /rad adds the deselected differences.
     let o = quill_owned(&both(&["/report", &p("r.xml"), "/include:Table"]));
     assert_eq!(code(&o), 0, "{}", stderr(&o));
     let x = read_utf16(&dir.join("r.xml"));

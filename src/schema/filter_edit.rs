@@ -26,7 +26,7 @@ pub struct FilterModel {
     pub rules: Vec<Rule>,
 }
 
-/// The types a filter has rules for, in SQL Compare's order, after `None`.
+/// The types a filter has rules for, in the classic compare tool's order, after `None`.
 pub fn types() -> Vec<&'static str> {
     std::iter::once("None").chain(ObjectType::ALL.iter().map(|&t| type_key(t))).collect()
 }
@@ -100,10 +100,10 @@ impl FilterModel {
         format!("<ProjectFilter version=\"1\" type=\"DifferenceFilter\">\r\n{}</ProjectFilter>", self.filters_xml("  "))
     }
 
-    /// An `.scpf` file as SQL Compare writes it: UTF-16 with a byte order mark.
+    /// An `.scpf` file as the classic compare tool writes it: UTF-16 with a byte order mark.
     pub fn scpf(&self) -> Vec<u8> {
         let text = format!(
-            "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?>\r\n<!--\r\nQuillSQL Compare\r\nVersion:{}-->\r\n<NamedFilter version=\"1\" type=\"SQLCompareFilter\">\r\n  <!--This filter can be loaded using the SQL Compare UI or used with a SQL Compare command line session using the /filter switch-->\r\n  <FilterName>{}</FilterName>\r\n  <Filter version=\"1\" type=\"DifferenceFilter\">\r\n{}  </Filter>\r\n</NamedFilter>\r\n",
+            "<?xml version=\"1.0\" encoding=\"utf-16\" standalone=\"yes\"?>\r\n<!--\r\nQuillSQL Compare\r\nVersion:{}-->\r\n<NamedFilter version=\"1\" type=\"QuillSQLFilter\">\r\n  <!--This filter can be loaded in QuillSQL Compare or used on the command line with the /filter switch-->\r\n  <FilterName>{}</FilterName>\r\n  <Filter version=\"1\" type=\"DifferenceFilter\">\r\n{}  </Filter>\r\n</NamedFilter>\r\n",
             env!("CARGO_PKG_VERSION"),
             esc(&self.name),
             self.filters_xml("    ")

@@ -1,4 +1,4 @@
-//! Line-by-line comparison of two object scripts, aligned as SQL Compare shows them: equal lines
+//! Line-by-line comparison of two object scripts, aligned as the classic compare tool shows them: equal lines
 //! side by side, changed lines paired up, and lines present on one side only.
 
 /// One aligned row: a line from each side (`None` where that side has no line).

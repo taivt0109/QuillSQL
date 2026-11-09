@@ -35,7 +35,7 @@ pub enum Authentication {
     Sql,
     /// Microsoft Entra: an access token supplied at run time.
     Entra,
-    /// Microsoft Entra user name and password (SQL Compare's MicrosoftEntraPassword).
+    /// Microsoft Entra user name and password (the classic compare tool's MicrosoftEntraPassword).
     #[serde(rename = "entraPassword", alias = "entrapassword")]
     EntraPassword,
     /// The Entra account signed in on this machine (MicrosoftEntraIntegrated).
@@ -80,7 +80,7 @@ pub struct SourceSpec {
     /// Microsoft Entra tenant (id or domain); empty for the user's domain or `organizations`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tenant: String,
-    /// `type = scripts` from SQL Source Control: the scripts folder location XML it was linked
+    /// `type = scripts` from a source-control tool: the scripts folder location XML it was linked
     /// with (written back as a SourceControlDataSource).
     #[serde(skip_serializing_if = "String::is_empty")]
     pub location_xml: String,
@@ -126,18 +126,18 @@ impl SourceSpec {
         self.kind == "snapshot"
     }
 
-    /// A scripts folder (SQL Compare `FolderDataSource`), at `path`; also a SQL Change
-    /// Automation project (`type = sca`, `path` its project file), read the same way.
+    /// A scripts folder (the classic compare tool `FolderDataSource`), at `path`; also a migrations
+    /// project project (`type = sca`, `path` its project file), read the same way.
     pub fn is_scripts(&self) -> bool {
         self.kind == "scripts" || self.is_sca()
     }
 
-    /// A SQL Change Automation project (SQL Compare `ScaDataSource`).
+    /// A migrations project (the classic compare tool `ScaDataSource`).
     pub fn is_sca(&self) -> bool {
         self.kind == "sca"
     }
 
-    /// Backup files (SQL Compare `BackupDatabaseSource`), listed in `path`.
+    /// Backup files (the classic compare tool `BackupDatabaseSource`), listed in `path`.
     pub fn is_backup(&self) -> bool {
         self.kind == "backup"
     }
@@ -234,7 +234,7 @@ pub struct Project {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub deselected: Vec<Deselected>,
-    /// Data projects: compare tables that are not in `selected` (SQL Data Compare's "include
+    /// Data projects: compare tables that are not in `selected` (the classic data compare tool's "include
     /// new tables"). When false only `selected` tables are compared.
     #[serde(skip_serializing_if = "is_true")]
     pub include_new_tables: bool,
@@ -245,7 +245,7 @@ pub struct Project {
     /// different, only in 1, only in 2). Identical rows are also on with the IncludeIdenticalRecords option.
     #[serde(skip_serializing_if = "is_default_kinds")]
     pub row_kinds: [bool; 4],
-    /// Back up target before deployment (SQL Compare's `SC_DeploymentOptions/BackupOptions`).
+    /// Back up target before deployment (the classic compare tool's `SC_DeploymentOptions/BackupOptions`).
     #[serde(skip_serializing_if = "is_disabled")]
     pub backup: crate::schema::backup::BackupOptions,
     pub note: String,

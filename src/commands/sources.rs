@@ -25,7 +25,7 @@ pub fn source(args: &Args, n: u8) -> Result<Option<Source>, ArgError> {
         return Ok(Some(Source::Scripts { path, revision }));
     }
     if let Some(path) = args.get(&key("sca")) {
-        // A SQL Change Automation project: read like a scripts folder (see folder::read).
+        // A migrations project: read like a scripts folder (see folder::read).
         return Ok(Some(Source::Scripts { path: PathBuf::from(path), revision: None }));
     }
     if args.has(&key("sourcecontrol")) {

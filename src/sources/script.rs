@@ -1,4 +1,4 @@
-//! Object creation scripts in the layout SQL Compare writes into a scripts folder: one file per
+//! Object creation scripts in the layout the classic compare tool writes into a scripts folder: one file per
 //! object, CRLF line endings, `GO` after every batch, constraints and indexes as separate
 //! statements after CREATE TABLE, then permissions and extended properties.
 
@@ -20,7 +20,7 @@ impl Out {
         self.s.push_str("\r\nGO\r\n");
     }
 
-    /// A statement without `GO` (SQL Compare ends role files this way).
+    /// A statement without `GO` (the classic compare tool ends role files this way).
     fn line(&mut self, sql: &str) {
         self.s.push_str(&crlf(sql));
         self.s.push_str("\r\n");
@@ -82,7 +82,7 @@ pub fn type_sql(t: &DataType) -> String {
     s
 }
 
-/// One column as SQL Compare writes it inside CREATE TABLE.
+/// One column as the classic compare tool writes it inside CREATE TABLE.
 pub fn column_sql(c: &Column) -> String {
     let mut s = quote(&c.name);
     if let Some(comp) = &c.computed {
@@ -143,7 +143,7 @@ fn render(o: &Options) -> Render {
     Render { opts: o.clone(), features: crate::schema::features::Features::latest() }
 }
 
-/// Strings in the order .NET's culture-aware comparison (en-US) gives them, which SQL Compare
+/// Strings in the order .NET's culture-aware comparison (en-US) gives them, which the classic compare tool
 /// sorts names with: case is ignored first (lower case wins a tie), and punctuation sorts
 /// before digits, digits before letters.
 pub fn culture_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -155,7 +155,7 @@ pub fn culture_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     primary.then_with(|| a.chars().map(|c| !c.is_lowercase()).cmp(b.chars().map(|c| !c.is_lowercase())))
 }
 
-/// An index or a CREATE STATISTICS object of a table, as SQL Compare sorts them in its file.
+/// An index or a CREATE STATISTICS object of a table, as the classic compare tool sorts them in its file.
 enum TablePart<'a> {
     Index(&'a Index),
     Statistic(&'a Statistic),
@@ -219,7 +219,7 @@ fn part_order(a: &TablePart, b: &TablePart) -> std::cmp::Ordering {
 /// XML and spatial indexes, as deployments write them.
 fn xml_or_spatial_sql(on: &str, ix: &Index, o: &Options) -> String {
     use crate::schema::ddl::{Host, create_index_with};
-    // SQL Compare lists prefixed namespaces before the default one.
+    // The classic compare tool lists prefixed namespaces before the default one.
     let mut ix = ix.clone();
     if let Some(x) = ix.xml.as_mut() {
         x.namespaces.sort_by_key(|n| n.prefix.is_none());
@@ -227,7 +227,7 @@ fn xml_or_spatial_sql(on: &str, ix: &Index, o: &Options) -> String {
     create_index_with(on, &ix, &render(o), &Host::default()).join("\r\nGO\r\n")
 }
 
-/// The class prefix SQL Compare writes before a securable in GRANT … ON: none for objects.
+/// The class prefix the classic compare tool writes before a securable in GRANT … ON: none for objects.
 fn class_prefix(class: &str) -> String {
     match class {
         "OBJECT" | "DATABASE" => String::new(),
@@ -236,7 +236,7 @@ fn class_prefix(class: &str) -> String {
     }
 }
 
-/// GRANT / DENY statements on one securable in the order SQL Compare writes them: by grantee,
+/// GRANT / DENY statements on one securable in the order the classic compare tool writes them: by grantee,
 /// then by permission, the object-level statement before its column-level ones, columns in
 /// table order. Object-level statements read `ON  [s].[o]` (an empty class prefix), column-level
 /// ones `ON [s].[o]`.
@@ -439,7 +439,7 @@ fn triggers(out: &mut Out, list: &[Trigger], schema: &str, on: &str, o: &Options
     }
 }
 
-/// `ADD SENSITIVITY CLASSIFICATION … WITH (LABEL = '…', …)`: SQL Compare quotes the values
+/// `ADD SENSITIVITY CLASSIFICATION … WITH (LABEL = '…', …)`: The classic compare tool quotes the values
 /// without N and leaves the rank out.
 fn sensitivity_sql(table: &str, column: &str, s: &Sensitivity) -> String {
     let mut items = Vec::new();
@@ -481,7 +481,7 @@ fn create_table_sql(t: &Table, o: &Options, inline: bool, default_fg: &str) -> S
     }
     if inline && !o.has(Opt::IgnoreChecks) {
         for ck in &t.check_constraints {
-            // SQL Compare leaves system-generated names out here; we keep them, so the folder
+            // The classic compare tool leaves system-generated names out here; we keep them, so the folder
             // reads back with the same names.
             let nfr = if ck.not_for_replication && !o.has(Opt::IgnoreNotForReplication) { "NOT FOR REPLICATION " } else { "" };
             lines.push(format!("CONSTRAINT {} CHECK {nfr}({})", quote(&ck.name), super::expr::rewrite(&ck.definition)));
@@ -539,8 +539,8 @@ fn inlined(t: &Table, ix: &Index, inline: bool) -> bool {
     t.memory_optimized || (ix.primary_key && t.temporal.is_some()) || (inline && (ix.primary_key || ix.unique_constraint))
 }
 
-/// A table's file, in SQL Compare's order: CREATE TABLE (Stretch, owner), triggers, checks and
-/// their NOCHECKs, keys, indexes and statistics (sorted as SQL Compare sorts them), foreign keys
+/// A table's file, in the classic compare tool's order: CREATE TABLE (Stretch, owner), triggers, checks and
+/// their NOCHECKs, keys, indexes and statistics (sorted as the classic compare tool sorts them), foreign keys
 /// and their NOCHECKs, change tracking, bindings, permissions, extended properties, lock
 /// escalation, large value types, the full-text index and sensitivity classifications. The
 /// history table of a system-versioned table goes first, in the same file.
@@ -776,7 +776,7 @@ pub fn routine(db: &Database, r: &Routine, o: &Options) -> String {
     out.s
 }
 
-/// A parameter or return type as SQL Compare writes it for CLR modules: `[nvarchar] (50)`,
+/// A parameter or return type as the classic compare tool writes it for CLR modules: `[nvarchar] (50)`,
 /// `[decimal] (10, 2)`, `[dbo].[Point]`.
 fn clr_type(t: &str) -> String {
     let t = t.trim();
@@ -969,7 +969,7 @@ fn members(out: &mut Out, db: &Database, role: &str) {
     }
 }
 
-/// Database-level permissions of a principal; SQL Compare ends the file without `GO`.
+/// Database-level permissions of a principal; the classic compare tool ends the file without `GO`.
 fn database_permissions(out: &mut Out, db: &Database, grantee: &str, o: &Options) {
     if o.has(Opt::IgnorePermissions) {
         return;
@@ -1043,7 +1043,7 @@ pub fn user(db: &Database, p: &Principal, o: &Options) -> String {
         s.push_str(&format!(" WITH DEFAULT_SCHEMA={}", quote(ds)));
     }
     out.batch(&s);
-    // CREATE USER gives CONNECT: SQL Compare writes only its absence, Data Tools style
+    // CREATE USER gives CONNECT: The classic compare tool writes only its absence, Data Tools style
     // (WriteAsDataToolsPermissions) writes the grant.
     if !o.has(Opt::IgnorePermissions) {
         let denied = db.permissions.iter().any(|x| x.class == "DATABASE" && x.grantee == p.name && x.permission.eq_ignore_ascii_case("CONNECT"));
@@ -1064,7 +1064,7 @@ pub fn ddl_trigger(t: &DdlTrigger) -> String {
     out.set_options(&ModuleSettings::default());
     out.module(&module_sql(&t.definition, "CREATE", &quote(&t.name)));
     if t.disabled {
-        // SQL Compare writes the name as it is here, without brackets.
+        // The classic compare tool writes the name as it is here, without brackets.
         out.batch(&format!("DISABLE TRIGGER {} ON DATABASE", t.name));
     }
     out.s
@@ -1081,7 +1081,7 @@ pub fn bindable(b: &BindableObject, default: bool) -> String {
     out.s
 }
 
-/// A security policy as SQL Compare writes it in a folder, line breaks included: LF between
+/// A security policy as the classic compare tool writes it in a folder, line breaks included: LF between
 /// a predicate and its ON, CRLF elsewhere, and a batch end of LF, `GO`, LF.
 pub fn security_policy(p: &SecurityPolicy) -> String {
     let predicates: Vec<String> = p
@@ -1102,7 +1102,7 @@ pub fn security_policy(p: &SecurityPolicy) -> String {
     )
 }
 
-/// CREATE XML SCHEMA COLLECTION with the schemas indented as SQL Compare writes them.
+/// CREATE XML SCHEMA COLLECTION with the schemas indented as the classic compare tool writes them.
 pub fn xml_schema_collection(x: &XmlSchemaCollection) -> String {
     format!("CREATE XML SCHEMA COLLECTION {}\r\nAS {}", qname(&x.schema, &x.name), crate::schema::ddl::sql_string(&indent_xml(&x.definition)))
 }

@@ -63,7 +63,7 @@ pub fn qname(schema: &str, name: &str) -> String {
     format!("{}.{}", quote(schema), quote(name))
 }
 
-/// A T-SQL string literal as SQL Compare writes one for dynamic SQL: quotes doubled, and a
+/// A T-SQL string literal as the classic compare tool writes one for dynamic SQL: quotes doubled, and a
 /// backslash before a line break doubled so the break survives.
 pub fn sql_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 3);
@@ -90,7 +90,7 @@ pub fn sql_string(s: &str) -> String {
     out
 }
 
-/// A column type as SQL Compare writes it: `[nvarchar] (100)`, `[decimal] (18, 2)`, `[dbo].[Phone]`.
+/// A column type as the classic compare tool writes it: `[nvarchar] (100)`, `[decimal] (18, 2)`, `[dbo].[Phone]`.
 pub fn type_sql(t: &DataType) -> String {
     if let Some(schema) = &t.schema {
         return qname(schema, &t.name);
@@ -1019,7 +1019,7 @@ pub fn drop_xprop(p: &ExtendedProperty, levels: &str) -> String {
     format!("EXEC sp_dropextendedproperty {}, {levels}", literal(&p.name))
 }
 
-/// SQL Compare's TRY/CATCH around a statement that must not stop the script silently.
+/// The classic compare tool's TRY/CATCH around a statement that must not stop the script silently.
 pub fn try_catch(sql: &str) -> String {
     format!(
         "BEGIN TRY\r\n\t{sql}\r\nEND TRY\r\nBEGIN CATCH\r\n\tDECLARE @msg nvarchar(max);\r\n\tDECLARE @severity int;\r\n\tDECLARE @state int;\r\n\tSELECT @msg = ERROR_MESSAGE(), @severity = ERROR_SEVERITY(), @state = ERROR_STATE();\r\n\tRAISERROR(@msg, @severity, @state);\r\n\r\n\tSET NOEXEC ON\r\nEND CATCH"

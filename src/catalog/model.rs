@@ -853,13 +853,13 @@ pub struct ExtendedProperty {
 }
 
 impl ExtendedProperty {
-    /// SQL Clone's marker on a cloned database (`IsSQLCloneDatabase`): not part of the schema.
+    /// a database-cloning tool's marker on a cloned database (`IsSQLCloneDatabase`): not part of the schema.
     pub fn is_clone_marker(&self, case_sensitive: bool) -> bool {
         const NAME: &str = "IsSQLCloneDatabase";
         self.class == "DATABASE" && if case_sensitive { self.name == NAME } else { self.name.eq_ignore_ascii_case(NAME) }
     }
 
-    /// SQL Source Control's link on a live database (`SQLSourceControl…`): not part of the schema.
+    /// a source-control tool's link on a live database (`SQLSourceControl…`): not part of the schema.
     pub fn is_source_control_marker(&self) -> bool {
         self.class == "DATABASE" && self.name.get(..16).is_some_and(|p| p.eq_ignore_ascii_case("SQLSourceControl"))
     }

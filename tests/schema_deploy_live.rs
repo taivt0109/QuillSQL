@@ -266,12 +266,12 @@ fn bound_defaults_and_rules() {
 fn recovered_tables_and_rebuild_names() {
     let Some(server) = server() else { return };
     let (a, b) = (&unique("Rec1"), &unique("Rec2"));
-    let leftover = "CREATE TABLE dbo.RG_Recovery_3_T (a int)\nGO\n";
+    let leftover = "CREATE TABLE dbo.QS_Recovery_3_T (a int)\nGO\n";
     server.create(a, &format!("{leftover}CREATE TABLE dbo.T (a int IDENTITY(10, 1) NOT NULL, b int NULL)"));
     server.create(b, &format!("{leftover}CREATE TABLE dbo.T (a int IDENTITY(1, 1) NOT NULL, b int NULL)\nGO\nINSERT INTO dbo.T (b) VALUES (1), (2)"));
     let s = converge(&server, a, b, &Options::default_set());
-    assert!(s.sql.contains("CREATE TABLE [dbo].[RG_Recovery_4_T]"), "{}", s.sql);
-    assert!(s.warnings.iter().any(|w| w.object == "[dbo].[RG_Recovery_3_T]" && w.message.contains("recovered from a failed QuillSQL Compare deployment")), "{:?}", s.warnings);
+    assert!(s.sql.contains("CREATE TABLE [dbo].[QS_Recovery_4_T]"), "{}", s.sql);
+    assert!(s.warnings.iter().any(|w| w.object == "[dbo].[QS_Recovery_3_T]" && w.message.contains("recovered from a failed QuillSQL Compare deployment")), "{:?}", s.warnings);
     assert_eq!(server.scalar(b, "SELECT COUNT(*) FROM dbo.T"), 2);
     server.drop(a);
     server.drop(b);
@@ -331,7 +331,7 @@ fn memory_optimized_tables_are_rebuilt_through_a_copy() {
     server.create(a, &with_memory_optimized_filegroup(a, &mo(20)));
     server.create(b, &with_memory_optimized_filegroup(b, disk));
     let s = converge(&server, a, b, &opts);
-    assert!(s.sql.contains("CREATE TABLE [dbo].[RG_Recovery_1_T]") && s.sql.contains("UPDATE STATISTICS [dbo].[T] WITH FULLSCAN, NORECOMPUTE"), "{}", s.sql);
+    assert!(s.sql.contains("CREATE TABLE [dbo].[QS_Recovery_1_T]") && s.sql.contains("UPDATE STATISTICS [dbo].[T] WITH FULLSCAN, NORECOMPUTE"), "{}", s.sql);
     assert!(!s.warnings.iter().any(|w| w.message.contains("in a transaction, which is not supported")), "{:?}", s.warnings);
     assert_eq!(rows(&server), 3);
     // Memory-optimized to memory-optimized.

@@ -5,7 +5,7 @@
 //! dependants first, then creates and alters in dependency order, then keys, triggers and
 //! extended properties), and objects inside the create and drop phases are sorted by the
 //! dependency graph of the source and target respectively. The layout, PRINT texts and
-//! statement shapes follow SQL Compare's.
+//! statement shapes follow the classic compare tool's.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -191,7 +191,7 @@ struct Step {
     object: Option<ObjectName>,
     /// Later steps with the same phase and PRINT join this one (one PRINT for the group).
     group: bool,
-    /// Each statement runs in SQL Compare's TRY/CATCH.
+    /// Each statement runs in the classic compare tool's TRY/CATCH.
     try_catch: bool,
 }
 
@@ -235,13 +235,13 @@ fn plan_script(
     p.emit()
 }
 
-/// A leftover table of an earlier rebuild that failed half way: `RG_Recovery_<n>_…` (and
+/// A leftover table of an earlier rebuild that failed half way: `QS_Recovery_<n>_…` (and
 /// QuillSQL's earlier `QS_Rebuild_` prefix). Returns n, 0 for the old prefix.
 fn recovery_number(table: &str) -> Option<usize> {
     if table.starts_with("QS_Rebuild_") && table.len() > "QS_Rebuild_".len() {
         return Some(0);
     }
-    let rest = table.strip_prefix("RG_Recovery_")?;
+    let rest = table.strip_prefix("QS_Recovery_")?;
     let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     let tail = &rest[digits.len()..];
     (!digits.is_empty() && tail.len() > 1 && tail.starts_with('_')).then(|| digits.parse().unwrap_or(0))
@@ -1309,7 +1309,7 @@ impl<'a> Planner<'a> {
     }
 
     /// Whether the table must be rebuilt rather than altered, and the warnings that say why
-    /// (none for the rebuilds SQL Compare does silently).
+    /// (none for the rebuilds the classic compare tool does silently).
     fn rebuild_reason(&self, s: &Table, t: &Table, pairs: &[(Option<&Column>, Option<&Column>)]) -> Option<Vec<Warning>> {
         let o = self.opts;
         let name = s.object_name().to_string();
@@ -1908,12 +1908,27 @@ impl<'a> Planner<'a> {
         let ignored = |ix: &Index| {
             o.has(Opt::IgnoreIndexes) || (o.has(Opt::IgnorePerformanceIndexes) && !(ix.primary_key || ix.unique || ix.unique_constraint))
         };
-        // Indexes: by name; a changed index is dropped and created again, one that is only
-        // enabled or disabled is altered.
+        // Indexes: by name, or by definition when the options ignore their names; a changed
+        // index is dropped and created again, one that is only enabled or disabled is altered.
+        let names_ignored = |x: &Index| o.has(Opt::IgnoreConstraintNames) || (x.system_named && o.has(Opt::IgnoreSystemNamedConstraintNames));
+        let partner: Vec<Option<usize>> = s
+            .indexes
+            .iter()
+            .map(|a| {
+                t.indexes.iter().position(|b| self.same(&b.name, &a.name)).or_else(|| {
+                    t.indexes.iter().position(|b| {
+                        !ignored(b)
+                            && (names_ignored(a) || names_ignored(b))
+                            && !s.indexes.iter().any(|x| self.same(&x.name, &b.name))
+                            && !differs_ix(a, b)
+                    })
+                })
+            })
+            .collect();
         let mut creates = Vec::new();
-        for a in s.indexes.iter().filter(|i| !ignored(i)) {
-            let b = t.indexes.iter().find(|b| self.same(&b.name, &a.name));
-            let released = self.dropped_sub.contains(&(name.clone(), self.key(&a.name)));
+        for (k, a) in s.indexes.iter().enumerate().filter(|(_, i)| !ignored(i)) {
+            let b = partner[k].map(|j| &t.indexes[j]);
+            let released = self.dropped_sub.contains(&(name.clone(), self.key(b.map_or(&a.name, |b| &b.name))));
             match b {
                 Some(b) if !released && !differs_ix(a, b) => {}
                 Some(b) if !released && a.disabled != b.disabled && !differs_ix(&Index { disabled: b.disabled, ..a.clone() }, b) => {
@@ -1929,8 +1944,8 @@ impl<'a> Planner<'a> {
                 None => creates.push(a),
             }
         }
-        for b in t.indexes.iter().filter(|i| !ignored(i)) {
-            if !s.indexes.iter().any(|a| self.same(&a.name, &b.name)) {
+        for (j, b) in t.indexes.iter().enumerate().filter(|(_, i)| !ignored(i)) {
+            if !partner.contains(&Some(j)) {
                 self.release_index(t, b);
             }
         }
@@ -2026,7 +2041,7 @@ impl<'a> Planner<'a> {
 
         // Triggers.
         if !o.has(Opt::IgnoreTriggers) {
-            for a in &s.triggers {
+            for a in s.triggers.iter().filter(|x| super::compare::trigger_compared(x, o)) {
                 match t.triggers.iter().find(|b| self.same(&b.name, &a.name)) {
                     None => self.create_trigger(&name, a),
                     Some(b) => {
@@ -2063,7 +2078,7 @@ impl<'a> Planner<'a> {
                     }
                 }
             }
-            for b in &t.triggers {
+            for b in t.triggers.iter().filter(|x| super::compare::trigger_compared(x, o)) {
                 if !s.triggers.iter().any(|a| self.same(&a.name, &b.name)) {
                     let trig = ObjectName::new(&name.schema, &b.name);
                     self.drop_trigger(&name, &trig, b.clr_method.is_some());
@@ -2207,7 +2222,7 @@ impl<'a> Planner<'a> {
             }
         }
         let temp_name = |p: &mut Self| -> String {
-            let n: String = format!("RG_Recovery_{}_{}", p.next_temp, s.name).chars().take(128).collect();
+            let n: String = format!("QS_Recovery_{}_{}", p.next_temp, s.name).chars().take(128).collect();
             p.next_temp += 1;
             n
         };
@@ -2484,7 +2499,7 @@ impl<'a> Planner<'a> {
         Some(out)
     }
 
-    /// SQL Compare's warning for a user it creates or alters (or adds to a role) that has no login.
+    /// The classic compare tool's warning for a user it creates or alters (or adds to a role) that has no login.
     fn user_warnings(&mut self, u: &Principal) {
         if u.login.is_none() && matches!(u.kind.as_str(), "SQL_USER" | "WINDOWS_USER" | "WINDOWS_GROUP") && !u.name.eq_ignore_ascii_case("guest") {
             self.warn(warn::user_without_login(&u.name));
@@ -2586,7 +2601,7 @@ impl<'a> Planner<'a> {
                     self.principal_step(s, format!("Creating role {}", s.name), vec![sql]);
                 }
                 "APPLICATION_ROLE" => {
-                    // The password can't be read; SQL Compare's placeholder is used.
+                    // The password can't be read; the classic compare tool's placeholder is used.
                     self.warn(super::warnings::objects::application_role_password(&q));
                     let schema = s.default_schema.as_deref().map(|x| format!(", DEFAULT_SCHEMA = {}", quote(x))).unwrap_or_default();
                     let sql = self.ex.principal(&s.name, true, Check::Create, &format!("CREATE APPLICATION ROLE {q} WITH PASSWORD = 'p@ssw0rd'{schema}"));
@@ -2776,7 +2791,7 @@ impl<'a> Planner<'a> {
             } else {
                 on(self.src, &d.name)
             };
-            // Statements name the object as it is called after the deployment, SQL Compare's
+            // Statements name the object as it is called after the deployment, the classic compare tool's
             // way: `ON [s].[o]` for objects (with a space where a class prefix would go).
             let securable = match (class, object) {
                 ("OBJECT", _) => format!(" {}", d.name.quoted()),
@@ -2911,7 +2926,7 @@ impl<'a> Planner<'a> {
 }
 
 /// Writes the deployment to the SQL Server log for monitoring tools.
-const LOGGING: &str = "-- This statement writes to the SQL Server Log so SQL Monitor can show this deployment.\r\nIF HAS_PERMS_BY_NAME(N'sys.xp_logevent', N'OBJECT', N'EXECUTE') = 1\r\nBEGIN\r\n    DECLARE @databaseName AS nvarchar(2048), @eventMessage AS nvarchar(2048)\r\n    SET @databaseName = REPLACE(REPLACE(DB_NAME(), N'\\', N'\\\\'), N'\"', N'\\\"')\r\n    SET @eventMessage = N'{product}: { \"deployment\": { \"description\": \"{product} deployed to ' + @databaseName + N'\", \"database\": \"' + @databaseName + N'\" }}'\r\n    EXECUTE sys.xp_logevent 55000, @eventMessage\r\nEND";
+const LOGGING: &str = "-- This statement writes to the SQL Server Log so monitoring tools can show this deployment.\r\nIF HAS_PERMS_BY_NAME(N'sys.xp_logevent', N'OBJECT', N'EXECUTE') = 1\r\nBEGIN\r\n    DECLARE @databaseName AS nvarchar(2048), @eventMessage AS nvarchar(2048)\r\n    SET @databaseName = REPLACE(REPLACE(DB_NAME(), N'\\', N'\\\\'), N'\"', N'\\\"')\r\n    SET @eventMessage = N'{product}: { \"deployment\": { \"description\": \"{product} deployed to ' + @databaseName + N'\", \"database\": \"' + @databaseName + N'\" }}'\r\n    EXECUTE sys.xp_logevent 55000, @eventMessage\r\nEND";
 
 #[derive(Clone, Copy)]
 enum Module<'a> {
@@ -2941,7 +2956,7 @@ impl<'a> Module<'a> {
         }
     }
 
-    /// As SQL Compare's messages call it.
+    /// As the classic compare tool's messages call it.
     fn kind_name(&self) -> &'static str {
         match self {
             Module::View(_) => "view",
@@ -3377,11 +3392,11 @@ mod tests {
         let mut new = col("a", "int");
         new.identity = Some(Identity { seed: "1".into(), increment: "1".into(), not_for_replication: false });
         new.nullable = false;
-        let src = db(vec![table("T", vec![new]), table("RG_Recovery_7_T", vec![col("a", "int")])]);
-        let mut tgt = db(vec![table("T", vec![col("a", "int")]), table("RG_Recovery_7_T", vec![col("a", "int")])]);
+        let src = db(vec![table("T", vec![new]), table("QS_Recovery_7_T", vec![col("a", "int")])]);
+        let mut tgt = db(vec![table("T", vec![col("a", "int")]), table("QS_Recovery_7_T", vec![col("a", "int")])]);
         tgt.tables[0].columns[0].nullable = false;
         let s = script(&src, &tgt, &Options::default_set());
-        assert!(s.sql.contains("CREATE TABLE [dbo].[RG_Recovery_8_T]"), "{}", s.sql);
+        assert!(s.sql.contains("CREATE TABLE [dbo].[QS_Recovery_8_T]"), "{}", s.sql);
         assert!(has_warning(&s, "recovered from a failed QuillSQL Compare deployment"));
         assert!(has_warning(&s, "Cannot alter IDENTITY property on column [a] on table [dbo].[T]"), "{:?}", s.warnings);
     }
@@ -3486,10 +3501,10 @@ mod tests {
 
     #[test]
     fn recovery_tables() {
-        assert_eq!(recovery_number("RG_Recovery_12_Customer"), Some(12));
+        assert_eq!(recovery_number("QS_Recovery_12_Customer"), Some(12));
         assert_eq!(recovery_number("QS_Rebuild_Customer"), Some(0));
-        assert_eq!(recovery_number("RG_Recovery_x_Customer"), None);
-        assert_eq!(recovery_number("RG_Recovery_3_"), None);
+        assert_eq!(recovery_number("QS_Recovery_x_Customer"), None);
+        assert_eq!(recovery_number("QS_Recovery_3_"), None);
         assert_eq!(recovery_number("Customer"), None);
     }
 }

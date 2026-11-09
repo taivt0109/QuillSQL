@@ -9,7 +9,7 @@ using System.Windows.Data;
 namespace QuillSql.Compare
 {
     /// <summary>
-    /// The Table mapping and Owner mapping tabs as SQL Compare has them: the mapped pairs above
+    /// The Table mapping and Owner mapping tabs as the classic compare tool has them: the mapped pairs above
     /// (Unmap), what is left on each side below (Map one with one), Restore defaults, and a search
     /// box over both. The pairs come from the engine (`mapping_preview`), so they are what the
     /// comparison will use, default pairs and automatic column pairs included.

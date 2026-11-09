@@ -33,7 +33,7 @@ pub struct TablePair {
     #[serde(default)]
     pub notes: Vec<Note>,
     /// Why the pair is left out of the comparison altogether (a user mapping that no longer
-    /// applies, or something the data sources cannot compare), as SQL Data Compare words it.
+    /// applies, or something the data sources cannot compare), as the classic data compare tool words it.
     #[serde(default)]
     pub excluded: Option<String>,
     /// MissingFrom2AsInclude: the table is only in database 1 and is paired with itself; database
@@ -464,7 +464,7 @@ pub fn map_tables(db1: &Database, db2: &Database, o: &DataOptions, user: &DataMa
     (pairs, only1, only2)
 }
 
-/// The user mappings that name a table or pair that does not exist, in SQL Data Compare's words
+/// The user mappings that name a table or pair that does not exist, in the classic data compare tool's words
 /// (the comparison goes on without them).
 pub fn user_mapping_warnings(db1: &Database, db2: &Database, o: &DataOptions, user: &DataMappings) -> Vec<String> {
     let (left, right) = (objects(db1, o), objects(db2, o));

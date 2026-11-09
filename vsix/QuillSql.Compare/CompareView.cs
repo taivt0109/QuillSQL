@@ -564,7 +564,7 @@ namespace QuillSql.Compare
             UpdateTitle();
         }
 
-        /// <summary>Writes the source or the target as a scripts folder in SQL Compare's layout.</summary>
+        /// <summary>Writes the source or the target as a scripts folder in the classic compare tool's layout.</summary>
         private async Task CreateScriptsFolder()
         {
             _editor?.Collect();
@@ -795,7 +795,7 @@ namespace QuillSql.Compare
             wizard.BackupSettings = _session.Project.Obj("backup");
             if (_schemaResults != null && live)
             {
-                // A snapshot of the target before it changes (SQL Compare's .snp).
+                // A snapshot of the target before it changes (the classic compare tool's .snp).
                 var name = (target.Str("type") == "scripts" ? Path.GetFileName((target.Str("path") ?? "").TrimEnd('\\')) : target.Str("database")) + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".snp";
                 foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
                 wizard.SnapshotName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "QuillSQL Compare", "Snapshots", name);
@@ -810,7 +810,7 @@ namespace QuillSql.Compare
             }
             var outcome = wizard.Run();
             if (outcome.Choice == DeployWizard.Choice.None) return;
-            // The backup settings belong to the project, as in SQL Compare.
+            // The backup settings belong to the project, as in the classic compare tool.
             if (outcome.Backup != null && Json.Write(outcome.Backup) != Json.Write(_session.Project.Obj("backup") ?? new JsonObject { ["enabled"] = false }))
             {
                 _session.Project["backup"] = outcome.Backup;

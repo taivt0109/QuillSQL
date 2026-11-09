@@ -1,6 +1,6 @@
 //! SQL Server backups as a comparison source, read directly from the backup files: native
 //! backups (compressed or not, striped over several files, a differential over its full
-//! backup) and SQL Backup files. The pages of the backup set are read like the database's own
+//! backup) and .sqb backup files. The pages of the backup set are read like the database's own
 //! files; the system base tables give the catalog and the tables give the data.
 
 mod aes;
@@ -33,7 +33,7 @@ use pages::{PageId, PageStore};
 pub enum BackupError {
     /// A file is missing or cannot be read.
     Io(String),
-    /// Encrypted SQL Backup files and no matching password.
+    /// Encrypted .sqb backup files and no matching password.
     Password(String),
     /// Anything the reader reports about the backup itself.
     Reader(String),
@@ -99,11 +99,11 @@ pub fn guid_text(g: &[u8; 16]) -> String {
     )
 }
 
-/// A file (or a stream of a SQL Backup file) and its readable bytes.
+/// A file (or a stream of a .sqb backup file) and its readable bytes.
 type Opened = (PathBuf, Arc<dyn Medium>);
 
 /// The readable form of every file: native files directly (decompressed when compressed),
-/// SQL Backup files through their decoder.
+/// .sqb backup files through their decoder.
 fn open_media(files: &[PathBuf], passwords: &[String]) -> Result<Vec<Opened>, BackupError> {
     let mut out = Vec::new();
     for f in files {
@@ -128,7 +128,7 @@ fn open_media(files: &[PathBuf], passwords: &[String]) -> Result<Vec<Opened>, Ba
 }
 
 fn not_a_backup(f: &Path) -> BackupError {
-    BackupError::Reader(format!("The file '{}' does not appear to be a Microsoft SQL Server or SQL Backup file", f.display()))
+    BackupError::Reader(format!("The file '{}' does not appear to be a Microsoft SQL Server or .sqb backup file", f.display()))
 }
 
 struct Media {
@@ -233,7 +233,7 @@ impl Media {
     }
 }
 
-/// The backup sets in the files, in the order SQL Compare lists them (the default is the last).
+/// The backup sets in the files, in the order the classic compare tool lists them (the default is the last).
 pub fn list_sets(files: &[PathBuf], passwords: &[String]) -> Result<Vec<BackupSet>, BackupError> {
     Ok(scan(files, passwords)?.sets)
 }

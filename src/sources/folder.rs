@@ -1,4 +1,4 @@
-//! Scripts folders in SQL Compare's layout: one `.sql` file per object under folders by
+//! Scripts folders in the classic compare tool's layout: one `.sql` file per object under folders by
 //! object type (`Tables`, `Stored Procedures`, `Security\Roles`...), and the database settings
 //! in `QuillDatabaseInfo.xml`.
 
@@ -16,7 +16,7 @@ pub const INFO_FILE: &str = "QuillDatabaseInfo.xml";
 /// Folder of pre- and post-deployment scripts and other files that are not objects.
 const CUSTOM_SCRIPTS: &str = "Custom Scripts";
 
-/// Element names of `<Prefixes>` with SQL Compare's default folders, in file order.
+/// Element names of `<Prefixes>` with the classic compare tool's default folders, in file order.
 const PREFIXES: [(&str, &str); 41] = [
     ("None", ""),
     ("Table", "Tables"),
@@ -206,7 +206,7 @@ impl FolderInfo {
             match get("DatabaseVersion", true).map(|v| v.parse::<u32>()) {
                 Some(Ok(v)) if !(10..=16).contains(&v) => {
                     warnings.push(format!(
-                        "The SQL Server version specified for the scripts folder '{}' is not one that is supported by SQL Compare. These scripts will be treated as if they came from a SQL Server 2008 database.",
+                        "The SQL Server version specified for the scripts folder '{}' is not one that is supported by QuillSQL Compare. These scripts will be treated as if they came from a SQL Server 2008 database.",
                         dir.display()
                     ));
                     info.database_version = v.clamp(10, 16);
@@ -289,7 +289,7 @@ impl FolderInfo {
         self.prefixes.get(key).map(String::as_str).unwrap_or_default()
     }
 
-    /// The file as SQL Compare writes it (UTF-8 with BOM, CRLF).
+    /// The file as the classic compare tool writes it (UTF-8 with BOM, CRLF).
     pub fn xml(&self) -> String {
         let mut x = String::from("\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<DatabaseInformation Version=\"3\">\n");
         let mut el = |name: &str, value: &str| x.push_str(&format!("  <{name}>{}</{name}>\n", xml_escape(value)));
@@ -386,7 +386,7 @@ pub struct Folder {
 }
 
 impl Folder {
-    /// SQL Compare compares folders with a database project with SsdtCompatibleOptions on.
+    /// The classic compare tool compares folders with a database project with SsdtCompatibleOptions on.
     pub fn is_ssdt(&self) -> bool {
         self.project.is_some()
     }
@@ -448,7 +448,7 @@ pub fn read(dir: &Path) -> Result<Folder, String> {
     read_files(dir, info, warnings, project, files)
 }
 
-/// A SQL Change Automation project, as SQL Compare reads it: the `.sql` files of its
+/// A migrations project, as the classic compare tool reads it: the `.sql` files of its
 /// programmable objects folder (`DeployChangesSubFolder`, default `Programmable Objects`) and of
 /// its offline schema model (`SchemaModelSubFolder`, default `Schema-Model`), with the collation
 /// of `SqlCompareCollation` and the server version of the project's schema provider. Migration
@@ -497,7 +497,7 @@ fn read_files(dir: &Path, info: FolderInfo, warnings: Vec<String>, project: Opti
         if file.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll")) {
             // An assembly written as its image (WriteAssembliesAsDlls): named after the file,
             // owned by dbo, with the permission set a database project gives it (else SAFE),
-            // as SQL Compare reads it.
+            // as the classic compare tool reads it.
             let name = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
             let set = super::sqlproj::assembly_permission_set(&file).unwrap_or_else(|| "SAFE".into());
@@ -599,7 +599,7 @@ fn write_file(p: &Path, text: &str, encoding: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Where SQL Compare puts an object in a new folder, relative to the folder.
+/// Where the classic compare tool puts an object in a new folder, relative to the folder.
 pub fn default_path(info: &FolderInfo, key: &ObjectKey) -> PathBuf {
     let (ty, schema, name) = key;
     let prefix = info.prefix(prefix_key(*ty)).replace('\\', std::path::MAIN_SEPARATOR_STR);

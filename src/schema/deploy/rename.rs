@@ -1,5 +1,5 @@
 //! Tables paired under different names (a table mapping, or an accepted rename suggestion) are
-//! renamed first thing in the transaction, the way SQL Compare does: sp_rename for the name,
+//! renamed first thing in the transaction, the way the classic compare tool does: sp_rename for the name,
 //! ALTER SCHEMA … TRANSFER for the schema. The rest of the plan then works on the target as
 //! it is after the renames.
 

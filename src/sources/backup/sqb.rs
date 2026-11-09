@@ -1,4 +1,4 @@
-//! SQL Backup (.sqb) files: a header (possibly encrypted with a password-derived AES key),
+//! .sqb backup files: a header (possibly encrypted with a password-derived AES key),
 //! then the backup's tape image cut in extents, each compressed and possibly encrypted. A file
 //! written by several threads holds one image per thread ("device"), which are the stripes of
 //! the backup. See specs/gaps/backup.md, section 6.
@@ -14,7 +14,7 @@ use super::BackupError;
 use super::aes::Aes;
 use super::mtf::{Medium, RawFile, read_full, u32_at};
 
-/// A SQL Backup file has `SSBE` or `SSBF` at offset 508 of its first kilobyte.
+/// A .sqb backup file has `SSBE` or `SSBF` at offset 508 of its first kilobyte.
 pub fn is_sqb(path: &Path) -> bool {
     let mut head = [0u8; 1024];
     let Ok(mut f) = std::fs::File::open(path) else { return false };
@@ -53,9 +53,9 @@ pub fn open(path: &Path, passwords: &[String]) -> Result<Vec<Arc<dyn Medium>>, B
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     None,
-    /// SQL Backup 3: a 256-bit key from a hash of the password.
+    /// .sqb format 3: a 256-bit key from a hash of the password.
     V3,
-    /// SQL Backup 4: 128- or 256-bit keys from hashes of the password.
+    /// .sqb format 4: 128- or 256-bit keys from hashes of the password.
     V4(usize),
     /// Later: 128- or 256-bit keys by PBKDF2 over the password and the header's salt.
     V5(usize),
@@ -74,7 +74,7 @@ enum Compression {
 
 struct Header {
     aes: Option<Aes>,
-    /// The counter of every extent (SQL Backup 3 and 4); later versions derive one per extent.
+    /// The counter of every extent (.sqb format 3 and 4); later versions derive one per extent.
     counter: Option<[u8; 16]>,
     compression: Compression,
     /// The size of the tape image, all devices together.
@@ -87,7 +87,7 @@ struct Header {
     devices: u8,
 }
 
-/// The constant SQL Backup 3 pads its key and counter with.
+/// The constant .sqb format 3 pads its key and counter with.
 const PAD: &[u8; 32] = b"4FE7192ABB5C48838EE4F956AD3688C1";
 
 impl Header {
@@ -98,7 +98,7 @@ impl Header {
         } else if pascal(raw, 507) == Some(b"SSBE") {
             (2, 512, &[Mode::None, Mode::V3])
         } else {
-            return Err(BackupError::Reader("This backup file was created with an unknown version of SQL Backup.".into()));
+            return Err(BackupError::Reader("This backup file was created with an unknown version of the .sqb backup tool.".into()));
         };
         // Characters are taken as single bytes.
         let pw: Vec<u8> = password.encode_utf16().map(|c| c as u8).collect();
@@ -183,7 +183,7 @@ fn decimal(v: u32) -> Vec<u8> {
     v.to_string().into_bytes()
 }
 
-/// SQL Backup 3: the key is the decimal hash of the password padded with a constant; the
+/// .sqb format 3: the key is the decimal hash of the password padded with a constant; the
 /// counter the decimal hash of that hash, padded the same way.
 fn v3_keys(pw: &[u8]) -> ([u8; 32], [u8; 16]) {
     let h = decimal(elf(pw));
@@ -206,7 +206,7 @@ fn chain(seed: &[u8], n: usize) -> Vec<u8> {
     out
 }
 
-/// SQL Backup 4: the key is a chain of hashes of the password; the counter is the password
+/// .sqb format 4: the key is a chain of hashes of the password; the counter is the password
 /// (its first 16 bytes), completed by a chain of hashes of the key.
 fn v4_keys(pw: &[u8], n: usize) -> (Vec<u8>, [u8; 16]) {
     let key = chain(pw, 32)[..n].to_vec();
@@ -247,7 +247,7 @@ fn map_extents(file: &dyn Medium, h: &Header) -> Result<Vec<Extent>, String> {
             }
             let len = u64::from_le_bytes(s[4..12].try_into().unwrap());
             if len == 0 {
-                return Err("Invalid section in SQL Backup file".into());
+                return Err("Invalid section in the .sqb file".into());
             }
             pos += len;
         }
@@ -276,7 +276,7 @@ fn map_extents(file: &dyn Medium, h: &Header) -> Result<Vec<Extent>, String> {
                 pos += 4;
                 i32::from_le_bytes(b[..4].try_into().unwrap())
             };
-            pos = pos.checked_add_signed(size as i64).ok_or("Invalid padding block in SQL Backup file")?;
+            pos = pos.checked_add_signed(size as i64).ok_or("Invalid padding block in the .sqb file")?;
             continue;
         }
         let d = device as usize;
@@ -302,7 +302,7 @@ fn map_extents(file: &dyn Medium, h: &Header) -> Result<Vec<Extent>, String> {
         }
         let stated = if lz {
             if read_full(file, pos, &mut b[..4]) < 4 {
-                return Err("SQL Backup file ends early".into());
+                return Err("The .sqb backup tool file ends early".into());
             }
             pos += 4;
             u32_at(&b, 0)
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn keys_from_passwords() {
-        // SQL Backup 3: the decimal ELF hash of "abc" is 26499, padded with the constant.
+        // .sqb format 3: the decimal ELF hash of "abc" is 26499, padded with the constant.
         assert_eq!(elf(b"abc"), 26499);
         let (key, counter) = v3_keys(b"abc");
         assert_eq!(&key[..], b"264994FE7192ABB5C48838EE4F956AD3");

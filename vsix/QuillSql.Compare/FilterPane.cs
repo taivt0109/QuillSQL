@@ -12,7 +12,7 @@ using Microsoft.Win32;
 namespace QuillSql.Compare
 {
     /// <summary>
-    /// SQL Compare's filter: per object type (and for all types) an Include flag and an expression
+    /// The classic compare tool's filter: per object type (and for all types) an Include flag and an expression
     /// over @NAME and @SCHEMA. The pane beside the results ticks types in and out, edits each
     /// type's rule, and opens and saves .scpf files; the engine applies it (`schema_filter`).
     /// </summary>
@@ -226,7 +226,7 @@ namespace QuillSql.Compare
 
     /// <summary>
     /// "Edit filter rules": include or exclude objects whose name or schema meets conditions, in
-    /// groups of "all of" (AND) or "any of" (OR) that can hold further groups, as SQL Compare's
+    /// groups of "all of" (AND) or "any of" (OR) that can hold further groups, as the classic compare tool's
     /// clause tree does.
     /// </summary>
     internal static class RuleEditor

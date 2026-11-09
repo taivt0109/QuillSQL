@@ -1,5 +1,5 @@
 //! Tables that use a CLR type or a partition scheme that is dropped and created again can't
-//! keep their columns or storage while that happens. As SQL Compare does, such a table is
+//! keep their columns or storage while that happens. As the classic compare tool does, such a table is
 //! rebuilt twice: first, before the drops, into a copy that no longer uses them (CLR columns
 //! as nvarchar(4000) through the type's ToString, the partitioned storage on the default
 //! filegroup); then, with the other creates, into its final shape (the nvarchar values parsed

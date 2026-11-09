@@ -1,4 +1,4 @@
-//! What the target server can take: SQL Compare decides parts of the script (and many warnings)
+//! What the target server can take: The classic compare tool decides parts of the script (and many warnings)
 //! from a feature set worked out from the target's version, engine edition and, with
 //! UseCompatibilityLevel, the database compatibility level.
 
@@ -51,7 +51,7 @@ pub enum Feature {
     ScalarInlining,
 }
 
-/// Version families SQL Compare tells apart.
+/// Version families the classic compare tool tells apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
     Sql2008,
@@ -159,7 +159,7 @@ impl Features {
         for group in on_prem {
             set.extend(group.iter().copied());
         }
-        // Enterprise (or unknown) edition. SQL Compare has no enterprise entry for 2016 SP1.
+        // Enterprise (or unknown) edition. The classic compare tool has no enterprise entry for 2016 SP1.
         if matches!(server.engine_edition, 0 | 3) {
             match family {
                 Family::Sql2019 | Family::Sql2022 => set.extend([Online, OnlineNonclusteredColumnstore, OnlineClusteredColumnstore]),
@@ -186,7 +186,7 @@ impl Features {
         matches!(self.family, Family::AzureSqlDatabase | Family::ManagedInstance)
     }
 
-    /// The edition as SQL Compare names it in messages ("Standard", "Express"…).
+    /// The edition as the classic compare tool names it in messages ("Standard", "Express"…).
     pub fn edition_name(&self) -> &'static str {
         match self.engine_edition {
             1 => "Personal",

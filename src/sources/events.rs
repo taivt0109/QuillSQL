@@ -1,5 +1,5 @@
 //! The DDL and trace event types of event notifications and DDL triggers (sys.event_notification_event_types
-//! and sys.trigger_event_types), by the numbers SQL Compare snapshots store them as.
+//! and sys.trigger_event_types), by the numbers .snp snapshots store them as.
 
 /// (type, type_name), sorted by type.
 pub const EVENT_TYPES: [(i32, &str); 428] = [

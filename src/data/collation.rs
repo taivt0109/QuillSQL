@@ -1,4 +1,4 @@
-//! Strings compared as the collation compares them. SQL Data Compare compares non-key text in
+//! Strings compared as the collation compares them. The classic data compare tool compares non-key text in
 //! the client with the collation's Windows locale and its case, accent, kana and width
 //! settings, so canonically equivalent forms (e + combining acute and é) and characters the
 //! locale gives no weight are equal. On Windows the same locale comparison is used here; elsewhere

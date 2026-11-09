@@ -38,7 +38,7 @@ QuillSQL miễn phí, mã nguồn mở. Engine viết bằng Rust, chạy nhanh,
 | **Thẻ object** | Rê chuột lên bảng để xem cột, khóa, index, partition và script; F12 để script bảng đó. |
 | **Nhận biết nhanh** | Tô màu tab và editor của kết nối production; hỏi lại trước khi chạy `DELETE` hoặc `UPDATE` không có `WHERE`; tô sáng mọi chỗ dùng cùng một tên. |
 | **Công cụ database** | Tìm procedure và view đang tham chiếu tới object không còn tồn tại; tìm lại mọi query bạn đã chạy. |
-| **So sánh schema và dữ liệu** | So sánh schema hoặc dữ liệu của hai database, xem từng khác biệt, rồi chạy script làm chúng giống nhau. Có trong SSMS, dạng app riêng, và trong CI với switch giống SQL Compare. |
+| **So sánh schema và dữ liệu** | So sánh schema hoặc dữ liệu của hai database, xem từng khác biệt, rồi chạy script làm chúng giống nhau. Có trong SSMS, dạng app riêng, và trong CI qua command line. |
 | **Theo ý bạn** | Cửa sổ Options cho mọi hành vi, phím tắt cho mọi lệnh, giao diện tiếng Anh hoặc tiếng Việt. |
 | **Dòng lệnh** | `quill` format cả thư mục file `.sql` và chạy phân tích code trong CI. |
 
@@ -354,9 +354,9 @@ extended property) hoặc theo **dữ liệu** (từng dòng, theo khóa chính 
 - **Không cần SSMS:** **QuillSQL Compare** trong Start menu (`QuillCompare.exe`).
 - **Trong CI:** `quill schema` và `quill data`, xem bên dưới.
 
-Cửa sổ có đủ 4 tab như SQL Compare: **Data sources**, **Table mapping** (Data Compare là
+Cửa sổ có 4 tab: **Data sources**, **Table mapping** (Data Compare là
 **Tables & views**, có khóa, bộ lọc WHERE và cột bỏ qua), **Owner mapping** và **Options** (đủ mọi
-option của SQL Compare / Data Compare, có QuillSQL defaults, My defaults và Save as my defaults).
+option so sánh, có QuillSQL defaults, My defaults và Save as my defaults).
 Kết quả cho thấy những gì khác nhau; với schema, SQL của hai bên đặt cạnh nhau theo từng dòng.
 **Deploy** cho xem script và cảnh báo (mất dữ liệu, cắt chuỗi, NOT NULL...) rồi chạy trong một
 transaction, hoặc mở script trong cửa sổ query. QuillSQL Compare theo chế độ sáng/tối và màu nhấn của
@@ -372,7 +372,7 @@ không bao giờ được ghi vào file: "Remember credentials" lưu trong Windo
 
 ### Dòng lệnh
 
-Switch, alias và mã thoát giống `SQLCompare.exe` và `SQLDataCompare.exe`, nên pipeline chỉ cần
+Switch, alias và mã thoát theo chuẩn command line so sánh quen thuộc, nên pipeline chỉ cần
 đổi tên file chạy:
 
 ```powershell
@@ -386,7 +386,7 @@ quill data /s1:dev /db1:Shop /s2:test /db2:Shop /include:Table:^\[dbo\] /export:
 
 | | |
 |---|---|
-| Nguồn | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` hoặc `QUILL_PASSWORD1..2` (bỏ trống là Windows authentication), `/activedirectory1..2` với `QUILL_ACCESS_TOKEN1..2`, `/connection1..2` (connection string), `/encrypt1..2` (mặc định tắt, như SQL Compare; kết nối không mã hóa thì không kiểm tra chứng chỉ của server), `/trustServerCertificate1..2`, `/snapshot1..2`, `/project` |
+| Nguồn | `/server1..2` (`/s1`), `/database1..2` (`/db1`), `/username1..2` + `/password1..2` hoặc `QUILL_PASSWORD1..2` (bỏ trống là Windows authentication), `/activedirectory1..2` với `QUILL_ACCESS_TOKEN1..2`, `/connection1..2` (connection string), `/encrypt1..2` (mặc định tắt; kết nối không mã hóa thì không kiểm tra chứng chỉ của server), `/trustServerCertificate1..2`, `/snapshot1..2`, `/project` |
 | Chọn | `/include` và `/exclude` dạng `type[:regex]` (loại object, `Identical`, `Different`, `Missing`, `Additional`), `/options:Default,IgnoreComments,...`; dữ liệu: `/comparisonkeys`, `/includeColumns`, `/excludeColumns` |
 | Kết quả | `/scriptfile`, `/synchronize`, `/report` + `/reporttype:Html\|Xml`, `/export` (dữ liệu, CSV), `/json`, `/showWarnings`, `/abortOnWarnings:Medium\|High`, `/transactionIsolationLevel`, `/force` |
 | Mã thoát | 0 thành công · 61 dừng vì cảnh báo · 63 giống nhau · 64 sai cú pháp · 74 file đã có (dùng `/force`) · 79 `/assertidentical` mà khác · 126 lỗi database |
@@ -460,7 +460,7 @@ Workflow Release sẽ chạy test, build và đăng `QuillSQL.vsix`, `quill.exe`
 - Với đăng nhập Microsoft Entra, QuillSQL kết nối bằng phiên đăng nhập mà SSMS đang giữ cho cửa sổ query, và xin SSMS một access token mới mỗi lần kết nối, nên token hết hạn được làm mới giống như SSMS tự làm mới. Nếu SSMS không làm mới được mà không cần hỏi lại, hãy chạy một query trong cửa sổ đó để đăng nhập lại. Khi SSMS không giữ token cho cửa sổ (Microsoft Entra MFA, Integrated, Default, Password, Managed Identity, Service Principal), QuillSQL kết nối giống SSMS, cùng phương thức và tài khoản, dùng lại phiên đăng nhập SSMS đã có; nếu bị hỏi đăng nhập và bạn huỷ, nó chỉ thử lại khi chạy Refresh T-SQL Suggestions. Đăng nhập bằng device code không được dùng. Cách này dựa vào phần nội bộ của SSMS và còn mới: báo lại nếu có cửa sổ không đọc được.
 - `insertSemicolons` bỏ qua những chỗ không chắc chắn, ví dụ trước `THROW`.
 - Smart Rename với object trong database chỉ tạo script; nó không tự sửa các object khác.
-- Compare chỉ ghi certificate và key dưới dạng comment (không đọc được private key), giống SQL Compare. Object full-text, PolyBase và file SQL Backup (`.sqb`) mới được kiểm tra bằng unit test, chưa chạy trên server thật hay file SQL Backup thật.
+- Compare chỉ ghi certificate và key dưới dạng comment (không đọc được private key). Object full-text, PolyBase và file backup .sqb (`.sqb`) mới được kiểm tra bằng unit test, chưa chạy trên server thật hay file backup .sqb thật.
 - Cửa sổ Compare hiện chỉ có tiếng Anh.
 - Tô màu tab phụ thuộc vào cấu trúc tab tài liệu của SSMS 21; một phiên bản SSMS sau này có thể cần cập nhật lại.
 

@@ -16,7 +16,7 @@ using Microsoft.Win32;
 namespace QuillSql.Compare
 {
     /// <summary>
-    /// SQL Server instances to offer in the Server box, found as SQL Compare finds them: the SQL
+    /// SQL Server instances to offer in the Server box, found as the classic compare tool finds them: the SQL
     /// Server Browser (a UDP broadcast to port 1434), the .NET SQL client's enumerator, local
     /// instances in the registry, LocalDB, and servers registered in SSMS and Azure Data Studio.
     /// Each search gives up after the timeout; the result is kept for the session.

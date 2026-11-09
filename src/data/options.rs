@@ -1,4 +1,4 @@
-//! Data compare options: the 25 check boxes of the Options tab, with SQL Data Compare's names
+//! Data compare options: the 25 check boxes of the Options tab, with the classic data compare tool's names
 //! and defaults, shared by the command line and the UI.
 
 use std::collections::BTreeSet;
@@ -70,7 +70,7 @@ data_options! {
     TransportClrBinary = Deployment false "Transport CLR data types as binary";
 }
 
-/// SQL Data Compare's own names for the same flags (its enum names and command-line aliases).
+/// The classic data compare tool's own names for the same flags (its enum names and command-line aliases).
 const ALIASES: &[(&str, DataOpt)] = &[
     ("IncludeIndexedViews", DataOpt::IncludeViews),
     ("DDLTriggerDisable", DataOpt::DisableDdlTriggers),
@@ -153,7 +153,7 @@ impl DataOptions {
     }
 }
 
-/// `/options` resolved the way SQL Data Compare's command line does it.
+/// `/options` resolved the way the classic data compare tool's command line does it.
 pub struct Resolved {
     pub options: DataOptions,
     /// `Warning:` lines for unknown and obsolete names.
@@ -185,11 +185,11 @@ impl DataOptions {
                     "donotoutputcommentheader" => out = out.without(DataOpt::OutputCommentHeader),
                     "default" | "none" => {}
                     "forcecheck" => warnings.push(
-                        "The ForceCheck option is obsolete and will be ignored.  SQL Data Compare now restores foreign keys to their original state by default.  ".into(),
+                        "The ForceCheck option is obsolete and will be ignored.  QuillSQL Data Compare now restores foreign keys to their original state by default.  ".into(),
                     ),
                     _ => match lookup(name) {
                         Some(o) => out = out.with(o),
-                        None => warnings.push(format!("Unrecognised SQL Data Compare option: {name}.")),
+                        None => warnings.push(format!("Unrecognised QuillSQL Data Compare option: {name}.")),
                     },
                 }
             }
@@ -246,7 +246,7 @@ mod tests {
         let r = DataOptions::resolve(Some("IncludeIndexedViews,Nope,DisableAndReenableDDLTriggers"), d.clone(), false);
         let on: Vec<&str> = r.options.iter().map(DataOpt::name).collect();
         assert_eq!(on, ["IncludeViews", "DisableDdlTriggers", "OutputCommentHeader"]);
-        assert_eq!(r.warnings, ["Unrecognised SQL Data Compare option: Nope."]);
+        assert_eq!(r.warnings, ["Unrecognised QuillSQL Data Compare option: Nope."]);
         let r = DataOptions::resolve(Some("Default,DoNotOutputCommentHeader"), d.clone(), true);
         assert!(!r.options.has(DataOpt::OutputCommentHeader) && r.options.has(DataOpt::CaseSensitiveObjectDefinition));
         assert!(!DataOptions::resolve(Some("IgnoreCase"), d.clone(), true).options.has(DataOpt::CaseSensitiveObjectDefinition));
