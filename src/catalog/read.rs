@@ -175,8 +175,7 @@ impl Reader {
                     CAST(SERVERPROPERTY('EngineEdition') AS int),
                     DB_NAME(),
                     CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS nvarchar(128)),
-                    (SELECT CAST(compatibility_level AS int) FROM sys.databases WHERE database_id = DB_ID()),
-                    (SELECT SUSER_SNAME(owner_sid) FROM sys.databases WHERE database_id = DB_ID())",
+                    (SELECT CAST(compatibility_level AS int) FROM sys.databases WHERE database_id = DB_ID())",
         )
         .await?;
         let row = rows.first().ok_or("the server returned no version information")?;
@@ -189,7 +188,11 @@ impl Reader {
         self.db.name = s(row, 3);
         self.db.collation = s(row, 4);
         self.db.compatibility_level = i(row, 5) as u32;
-        self.db.owner = text(row, 6);
+        // Azure SQL Database refuses SUSER_SNAME with an argument (error 40507); the owner stays unknown there.
+        if !self.db.server.is_azure_sql_database() {
+            let rows = db::query(conn, "SELECT SUSER_SNAME(owner_sid) FROM sys.databases WHERE database_id = DB_ID()").await?;
+            self.db.owner = rows.first().and_then(|r| text(r, 0));
+        }
         Ok(())
     }
 
@@ -1142,9 +1145,12 @@ impl Reader {
     }
 
     async fn principals(&mut self, conn: &mut Connection) -> Result<(), String> {
+        // Azure SQL Database cannot name a user's login (SUSER_SNAME takes no argument there), as in SQL Compare.
+        let login = if self.db.server.is_azure_sql_database() { "NULL" } else { "SUSER_SNAME(p.sid)" };
         let rows = db::query(
             conn,
-            "SELECT p.name, p.type_desc, SUSER_SNAME(p.sid), p.default_schema_name, USER_NAME(p.owning_principal_id),
+            &format!(
+                "SELECT p.name, p.type_desc, {login}, p.default_schema_name, USER_NAME(p.owning_principal_id),
                     CASE WHEN p.type IN ('S', 'U', 'G') AND p.authentication_type = 0 THEN 1 ELSE 0 END,
                     cert.name, ak.name
              FROM sys.database_principals AS p
@@ -1152,7 +1158,8 @@ impl Reader {
              LEFT JOIN sys.asymmetric_keys AS ak ON p.type = 'K' AND ak.sid = p.sid
              WHERE p.type IN ('S', 'U', 'G', 'E', 'X', 'C', 'K', 'R', 'A') AND p.is_fixed_role = 0
                AND p.name NOT IN (N'public', N'dbo', N'guest', N'sys', N'INFORMATION_SCHEMA') AND p.principal_id < 16384
-             ORDER BY p.name",
+             ORDER BY p.name"
+            ),
         )
         .await?;
         for r in rows {
