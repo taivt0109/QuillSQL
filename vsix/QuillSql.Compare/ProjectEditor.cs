@@ -196,11 +196,8 @@ namespace QuillSql.Compare
                 }
             }
             _tablePane = new MappingPane(true, Preview, MapTable, UnmapTable, () => { if (_data) foreach (var r in _dataTables) r.Target = r.Source; else _tableMappings.Clear(); }, EditColumns);
-            var detect = Ui.Button("Detect renames", async () => { await DetectRenames(); await _tablePane.Reload(); }, minWidth: 120, glyph: Glyph.Search);
-            detect.ToolTip = "Find tables only in one database that look like a renamed table of the other";
-            detect.Visibility = _data ? Visibility.Collapsed : Visibility.Visible;
             const string help = "Tables pair by owner and name. Map a table with a differently named one, or unmap a pair to compare them as two separate tables; similar columns pair automatically unless that option is off. Double-click a mapped table to map its columns.";
-            return Page("Table mapping", help, _tablePane, detect);
+            return Page("Table mapping", help, _tablePane);
         }
 
         private MappingPane _tablePane, _ownerPane;
@@ -281,26 +278,6 @@ namespace QuillSql.Compare
             }
             await _tablePane.Reload();
         }
-        /// <summary>Reads both databases and offers the tables that look renamed as mappings.</summary>
-        private async System.Threading.Tasks.Task DetectRenames()
-        {
-            Collect();
-            var renames = await Ui.Try(_session.Host.Owner, async () => await _session.Engine.Request("schema_renames", new JsonObject { ["project"] = _session.WithPasswords() }) as List<object>);
-            if (renames == null) return;
-            if (renames.Count == 0)
-            {
-                Ui.Message(_session.Host.Owner, "Table mapping", "No tables look renamed.", Ui.Tone.Info, "OK");
-                return;
-            }
-            var chosen = Dialogs.ConfirmRenames(_session.Host.Owner, renames.OfType<JsonObject>().ToList());
-            if (chosen == null) return;
-            foreach (var r in chosen)
-            {
-                var row = new TableMappingRow { Source = QName(r.Obj("source")), Target = QName(r.Obj("target")) };
-                if (!_tableMappings.Any(m => string.Equals(m.Source, row.Source, StringComparison.OrdinalIgnoreCase))) _tableMappings.Add(row);
-            }
-        }
-
         private UIElement OwnerMapping()
         {
             var mappings = _project.Obj(_data ? "dataMappings" : "schemaMappings") ?? new JsonObject();

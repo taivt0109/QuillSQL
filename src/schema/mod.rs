@@ -15,7 +15,6 @@ pub mod linediff;
 pub mod options;
 pub mod filter_edit;
 pub mod print;
-pub mod renames;
 pub mod report;
 pub mod select;
 pub mod text;

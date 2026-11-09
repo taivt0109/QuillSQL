@@ -617,44 +617,6 @@ namespace QuillSql.Compare
 
         // ---- Suggested table renames ----
 
-        private sealed class RenameRow
-        {
-            public bool Map { get; set; } = true;
-            public string Source { get; set; }
-            public string Target { get; set; }
-            public string Reason { get; set; }
-            public JsonObject Data { get; set; }
-        }
-
-        private static string QName(JsonObject n) => n == null ? "" : "[" + n.Str("schema") + "].[" + n.Str("name") + "]";
-
-        /// <summary>Lets the user confirm suggested renames; returns the ones to map, or null.</summary>
-        public static List<JsonObject> ConfirmRenames(Window owner, List<JsonObject> renames)
-        {
-            List<JsonObject> chosen = null;
-            var rows = renames.Select(r => new RenameRow
-            {
-                Source = QName(r.Obj("source")),
-                Target = QName(r.Obj("target")),
-                Reason = r.Str("reason") == "identical" ? "identical except for the name" : r.Str("reason") == "script" ? "similar definition (" + r.Long("similarity") + "%)" : "similar name only",
-                Data = r,
-                // Only a table that differs in nothing but its name is mapped unless the user ticks it.
-                Map = r.Str("reason") == "identical",
-            }).ToList();
-            var w = Ui.Dialog(owner, "Table renames", null, 820, 480);
-            var grid = new DataGrid { ItemsSource = rows, AutoGenerateColumns = false, CanUserAddRows = false, HeadersVisibility = DataGridHeadersVisibility.Column };
-            grid.Columns.Add(Ui.CheckColumn("Map", "Map", 60));
-            grid.Columns.Add(new DataGridTextColumn { Header = "Table in source", Binding = new Binding("Source"), IsReadOnly = true, Width = 220 });
-            grid.Columns.Add(new DataGridTextColumn { Header = "Table in target", Binding = new Binding("Target"), IsReadOnly = true, Width = 220 });
-            grid.Columns.Add(new DataGridTextColumn { Header = "Why", Binding = new Binding("Reason"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-            var map = Ui.Button("Map and compare", () => { chosen = rows.Where(r => r.Map).Select(r => r.Data).ToList(); w.Close(); }, primary: true, minWidth: 140);
-            var cancel = Ui.Button("Cancel", () => w.Close(), minWidth: 90);
-            cancel.IsCancel = true;
-            w.Content = Ui.WithFooter(Body("Table renames", "These tables exist on one side only, but look like the same table renamed. Mapped tables are compared with each other, and deployment renames the table instead of dropping and creating it.", Ui.Card(grid, 4)), Buttons(map, cancel));
-            w.ShowDialog();
-            return chosen;
-        }
-
         // ---- Column mapping (data) ----
 
         public sealed class ColumnPair

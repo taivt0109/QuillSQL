@@ -72,8 +72,6 @@ namespace QuillSql.Compare
 
         public long Session { get; }
 
-        /// <summary>The comparison's suggested table renames; raised when the user asks to review them.</summary>
-        public event Action<List<JsonObject>> ReviewRenames;
 
         public SchemaResults(CompareSession session, JsonObject result)
         {
@@ -171,24 +169,6 @@ namespace QuillSql.Compare
             toolbar.Children.Add(tools);
             toolbar.Children.Add(badges);
             var top = Ui.Column(toolbar, _summary);
-            var renames = result.List("renames").OfType<JsonObject>().ToList();
-            if (renames.Count > 0)
-            {
-                var text = Ui.Text(Ui.Plural(renames.Count, "table looks", "tables look") + " renamed: " + string.Join(", ", renames.Take(3).Select(r => QName(r.Obj("source")) + " → " + QName(r.Obj("target")))) + (renames.Count > 3 ? ", …" : "")
-                    + ". Map them to compare them as one table.", wrap: TextWrapping.Wrap);
-                var review = Ui.Button("Review renames…", () => ReviewRenames?.Invoke(renames), minWidth: 120);
-                var bar = new DockPanel();
-                var icon = Ui.Icon(Glyph.Info, 15, CompareTheme.Accent);
-                icon.Margin = new Thickness(0, 0, 10, 0);
-                DockPanel.SetDock(icon, Dock.Left);
-                DockPanel.SetDock(review, Dock.Right);
-                bar.Children.Add(icon);
-                bar.Children.Add(review);
-                bar.Children.Add(text);
-                var card = Ui.Card(bar, 10);
-                card.Margin = new Thickness(0, 8, 0, 0);
-                top.Children.Add(card);
-            }
             // Problems reading scripts folders: statements the parser skipped or could not read.
             var warnings = result.Strings("warnings");
             if (warnings.Count > 0)
@@ -525,8 +505,6 @@ namespace QuillSql.Compare
             w.Content = Ui.WithFooter(body, buttons);
             w.ShowDialog();
         }
-
-        private static string QName(JsonObject n) => n == null ? "" : "[" + n.Str("schema") + "].[" + n.Str("name") + "]";
 
         /// <summary>Groups by the Group by choice, or, while the find box has text, by whether objects match it.</summary>
         private void Regroup()
