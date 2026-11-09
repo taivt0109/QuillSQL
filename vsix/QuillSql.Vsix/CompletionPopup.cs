@@ -420,6 +420,7 @@ namespace QuillSql.Vsix
                         case "type": return "Ty";
                         case "database": return "DB";
                         case "server": return "LS";
+                        case "loading": return "…";
                         default: return "K";
                     }
                 }

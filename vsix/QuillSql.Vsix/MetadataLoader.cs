@@ -268,16 +268,59 @@ FROM sys.objects WHERE is_ms_shipped = 0;";
                 }
                 State[target.Key] = "loading";
             }
-            _ = System.Threading.Tasks.Task.Run(() =>
+            StartLoad(target, false);
+            return false;
+        }
+
+        /// <summary>True while the target's metadata is being read.</summary>
+        public static bool IsLoading(ConnectionTarget target)
+        {
+            lock (Gate)
             {
-                var loaded = Load(target);
+                return target != null && State.TryGetValue(target.Key, out var state) && state == "loading";
+            }
+        }
+
+        /// <summary>
+        /// Reads the target's metadata in the background, the status bar saying that it is reading
+        /// and then how it went (how many objects, how long), so a new window shows when its
+        /// suggestions are ready.
+        /// </summary>
+        private static void StartLoad(ConnectionTarget target, bool refresh)
+        {
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = EditorContext.Dte;
+                try
+                {
+                    dte?.StatusBar.Animate(true, EnvDTE.vsStatusAnimation.vsStatusAnimationSync);
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+                EditorContext.Status((refresh ? "refreshing" : "reading") + " suggestions for " + target.Description + "...");
+                await System.Threading.Tasks.TaskScheduler.Default;
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                var loaded = Load(target, out var count, out var problem);
                 lock (Gate)
                 {
                     State[target.Key] = loaded ? "loaded" : "failed:" + DateTime.UtcNow.Ticks;
                     Checked[target.Key] = DateTime.UtcNow;
                 }
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                try
+                {
+                    dte?.StatusBar.Animate(false, EnvDTE.vsStatusAnimation.vsStatusAnimationSync);
+                }
+                catch (System.Runtime.InteropServices.COMException)
+                {
+                }
+                var seconds = (watch.ElapsedMilliseconds / 1000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+                EditorContext.Status(loaded
+                    ? "suggestions " + (refresh ? "refreshed" : "ready") + " for " + target.Description + ": " + count + " objects in " + seconds + " s."
+                    : "suggestions could not be " + (refresh ? "refreshed" : "read") + " for " + target.Description + ": " + problem);
             });
-            return false;
         }
 
         private static bool Load(ConnectionTarget target) => Load(target, out _, out _);
@@ -328,37 +371,7 @@ FROM sys.objects WHERE is_ms_shipped = 0;";
             {
                 State[target.Key] = "loading";
             }
-            var dte = EditorContext.Dte;
-            try
-            {
-                dte?.StatusBar.Animate(true, EnvDTE.vsStatusAnimation.vsStatusAnimationSync);
-            }
-            catch (System.Runtime.InteropServices.COMException)
-            {
-            }
-            EditorContext.Status("refreshing suggestions for " + target.Description + "...");
-            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
-            {
-                await System.Threading.Tasks.TaskScheduler.Default;
-                var watch = System.Diagnostics.Stopwatch.StartNew();
-                var loaded = Load(target, out var count, out var problem);
-                lock (Gate)
-                {
-                    State[target.Key] = loaded ? "loaded" : "failed:" + DateTime.UtcNow.Ticks;
-                    Checked[target.Key] = DateTime.UtcNow;
-                }
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                try
-                {
-                    dte?.StatusBar.Animate(false, EnvDTE.vsStatusAnimation.vsStatusAnimationSync);
-                }
-                catch (System.Runtime.InteropServices.COMException)
-                {
-                }
-                EditorContext.Status(loaded
-                    ? "suggestions refreshed for " + target.Description + ": " + count + " objects in " + (watch.ElapsedMilliseconds / 1000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " s."
-                    : "suggestions could not be refreshed for " + target.Description + ": " + problem);
-            });
+            StartLoad(target, true);
         }
 
         private static void CheckForChanges(ConnectionTarget target)

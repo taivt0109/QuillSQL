@@ -91,6 +91,9 @@ static class HookDriver
                 Send("key|esc"); Send("wait|1000");
             }
             Send("key|esc");
+            var ready = "";
+            for (var i = 0; i < 40 && !ready.Contains("ready"); i++) { ready = Send("status"); if (!ready.Contains("ready")) Send("wait|500"); }
+            Check("a new window says when its suggestions are ready", ready.Contains("suggestions ready") && ready.Contains("objects"), ready);
 
             Func<string, string, string> typed = (start0, text) => { Send("set|" + start0); Send("type|" + text); return Send("text"); };
 

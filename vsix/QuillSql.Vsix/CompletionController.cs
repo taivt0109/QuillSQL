@@ -625,7 +625,14 @@ namespace QuillSql.Vsix
                     select = at;
                 }
             }
-            _popup.Show(items, window, screen.X, screen.Y, Settings.Current.ShowDefinitionBox, select, ConnectionResolver.TryGetActive());
+            var target = ConnectionResolver.TryGetActive();
+            // Typed before the database's objects are read: say so at the top of the list.
+            if (MetadataCache.IsLoading(target))
+            {
+                items = new[] { new CompletionItem { Label = Loc.T("Reading the database's objects..."), Insert = "", Kind = "loading", Detail = target.Description } }.Concat(items).ToArray();
+                select = select >= 0 ? select + 1 : -1;
+            }
+            _popup.Show(items, window, screen.X, screen.Y, Settings.Current.ShowDefinitionBox, select, target);
             LastShown = string.Join(",", items.Take(20).Select(i => i.Label));
             Log.Verbose("suggest " + items.Length + ": " + LastShown);
         }
@@ -636,7 +643,7 @@ namespace QuillSql.Vsix
             var item = _popup.Selected;
             var listed = _popup.Items.ToList();
             _popup.Close();
-            if (item == null || !TryGetText(out var before, out var caret) || caret < _replaceStart)
+            if (item == null || item.Kind == "loading" || !TryGetText(out var before, out var caret) || caret < _replaceStart)
             {
                 return;
             }

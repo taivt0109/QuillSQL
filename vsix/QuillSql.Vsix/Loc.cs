@@ -320,6 +320,7 @@ namespace QuillSql.Vsix
             ["The update could not be installed. Click Retry, or open the log to see why."] = "Không cài được bản cập nhật. Bấm Thử lại, hoặc mở log để xem lý do.",
             ["Retry"] = "Thử lại",
             ["Open log"] = "Mở log",
+            ["Reading the database's objects..."] = "Đang đọc các object của database...",
             ["Reopen query windows"] = "Mở lại cửa sổ query",
             ["SSMS closed without shutting down. Reopen these query windows?"] = "SSMS đã bị tắt ngang. Mở lại các cửa sổ query này?",
             ["Reopen"] = "Mở lại",
