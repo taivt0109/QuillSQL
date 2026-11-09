@@ -7,10 +7,10 @@
 //! - `databases` {source} lists databases; `test_connection` {source} returns the server version.
 //! - `project_load` {path} / `project_save` {path, project}.
 //! - `project_export` {path, project} writes a SQL Compare / Data Compare project (.scp, .sdc).
-//! - `schema_compare` {project} → session with differences and suggested renames;
+//! - `schema_compare` {project} → session with differences;
 //!   `schema_object_sql` {session, index}; `schema_script` {session, selected:[index], project};
 //!   `schema_dependencies` {session, selected}; `schema_switch` {session}; `schema_report`
-//!   {session, path, format, selected, includeIdentical}; `schema_renames` {project};
+//!   {session, path, format, selected, includeIdentical};
 //!   `deploy` {session} runs the last script.
 //! - `data_tables` {project} previews table pairs and keys; `data_compare` {project} → session;
 //!   `data_rows` {session, table, kind, start, count, sort}; `data_find`; `data_value`;
@@ -375,15 +375,6 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
             let mut reply = schema_reply(id, s);
             reply["project"] = serde_json::to_value(&s.project).map_err(|e| e.to_string())?;
             Ok(reply)
-        }
-        // Tables that look renamed, for the Table mapping tab: {project}.
-        "schema_renames" => {
-            let project: Project = field(request, "project")?;
-            let decrypt = schema_options(&project)?.has(Opt::DecryptPost2kEncryptedObjects);
-            let fresh = request.get("refresh").and_then(Value::as_bool).unwrap_or(false);
-            let ((db1, _), loaded2) = load_sides(state, &project, decrypt, fresh, progress)?;
-            let db2 = loaded2.map(|l| l.0).unwrap_or_default();
-            Ok(json!(schema::renames::detect(&db1, &db2, &project.schema_mappings)))
         }
         // Objects the selected ones need that differ too: what "Include dependencies" adds.
         "schema_dependencies" => {
@@ -1119,7 +1110,7 @@ fn filtered(f: Option<&schema::filter::Filter>, comparison: &Comparison) -> Vec<
     comparison.differences.iter().enumerate().filter(|(_, d)| !f.includes(d)).map(|(i, _)| i).collect()
 }
 
-/// The reply describing a schema comparison session, with suggested table renames.
+/// The reply describing a schema comparison session.
 fn schema_reply(id: u64, s: &SchemaSession) -> Value {
     let differences: Vec<Value> = s.comparison.differences.iter().enumerate().map(|(i, d)| difference_json(i, d)).collect();
     let auto: Vec<Value> = s.comparison.auto_mapped_columns.iter().map(|(t, a, b)| json!({"table": t.to_string(), "source": a, "target": b})).collect();
@@ -1130,7 +1121,6 @@ fn schema_reply(id: u64, s: &SchemaSession) -> Value {
         "differences": differences,
         "autoMapped": auto,
         "filtered": filtered(project_filter(&s.project).ok().flatten().as_ref(), &s.comparison),
-        "renames": schema::renames::detect(&s.db1, &s.db2, &s.project.schema_mappings),
     })
 }
 
@@ -1689,8 +1679,8 @@ mod tests {
         let none = |_: &str| {};
         let r = handle(&mut state, &json!({"op": "schema_compare", "project": project}), &none).unwrap();
         let s = r["session"].clone();
-        assert_eq!(r["renames"][0]["source"]["name"], "Customer");
-        assert_eq!(r["renames"][0]["target"]["name"], "Customers");
+        // No rename suggestions: SQL Compare's UI makes none; tables are mapped by hand.
+        assert!(r.get("renames").is_none());
         let index = |r: &Value, name: &str| r["differences"].as_array().unwrap().iter().find(|d| d["name"] == name).unwrap()["index"].as_u64().unwrap();
         let (report, orders) = (index(&r, "Report"), index(&r, "Orders"));
         let deps = handle(&mut state, &json!({"op": "schema_dependencies", "session": s, "selected": [report]}), &none).unwrap();

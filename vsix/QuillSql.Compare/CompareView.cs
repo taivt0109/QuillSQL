@@ -596,24 +596,8 @@ namespace QuillSql.Compare
             else
             {
                 _schemaResults = new SchemaResults(_session, result);
-                _schemaResults.ReviewRenames += async renames => await MapRenames(renames);
                 _schemaResults.FilterChanged += () => { _dirty = true; UpdateTitle(); };
             }
-        }
-
-        /// <summary>Confirmed renames become table mappings, and the databases are compared again.</summary>
-        private async Task MapRenames(List<JsonObject> renames)
-        {
-            var chosen = Dialogs.ConfirmRenames(_host.Owner, renames);
-            if (chosen == null || chosen.Count == 0) return;
-            var mappings = _session.Project.Obj("schemaMappings") ?? new JsonObject();
-            var tables = mappings.List("tables");
-            foreach (var r in chosen) tables.Add(new JsonObject { ["source"] = r.Obj("source"), ["target"] = r.Obj("target"), ["columns"] = new List<object>() });
-            mappings["tables"] = tables;
-            _session.Project["schemaMappings"] = mappings;
-            _dirty = true;
-            _editor = null;
-            await Compare();
         }
 
         /// <summary>Switch deployment direction: the target becomes the source. Schema results are compared again from what was read; data is compared again.</summary>
