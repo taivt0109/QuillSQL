@@ -213,7 +213,13 @@ namespace QuillSql.Vsix
                     EditorContext.Status("could not read the server of this node.");
                     return;
                 }
-                TabColorDialog.Show(names.Item1, names.Item2);
+                // The rule must name the server as query windows describe it: their connection's
+                // ServerName (what was typed in Connect, e.g. myserver.database.windows.net or an
+                // alias), not the node's URN name, which is the server's own @@SERVERNAME
+                // (e.g. myserver) and so never found in a window's "server / database".
+                var connection = ObjectExplorerMenu.Connection(item);
+                var server = connection == null ? null : ConnectionResolver.Get(connection, "ServerName") as string;
+                TabColorDialog.Show(string.IsNullOrEmpty(server) ? names.Item1 : server, names.Item2);
             }
             catch (Exception ex)
             {
