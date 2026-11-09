@@ -597,7 +597,7 @@ namespace QuillSql.Vsix
                     select = at;
                 }
             }
-            _popup.Show(items, window, screen.X, screen.Y, Settings.Current.ShowDefinitionBox, select);
+            _popup.Show(items, window, screen.X, screen.Y, Settings.Current.ShowDefinitionBox, select, ConnectionResolver.TryGetActive());
             LastShown = string.Join(",", items.Take(20).Select(i => i.Label));
             Log.Verbose("suggest " + items.Length + ": " + LastShown);
         }

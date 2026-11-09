@@ -167,7 +167,8 @@ columns of `CREATE TABLE`), so a column named `count` or `date` keeps its case. 
 comments, brackets and after a dot are left alone. Options > Typing turns it off.
 
 Up/Down moves, Enter or Tab inserts, Esc closes, Ctrl+Space opens the list. Next to the list, a
-box shows the definition of the selected table, view or procedure. Which keys insert (Tab, Enter,
+box shows the selected table, view, procedure or function with the same card as when the mouse
+rests on its name: rows, size, columns, indexes, partitions and script. Which keys insert (Tab, Enter,
 Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
 background the first time a database is used and follows `USE`. When tables, columns or other
 objects change, by you or anyone else, it reloads by itself: a light check runs at most once a

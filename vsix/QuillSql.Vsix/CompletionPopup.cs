@@ -7,7 +7,12 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Media;
+using System.Windows.Documents;
+using System.Windows.Threading;
 using Microsoft.VisualStudio.PlatformUI;
+using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Threading;
+using TaskScheduler = System.Threading.Tasks.TaskScheduler;
 
 namespace QuillSql.Vsix
 {
@@ -21,7 +26,11 @@ namespace QuillSql.Vsix
         private readonly ListBox _list;
         private readonly Border _definition;
         private readonly TextBlock _definitionText;
+        private readonly ScrollViewer _definitionScroll;
+        private readonly DispatcherTimer _cardDelay = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         private bool _showDefinition;
+        private ConnectionTarget _target;
+        private int _cardVersion;
 
         public event Action Committed;
 
@@ -64,8 +73,14 @@ namespace QuillSql.Vsix
                 Child = new Border
                 {
                     Background = Theme.Faint,
-                    Child = new ScrollViewer { Content = _definitionText, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled },
+                    Child = _definitionScroll = new ScrollViewer { Content = _definitionText, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled },
                 },
+            };
+            _definition.SetResourceReference(TextElement.ForegroundProperty, EnvironmentColors.CommandBarTextActiveBrushKey);
+            _cardDelay.Tick += (s, e) =>
+            {
+                _cardDelay.Stop();
+                LoadCard();
             };
             _definition.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.CommandBarMenuSeparatorBrushKey);
             _definition.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.CommandBarMenuBackgroundGradientBrushKey);
@@ -144,15 +159,99 @@ namespace QuillSql.Vsix
 
         private void UpdateDefinition()
         {
+            _cardDelay.Stop();
+            _cardVersion++;
             var info = _showDefinition ? Selected?.Info : null;
             _definitionText.Text = info ?? "";
+            ShowText();
             _definition.Visibility = string.IsNullOrEmpty(info) ? Visibility.Collapsed : Visibility.Visible;
+            // A table, view, procedure or function of the database: the same card as when the mouse
+            // rests on its name, at once when it was read lately, else once the selection settles.
+            var name = CardName(Selected);
+            if (name == null)
+            {
+                return;
+            }
+            var cached = ObjectScripts.Cached(_target, name);
+            if (cached != null)
+            {
+                ShowCard(cached);
+            }
+            else
+            {
+                _cardDelay.Start();
+            }
+        }
+
+        /// <summary>The schema.name whose card the item can show; null when it has none.</summary>
+        private string CardName(CompletionItem item)
+        {
+            if (!_showDefinition || item == null || _target == null || !_target.CanQuery || !Settings.Current.ObjectCards)
+            {
+                return null;
+            }
+            switch (item.Kind)
+            {
+                case "table": case "view": case "procedure": case "scalar_function": case "table_function": case "synonym":
+                    break;
+                default:
+                    return null;
+            }
+            // The detail reads "schema.name" (with the parameters after it for routines); objects of
+            // another database have three parts and no card.
+            var name = (item.Detail ?? "").Split(new[] { " (" }, StringSplitOptions.None)[0].Trim();
+            return name.Count(c => c == '.') == 1 ? name : null;
+        }
+
+        private void LoadCard()
+        {
+            var name = CardName(Selected);
+            if (name == null || !_popup.IsOpen)
+            {
+                return;
+            }
+            var version = _cardVersion;
+            var target = _target;
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                ObjectDetails details = null;
+                try
+                {
+                    await TaskScheduler.Default;
+                    details = ObjectScripts.Load(target, name);
+                }
+                catch (Exception ex)
+                {
+                    Log.Verbose("card for " + name + ": " + ex.Message);
+                }
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (details != null && version == _cardVersion && _popup.IsOpen)
+                {
+                    ShowCard(details);
+                }
+            }).FileAndForget("QuillSQL/CompletionCard");
+        }
+
+        private void ShowCard(ObjectDetails details)
+        {
+            _definitionScroll.Content = new Border { Child = ObjectScripts.Card(details), Padding = new Thickness(10, 8, 10, 8) };
+            _definition.MaxWidth = 720;
+            _definition.MaxHeight = 440;
+            _definition.Visibility = Visibility.Visible;
+        }
+
+        private void ShowText()
+        {
+            _definitionScroll.Content = _definitionText;
+            _definition.MaxWidth = 460;
+            _definition.MaxHeight = 300;
         }
 
         /// <summary>Opens the list with `select` selected, or nothing selected when it is -1.</summary>
-        public void Show(IList<CompletionItem> items, IntPtr window, int screenX, int screenY, bool showDefinition, int select)
+        public void Show(IList<CompletionItem> items, IntPtr window, int screenX, int screenY, bool showDefinition, int select, ConnectionTarget target = null)
         {
             _showDefinition = showDefinition;
+            _target = target;
             var rows = items.Select(i => new Row(i)).ToList();
             _list.ItemsSource = rows;
             _list.SelectedIndex = Math.Min(select, rows.Count - 1);
@@ -181,7 +280,12 @@ namespace QuillSql.Vsix
             _list.ScrollIntoView(_list.SelectedItem);
         }
 
-        public void Close() => _popup.IsOpen = false;
+        public void Close()
+        {
+            _cardDelay.Stop();
+            _cardVersion++;
+            _popup.IsOpen = false;
+        }
 
         [DllImport("user32.dll")]
         private static extern uint GetDpiForWindow(IntPtr hwnd);
