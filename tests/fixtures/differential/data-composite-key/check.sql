@@ -1,1 +1,0 @@
-SELECT * FROM dbo.CK ORDER BY A, D

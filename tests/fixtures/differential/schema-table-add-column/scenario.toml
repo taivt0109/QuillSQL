@@ -1,2 +1,0 @@
-kind = "schema"
-about = "A nullable column added, a column widened, a table only in db1, a procedure only in db2"

@@ -82,9 +82,14 @@ fn run_errors_have_sql_compare_codes() {
     assert_eq!(code(&quill(&["/db1:a", "/p1:x", "/db2:b"])), 8);
     // A scripts folder that is not there.
     assert_eq!(code(&quill(&["/scripts1", &p("none"), "/db2:b"])), 60);
-    assert_eq!(code(&quill(&["/project", &p("missing.scp")])), 74);
-    std::fs::write(dir.join("bad.scp"), "not xml").unwrap();
-    assert_eq!(code(&quill(&["/project", &p("bad.scp")])), 65);
+    assert_eq!(code(&quill(&["/project", &p("missing.qsc")])), 74);
+    std::fs::write(dir.join("bad.qsc"), "not json").unwrap();
+    assert_eq!(code(&quill(&["/project", &p("bad.qsc")])), 65);
+    // Only QuillSQL projects open.
+    std::fs::write(dir.join("other.scp"), "<Project />").unwrap();
+    let o = quill(&["/project", &p("other.scp")]);
+    assert_eq!(code(&o), 65);
+    assert!(flat(&stderr(&o)).contains("only QuillSQL projects (.qsc, .qdc) can be opened"), "{}", stderr(&o));
     std::fs::write(dir.join("out.txt"), "x").unwrap();
     let o = quill(&["/db1:a", "/db2:b", "/out", &p("out.txt")]);
     assert_eq!(code(&o), 74);
@@ -232,13 +237,13 @@ fn live_compare_report_project_and_deploy() {
     quill_owned(&both(&["/report", &p("r.xlsx"), "/rt:Excel"]));
     assert!(std::fs::read(dir.join("r.xlsx")).unwrap().starts_with(b"PK\x03\x04"));
 
-    // /outputProject writes a .scp that loads back.
-    let o = quill_owned(&both(&["/outputProject", &p("run.scp"), "/options:Default,IgnoreCollations"]));
+    // /outputProject writes a .qsc that loads back.
+    let o = quill_owned(&both(&["/outputProject", &p("run.qsc"), "/options:Default,IgnoreCollations"]));
     assert_eq!(code(&o), 0, "{}", stderr(&o));
-    let scp = read_utf16(&dir.join("run.scp"));
-    assert!(scp.contains("type=\"SQLComparisonToolsProject\"") && !scp.contains(&s.password), "{scp}");
-    assert_eq!(code(&quill_owned(&both(&["/outputProject", &p("run.scp")]))), 73);
-    let o = quill_owned(&[format!("/project:{}", p("run.scp")), format!("/p1:{}", s.password), format!("/p2:{}", s.password)]);
+    let qsc = std::fs::read_to_string(dir.join("run.qsc")).unwrap();
+    assert!(qsc.contains("\"IgnoreCollations\"") && !qsc.contains(&s.password), "{qsc}");
+    assert_eq!(code(&quill_owned(&both(&["/outputProject", &p("run.qsc")]))), 73);
+    let o = quill_owned(&[format!("/project:{}", p("run.qsc")), format!("/p1:{}", s.password), format!("/p2:{}", s.password)]);
     assert_eq!(code(&o), 0, "{}{}", stdout(&o), stderr(&o));
     assert!(stdout(&o).contains("[dbo].[Customer]"));
 

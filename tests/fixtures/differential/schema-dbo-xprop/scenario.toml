@@ -1,3 +1,0 @@
-kind = "schema"
-about = "MS_Description on schema dbo only in db1"
-finding = "schema-model H1"

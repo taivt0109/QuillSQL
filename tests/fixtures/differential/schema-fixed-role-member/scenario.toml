@@ -1,3 +1,0 @@
-kind = "schema"
-about = "A user who is a member of db_datareader only in db1; under /options:IgnoreUsersPermissionsAndRoleMemberships the user is still compared"
-finding = "schema-model M2"

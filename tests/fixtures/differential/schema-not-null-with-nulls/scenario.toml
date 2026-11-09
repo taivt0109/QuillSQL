@@ -1,2 +1,0 @@
-kind = "schema"
-about = "A column becomes NOT NULL without a default while db2 holds NULLs"

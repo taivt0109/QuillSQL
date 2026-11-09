@@ -1,3 +1,0 @@
-CREATE TABLE dbo.P (Id int NOT NULL CONSTRAINT PK_P PRIMARY KEY, A bigint NULL, B nvarchar(20) NULL, C datetime2(7) NULL, D decimal(12,4) NULL)
-GO
-INSERT dbo.P VALUES (1, 5, N'x', '2024-01-01T10:00:00', 1.5), (2, 7, N'z', '2024-01-02T00:00:00.0000001', 2.2500)

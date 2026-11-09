@@ -1,2 +1,0 @@
-kind = "data"
-about = "NULL vs empty, trailing spaces, case differences under a case-insensitive collation"

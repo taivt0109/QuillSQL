@@ -1,4 +1,0 @@
-kind = "schema"
-about = "The referenced key column is retyped; the referencing table is identical otherwise and is not included"
-finding = "schema-deploy M6"
-args = ["/include:Table:Parent"]

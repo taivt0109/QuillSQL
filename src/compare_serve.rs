@@ -6,7 +6,6 @@
 //! - `options` describes every schema and data option (for the Options tabs).
 //! - `databases` {source} lists databases; `test_connection` {source} returns the server version.
 //! - `project_load` {path} / `project_save` {path, project}.
-//! - `project_export` {path, project} writes a SQL Compare / Data Compare project (.scp, .sdc).
 //! - `schema_compare` {project} → session with differences;
 //!   `schema_object_sql` {session, index}; `schema_script` {session, selected:[index], project};
 //!   `schema_dependencies` {session, selected}; `schema_switch` {session}; `schema_report`
@@ -420,14 +419,6 @@ fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Val
             };
             s.project.filter = xml.clone();
             Ok(json!({"xml": xml, "filtered": filtered(filter.as_ref(), &s.comparison)}))
-        }
-        // Saves a project as SQL Compare (.scp) or SQL Data Compare (.sdc) writes it.
-        "project_export" => {
-            let path: String = field(request, "path")?;
-            let project: Project = field(request, "project")?;
-            let bytes = crate::project::export_vendor(&project, &crate::commands::console::now().invariant_format());
-            std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
-            Ok(json!(true))
         }
         "schema_object_sql" => {
             let s = state.schema.get(&session(request)?).ok_or("the comparison is no longer open")?;
@@ -1082,15 +1073,12 @@ fn selections(request: &Value, result: &DataComparison) -> Result<HashMap<Object
     Ok(out)
 }
 
-/// The comparison with the project's unticked objects (its own, or those of the selection the
-/// SQL Compare window saved), and what its filter leaves out, unselected (as `quill schema
-/// /project` does).
+/// The comparison with the project's unticked objects and what its filter leaves out,
+/// unselected (as `quill schema /project` does).
 fn compare_schemas(db1: &Database, db2: &Database, opts: &Options, project: &Project) -> Result<Comparison, String> {
     let mut comparison = schema::compare(db1, db2, opts, &project.schema_mappings);
     for d in &mut comparison.differences {
-        if project.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label()))
-            || project.imported_selected(&d.name.schema, &d.name.name) == Some(false)
-        {
+        if project.deselected.iter().any(|x| x.schema == d.name.schema && x.name == d.name.name && (x.kind.is_empty() || x.kind == d.object_type.label())) {
             d.selected = false;
         }
     }
@@ -1694,9 +1682,9 @@ mod tests {
         let report_now = switched["differences"].as_array().unwrap().iter().find(|d| d["name"] == "Report").unwrap();
         assert_eq!(report_now["kind"], "OnlyIn2");
         assert_eq!(switched["project"]["source"]["path"], path("two.json"));
-        let scp = path("p.scp");
-        handle(&mut state, &json!({"op": "project_export", "path": scp, "project": project}), &none).unwrap();
-        let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
+        let qsc = path("p.qsc");
+        handle(&mut state, &json!({"op": "project_save", "path": qsc, "project": project}), &none).unwrap();
+        let back = handle(&mut state, &json!({"op": "project_load", "path": qsc}), &none).unwrap();
         assert_eq!(back["source"]["path"], path("one.json"));
 
         // A filter leaving out tables named like Cust%: the switched session, then a new comparison.
@@ -1714,17 +1702,9 @@ mod tests {
         let customer = r["differences"].as_array().unwrap().iter().find(|d| d["name"] == "Customer").unwrap();
         assert_eq!(customer["selected"], false);
         assert!(r["filtered"].as_array().unwrap().contains(&customer["index"]));
-        handle(&mut state, &json!({"op": "project_export", "path": scp, "project": filtered_project}), &none).unwrap();
-        let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
+        handle(&mut state, &json!({"op": "project_save", "path": qsc, "project": filtered_project}), &none).unwrap();
+        let back = handle(&mut state, &json!({"op": "project_load", "path": qsc}), &none).unwrap();
         assert!(back["filter"].as_str().unwrap().contains("Cust%"));
-
-        // The selection a SQL Compare project saved unticks Customer.
-        let hash: String = crate::project_codec::object_hash("Customer").iter().map(|b| format!("{b:02x}")).collect();
-        let mut picked = project.clone();
-        picked["importedSelection"] = json!({"selectAll": true, "entries": [{"schema": "dbo", "hash": hash, "objectType": 1, "difference": 0, "selected": false}]});
-        let r = handle(&mut state, &json!({"op": "schema_compare", "project": picked}), &none).unwrap();
-        let selected = |n: &str| r["differences"].as_array().unwrap().iter().find(|d| d["name"] == n).unwrap()["selected"].clone();
-        assert_eq!((selected("Customer"), selected("Report")), (json!(false), json!(true)));
 
         // Mapping tabs: the default pairs, then a user mapping and an unmapped default pair.
         let m = handle(&mut state, &json!({"op": "mapping_preview", "project": project}), &none).unwrap();
@@ -1743,8 +1723,8 @@ mod tests {
         let r = handle(&mut state, &json!({"op": "schema_compare", "project": remapped}), &none).unwrap();
         let kinds: Vec<&str> = r["differences"].as_array().unwrap().iter().filter(|d| d["name"] == "Orders").map(|d| d["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["OnlyIn1", "OnlyIn2"]);
-        handle(&mut state, &json!({"op": "project_export", "path": scp, "project": remapped}), &none).unwrap();
-        let back = handle(&mut state, &json!({"op": "project_load", "path": scp}), &none).unwrap();
+        handle(&mut state, &json!({"op": "project_save", "path": qsc, "project": remapped}), &none).unwrap();
+        let back = handle(&mut state, &json!({"op": "project_load", "path": qsc}), &none).unwrap();
         let tables = back["schemaMappings"]["tables"].as_array().unwrap();
         assert!(tables.iter().any(|t| t["source"]["name"] == "Customer" && t["target"]["name"] == "Customers"), "{back}");
         assert!(tables.iter().any(|t| t["source"]["name"] == "Orders" && t["target"]["name"] == ""), "{back}");

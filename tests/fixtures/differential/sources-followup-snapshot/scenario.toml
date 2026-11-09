@@ -1,4 +1,0 @@
-kind = "schema"
-about = "Owners, table options, typed and principal extended properties, trigger settings, type bindings and grants, a history index, public/guest grants and a fixed-role member; database 1 is a snapshot"
-finding = "sources-followup"
-source = "snapshot"

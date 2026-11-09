@@ -1,4 +1,0 @@
-kind = "schema"
-about = "/options:Default,AddWithEncryption with an identical unencrypted view"
-finding = "schema-model M12"
-args = ['/options:Default,AddWithEncryption']

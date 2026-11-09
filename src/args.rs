@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn vendor_and_gnu_forms() {
+    fn slash_and_gnu_forms() {
         let a = parse(SW, &argv(&["/S1:dev,1433", "/sync", "/include:Table:^dbo\\.", "--include", "View", "-db1=\"Shop\"", "/rt", "Xml"])).unwrap();
         assert_eq!(a.get("server1"), Some("dev,1433"));
         assert!(a.has("synchronize"));
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn syntax_errors_use_vendor_exit_codes_and_messages() {
+    fn syntax_errors_use_compare_exit_codes_and_messages() {
         let e = parse(SW, &argv(&["/s1:a", "/server1:b"])).unwrap_err();
         assert_eq!((e.code, e.message.as_str()), (exit::DUPLICATE_ARGUMENT, "Duplicate switch: /server1."));
         let e = parse(SW, &argv(&["/nope"])).unwrap_err();
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn rules_use_vendor_exit_codes_and_messages() {
+    fn rules_use_compare_exit_codes_and_messages() {
         let e = check(&[]).unwrap_err();
         assert_eq!(e.code, exit::USAGE);
         assert!(e.message.starts_with("You are required to specify at least one of the following parameters: /database1, /argfile"));

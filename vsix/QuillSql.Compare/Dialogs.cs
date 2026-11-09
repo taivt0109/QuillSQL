@@ -725,10 +725,10 @@ namespace QuillSql.Compare
                 var dir = lookIn.Text.Trim();
                 if (Directory.Exists(dir))
                 {
-                    foreach (var f in new[] { "*.qsc", "*.qdc", "*.scp", "*.sdc" }.SelectMany(p => Directory.GetFiles(dir, p)).OrderByDescending(System.IO.File.GetLastWriteTime))
+                    foreach (var f in new[] { "*.qsc", "*.qdc" }.SelectMany(p => Directory.GetFiles(dir, p)).OrderByDescending(System.IO.File.GetLastWriteTime))
                     {
                         var ext = System.IO.Path.GetExtension(f).ToLowerInvariant();
-                        rows.Add(new ProjectRow { Path = f, File = System.IO.Path.GetFileName(f), Modified = System.IO.File.GetLastWriteTime(f), Kind = ext == ".qdc" || ext == ".sdc" ? "Data" : "Schema" });
+                        rows.Add(new ProjectRow { Path = f, File = System.IO.Path.GetFileName(f), Modified = System.IO.File.GetLastWriteTime(f), Kind = ext == ".qdc" ? "Data" : "Schema" });
                     }
                 }
                 view.Refresh();

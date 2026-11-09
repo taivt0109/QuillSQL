@@ -211,7 +211,7 @@ pub const DEPLOY: [Switch; 21] = [
         aliases: &["outpr", "opr"],
         takes_value: true,
         repeatable: false,
-        help: "Write the settings of this run to a project file (.scp/.sdc, or QuillSQL's .qsc/.qdc)",
+        help: "Write the settings of this run to a QuillSQL project file (.qsc/.qdc)",
     },
     Switch {
         name: "makescripts",
@@ -255,7 +255,7 @@ pub const GENERAL: [Switch; 15] = [
         aliases: &["pr"],
         takes_value: true,
         repeatable: false,
-        help: "A .qsc/.qdc project (or a SQL Compare .scp / Data Compare .sdc); switches override its settings",
+        help: "A QuillSQL .qsc/.qdc project; switches override its settings",
     },
     Switch { name: "quiet", aliases: &["q"], takes_value: false, repeatable: false, help: "Print errors only" },
     Switch { name: "verbose", aliases: &["v"], takes_value: false, repeatable: false, help: "Print every difference" },

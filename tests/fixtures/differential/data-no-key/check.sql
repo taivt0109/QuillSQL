@@ -1,3 +1,0 @@
-SELECT 'dbo.Heap' AS t, CHECKSUM_AGG(CHECKSUM(*)) c, COUNT(*) n FROM dbo.Heap
-UNION ALL
-SELECT 'dbo.T' AS t, CHECKSUM_AGG(CHECKSUM(*)) c, COUNT(*) n FROM dbo.T

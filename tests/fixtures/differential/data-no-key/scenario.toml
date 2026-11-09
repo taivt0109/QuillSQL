@@ -1,2 +1,0 @@
-kind = "data"
-about = "A table without primary key or unique index next to a keyed one"

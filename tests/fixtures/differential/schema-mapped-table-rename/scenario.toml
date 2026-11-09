@@ -1,4 +1,0 @@
-kind = "schema"
-about = "Project maps dbo.Client (db1) to dbo.Customer (db2): the table must be renamed"
-finding = "schema-model H3"
-project = "project.scp"

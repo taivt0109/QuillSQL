@@ -676,8 +676,7 @@ fn write_report(
     std::fs::write(path, bytes).map_err(|e| ArgError::new(exit::REPORT_FAILED, format!("Failed to create report: {e}")))
 }
 
-/// `/outputProject`: the settings of this run, as a QuillSQL project (`.qsc`) or a SQL Compare
-/// project (any other name).
+/// `/outputProject`: the settings of this run, as a QuillSQL project (`.qsc`).
 #[allow(clippy::too_many_arguments)]
 fn write_project(
     args: &Args,
@@ -707,11 +706,11 @@ fn write_project(
     p.include = includes.to_vec();
     p.exclude = excludes.to_vec();
     let failed = |e: String| ArgError::new(exit::REPORT_FAILED, format!("Error occurred writing project to file '{path}': {e}"));
-    if path.to_ascii_lowercase().ends_with(".qsc") {
-        p.save(Path::new(path)).map_err(failed)
-    } else {
-        std::fs::write(path, crate::project::export_vendor(&p, &console::now().invariant_format())).map_err(|e| failed(e.to_string()))
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".scp") || lower.ends_with(".sdc") {
+        return Err(failed("only QuillSQL projects (.qsc, .qdc) can be written".into()));
     }
+    p.save(Path::new(path)).map_err(failed)
 }
 
 /// Reads one side; a scripts folder also comes back as itself, for deploying to it.

@@ -1,3 +1,0 @@
-kind = "data"
-about = "Parents and children with /options:Default,SkipFkChecks"
-args = ['/options:Default,SkipFkChecks']

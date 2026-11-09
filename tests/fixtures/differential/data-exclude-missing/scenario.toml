@@ -1,4 +1,0 @@
-kind = "data"
-about = "/exclude:Missing leaves rows only in database 1 alone"
-args = ['/exclude:Missing']
-oracles = ["outcome", "check", "diffset", "warnings", "exit"]

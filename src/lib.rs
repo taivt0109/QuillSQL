@@ -18,7 +18,6 @@ pub mod lexer;
 pub mod options;
 pub mod plan;
 pub mod project;
-pub mod project_codec;
 pub mod refactor;
 pub mod schema;
 pub mod snippets;

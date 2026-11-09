@@ -1,3 +1,0 @@
-kind = "schema"
-about = "/include:Table:Customer leaves other differences out"
-args = ['/include:Table:Customer']

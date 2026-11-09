@@ -1,2 +1,0 @@
-kind = "schema"
-about = "Check and default constraints changed, added, dropped; one check WITH NOCHECK"

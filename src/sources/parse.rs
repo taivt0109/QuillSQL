@@ -3059,7 +3059,7 @@ mod tests {
     }
 
     #[test]
-    fn vendor_table_file() {
+    fn scripts_folder_table_file() {
         let sql = "CREATE TABLE [dbo].[Customer]\r\n(\r\n[CustomerId] [int] NOT NULL IDENTITY(1, 1),\r\n\
 [Name] [nvarchar] (100) COLLATE Latin1_General_CI_AS NOT NULL,\r\n[Phone] [dbo].[Phone] NULL,\r\n\
 [Balance] [decimal] (18, 2) NOT NULL CONSTRAINT [DF_Customer_Balance] DEFAULT ((0)),\r\n\

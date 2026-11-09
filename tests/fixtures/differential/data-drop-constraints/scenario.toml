@@ -1,3 +1,0 @@
-kind = "data"
-about = "Rows deployed with /options:Default,DropConstraintsAndIndexes"
-args = ['/options:Default,DropConstraintsAndIndexes']

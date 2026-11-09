@@ -1,1 +1,0 @@
-CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, Doc nvarchar(max) NULL)

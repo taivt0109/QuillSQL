@@ -10,8 +10,7 @@ use super::script;
 use crate::catalog::*;
 use crate::schema::{DiffKind, Difference, ObjectType, Options};
 
-/// The settings file names, newest first; the middle one is what SQL Compare writes.
-const INFO_FILES: [&str; 3] = ["QuillDatabaseProperties.xml", "QuillDatabaseInfo.xml", "SqlCompareDatabaseInfo.xml"];
+/// The settings file of a scripts folder.
 pub const INFO_FILE: &str = "QuillDatabaseInfo.xml";
 
 /// Folder of pre- and post-deployment scripts and other files that are not objects.
@@ -163,17 +162,18 @@ impl FolderInfo {
     /// Reads the settings file of `dir`, with warnings for what is missing.
     pub fn read(dir: &Path) -> (FolderInfo, Vec<String>) {
         let mut warnings = Vec::new();
-        let Some(file) = INFO_FILES.iter().map(|f| dir.join(f)).find(|p| p.is_file()) else {
+        let file = dir.join(INFO_FILE);
+        if !file.is_file() {
             warnings.push(format!(
                 "Could not find the file '{INFO_FILE}' in the scripts folder '{}': the default settings will be used instead.",
                 dir.display()
             ));
             return (FolderInfo::default(), warnings);
-        };
+        }
         let text = std::fs::read(&file).map(|b| decode(&b, "UTF8")).unwrap_or_default();
         let mut info = FolderInfo { file: Some(file), ..Default::default() };
         let Ok(doc) = roxmltree::Document::parse(&text) else {
-            warnings.push(format!("The SqlCompareDatabaseInfo.xml file in the scripts folder '{}' is not in the expected format.", dir.display()));
+            warnings.push(format!("The {INFO_FILE} file in the scripts folder '{}' is not in the expected format.", dir.display()));
             return (info, warnings);
         };
         let root = doc.root_element();
@@ -949,9 +949,7 @@ fn sync_files(source: &Database, target: &Folder, differences: &[Difference], o:
     if target.info.file.is_none() {
         // A folder read without settings has no server version to record.
         let info = FolderInfo { collation: target.info.collation.clone(), database_version: target.info.database_version, ..Default::default() };
-        // Next to a database project SQL Compare writes QuillDatabaseProperties.xml.
-        let name = if target.project.is_some() { INFO_FILES[0] } else { INFO_FILE };
-        std::fs::write(target.path.join(name), info.xml()).map_err(|e| format!("{}: {e}", target.path.display()))?;
+        std::fs::write(target.path.join(INFO_FILE), info.xml()).map_err(|e| format!("{}: {e}", target.path.display()))?;
     }
     if let Some(p) = &target.project {
         let had: Vec<&PathBuf> = origins.values().collect();

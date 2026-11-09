@@ -1,2 +1,0 @@
-kind = "schema"
-about = "Alias type used by a column and a procedure parameter is widened"

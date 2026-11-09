@@ -1,2 +1,0 @@
-kind = "schema"
-about = "DML trigger changed, one added, one disabled; database DDL trigger only in db1"

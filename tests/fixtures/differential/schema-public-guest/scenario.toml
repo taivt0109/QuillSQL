@@ -1,3 +1,0 @@
-kind = "schema"
-about = "GRANT VIEW DEFINITION TO public and GRANT CONNECT TO guest, only in db1"
-finding = "schema-model M11"

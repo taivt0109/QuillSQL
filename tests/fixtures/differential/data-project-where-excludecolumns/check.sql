@@ -1,1 +1,0 @@
-SELECT * FROM dbo.Orders ORDER BY Id

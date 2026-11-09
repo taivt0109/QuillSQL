@@ -1,3 +1,0 @@
-kind = "schema"
-about = "A DML trigger created with ANSI_NULLS OFF in db1, ON in db2"
-finding = "schema-model M8"

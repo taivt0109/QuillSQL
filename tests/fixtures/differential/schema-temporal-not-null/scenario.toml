@@ -1,3 +1,0 @@
-kind = "schema"
-about = "A column of a system-versioned table becomes NOT NULL with a default while history rows hold NULL"
-finding = "schema-deploy M4"

@@ -1,1 +1,0 @@
-SELECT * FROM dbo.C ORDER BY Code COLLATE Latin1_General_BIN

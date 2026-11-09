@@ -1,3 +1,0 @@
-kind = "data"
-about = "/exclude:Table:Other"
-args = ['/exclude:Table:Other']

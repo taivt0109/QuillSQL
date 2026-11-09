@@ -1,2 +1,0 @@
-kind = "schema"
-about = "Primary key gets a second column; a unique constraint is added; a referencing FK must be rebuilt"

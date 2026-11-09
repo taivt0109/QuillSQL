@@ -1,3 +1,0 @@
-kind = "data"
-about = "/comparisonkeys picks a unique index instead of the primary key"
-args = ['/comparisonkeys:dbo.C:UX_C_Code']

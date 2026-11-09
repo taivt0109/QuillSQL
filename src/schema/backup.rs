@@ -166,7 +166,7 @@ impl Plan<'_> {
             with.push("DIFFERENTIAL".into());
         }
         format!(
-            "-- >Backs up the target database using SQL Backup\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [{db}] TO DISK=''{}'' WITH {}\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nSQL Backup error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see http://www.example.com/sqlbackup/latesthelp/errorcodes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n",
+            "-- >Backs up the target database using SQL Backup\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [{db}] TO DISK=''{}'' WITH {}\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nSQL Backup error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see the SQL Backup error codes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n",
             self.path(),
             with.join(", ")
         )
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn kept_in_projects() {
-        use crate::project::{Project, ProjectKind, export_vendor, import_vendor};
+        use crate::project::{Project, ProjectKind};
         let mut p = Project::new(ProjectKind::Schema);
         p.backup = BackupOptions {
             enabled: true,
@@ -330,13 +330,10 @@ mod tests {
             password: Some("secret".into()),
             ..Default::default()
         };
-        let bytes = export_vendor(&p, "11/07/2026 10:00:00");
-        let text = String::from_utf16_lossy(&bytes[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>());
-        assert!(text.contains("<BackupProvider>Sqb</BackupProvider>") && !text.contains("secret"), "{text}");
-        let back = import_vendor(&bytes, ProjectKind::Schema).unwrap();
-        assert_eq!(back.backup, BackupOptions { password: None, ..p.backup.clone() });
         let json = serde_json::to_string(&p).unwrap();
-        assert!(json.contains("\"backup\"") && !json.contains("secret"));
+        assert!(json.contains("\"backup\"") && json.contains("\"provider\":\"sqb\"") && !json.contains("secret"), "{json}");
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.backup, BackupOptions { password: None, ..p.backup.clone() });
         assert!(!serde_json::to_string(&Project::new(ProjectKind::Schema)).unwrap().contains("backup"));
     }
 
@@ -357,7 +354,7 @@ mod tests {
         let p = Plan { options: &o, database: "Sales", utc: String::new(), caps: &caps };
         assert_eq!(
             p.sql(),
-            "-- >Backs up the target database using SQL Backup\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [Sales] TO DISK=''D:\\SQB\\<AUTO>.sqb'' WITH COMPRESSION=3, KEYSIZE=256, PASSWORD=''p''''w'', THREADCOUNT=4, INIT\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nSQL Backup error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see http://www.example.com/sqlbackup/latesthelp/errorcodes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n"
+            "-- >Backs up the target database using SQL Backup\r\nDECLARE @sqlErrorCode int, @exitCode int\r\nEXECUTE master..sqlbackup N'-SQL \"BACKUP DATABASE [Sales] TO DISK=''D:\\SQB\\<AUTO>.sqb'' WITH COMPRESSION=3, KEYSIZE=256, PASSWORD=''p''''w'', THREADCOUNT=4, INIT\"', @exitCode OUTPUT, @sqlErrorCode OUTPUT\r\nIF @exitCode >= 500 OR @sqlErrorCode <> 0 BEGIN\r\n\tRAISERROR ('Backup failed\r\nSQL Backup error: %d\r\nSQL Server error: %d\r\n\r\nFor more information see the SQL Backup error codes or the Microsoft SQL Server documentation.', 16, 1, @exitCode, @sqlErrorCode)\r\n\tSET NOEXEC ON\r\nEND\r\n"
         );
         assert_eq!(
             p.restore_comment(),

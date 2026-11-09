@@ -1,3 +1,0 @@
-kind = "schema"
-about = "GRANT EXECUTE ON SCHEMA::dbo only in db1"
-finding = "schema-model H1"

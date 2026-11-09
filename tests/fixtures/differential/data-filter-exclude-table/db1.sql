@@ -1,6 +1,0 @@
-CREATE TABLE dbo.Orders (Id int NOT NULL CONSTRAINT PK_Orders PRIMARY KEY, V int)
-GO
-CREATE TABLE dbo.Other (Id int NOT NULL CONSTRAINT PK_Other PRIMARY KEY, V int)
-GO
-INSERT dbo.Orders VALUES (1, 1), (2, 2)
-INSERT dbo.Other VALUES (1, 1)

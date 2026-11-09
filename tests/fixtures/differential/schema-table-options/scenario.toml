@@ -1,3 +1,0 @@
-kind = "schema"
-about = "large value types out of row, explicit object owners and a nonclustered columnstore index on a new table"
-finding = "schema-deploy M7, M9"

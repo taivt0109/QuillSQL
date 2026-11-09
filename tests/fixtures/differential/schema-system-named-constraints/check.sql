@@ -1,1 +1,0 @@
-SELECT type, definition = CAST(NULL AS nvarchar(100)) FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID('dbo.T') UNION ALL SELECT type, definition FROM sys.check_constraints WHERE parent_object_id = OBJECT_ID('dbo.T') UNION ALL SELECT type, definition FROM sys.default_constraints WHERE parent_object_id = OBJECT_ID('dbo.T') ORDER BY 1

@@ -1,5 +1,0 @@
-kind = "data"
-about = "Project: scripts folder as database 1 with WHERE clauses on the table"
-finding = "data H3"
-source = "scripts"
-project = "project.sdc"

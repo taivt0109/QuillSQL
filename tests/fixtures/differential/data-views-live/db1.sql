@@ -1,7 +1,0 @@
-CREATE TABLE dbo.T (Id int NOT NULL CONSTRAINT PK_T PRIMARY KEY, Name nvarchar(50) NOT NULL, Active bit NOT NULL)
-GO
-CREATE VIEW dbo.ActiveT WITH SCHEMABINDING AS SELECT Id, Name FROM dbo.T WHERE Active = 1
-GO
-CREATE UNIQUE CLUSTERED INDEX UX_ActiveT ON dbo.ActiveT (Id)
-GO
-INSERT dbo.T VALUES (1, N'a', 1), (2, N'b', 1), (3, N'c', 0)

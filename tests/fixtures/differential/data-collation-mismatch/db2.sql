@@ -1,3 +1,0 @@
-CREATE TABLE dbo.C (Code varchar(10) COLLATE Latin1_General_CI_AS NOT NULL CONSTRAINT PK_C PRIMARY KEY, V int)
-GO
-INSERT dbo.C VALUES ('A', 1), ('b', 3)

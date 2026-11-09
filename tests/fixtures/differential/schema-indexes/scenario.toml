@@ -1,2 +1,0 @@
-kind = "schema"
-about = "Nonclustered indexes added, dropped, changed columns, included columns, filter and uniqueness"

@@ -1,3 +1,0 @@
-kind = "schema"
-about = "Permissions differ, /options:Default,IgnorePermissions"
-args = ['/options:Default,IgnorePermissions']

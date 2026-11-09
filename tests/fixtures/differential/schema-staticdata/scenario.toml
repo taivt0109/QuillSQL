@@ -1,5 +1,0 @@
-kind = "schema"
-about = "Scripts folder with data for a lookup table, /include:StaticData"
-finding = "sources-cli H4"
-source = "scripts"
-args = ['/include:StaticData']

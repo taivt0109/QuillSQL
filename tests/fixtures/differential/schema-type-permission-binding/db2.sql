@@ -1,7 +1,0 @@
-CREATE ROLE AppRole
-GO
-CREATE TYPE dbo.Phone FROM varchar(20) NULL
-GO
-CREATE TYPE dbo.Code FROM int NULL
-GO
-CREATE RULE dbo.Positive AS @v > 0

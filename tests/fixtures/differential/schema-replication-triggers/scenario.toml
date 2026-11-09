@@ -1,4 +1,0 @@
-kind = "schema"
-about = "/options:Default,IgnoreReplicationTriggers: an MSmerge_ trigger is ignored, a NOT FOR REPLICATION user trigger is not"
-finding = "schema-model M3"
-args = ['/options:Default,IgnoreReplicationTriggers']

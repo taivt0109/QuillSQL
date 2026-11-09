@@ -1,3 +1,0 @@
-CREATE TABLE dbo.OrderLine (Id int NOT NULL CONSTRAINT PK_OL PRIMARY KEY, V int)
-GO
-INSERT dbo.OrderLine VALUES (1, 2)

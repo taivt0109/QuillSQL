@@ -1,1 +1,0 @@
-SELECT * FROM dbo.U ORDER BY Code

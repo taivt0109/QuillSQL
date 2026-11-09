@@ -1,4 +1,0 @@
-kind = "data"
-about = "/exclude:Different leaves different rows alone"
-args = ['/exclude:Different']
-oracles = ["outcome", "check", "diffset", "warnings", "exit"]

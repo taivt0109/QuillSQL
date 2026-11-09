@@ -83,30 +83,3 @@ fn data_makescripts_writes_a_folder_that_reads_back() {
     server.drop(db);
     let _ = std::fs::remove_dir_all(&dir);
 }
-
-#[test]
-fn saved_project_passwords_are_used() {
-    let Some(server) = server() else { return };
-    let (a, b) = ("QD_fixprojects_Pw1", "QD_fixprojects_Pw2");
-    server.create(a, TABLE);
-    server.create(b, "CREATE TABLE dbo.Customer (Id int NOT NULL CONSTRAINT PK_Customer PRIMARY KEY, Name nvarchar(50) NULL);");
-    let saved = quillsql::project_codec::encrypt_password(&server.password);
-    let side = |n: u8, database: &str| {
-        format!(
-            "<DataSource{n} version=\"5\" type=\"LiveDatabaseSource\"><ServerName>{}</ServerName><DatabaseName>{database}</DatabaseName><Username>{}</Username>\
-<SavePassword>True</SavePassword><EncryptConnection>False</EncryptConnection><TrustServerCertificate>True</TrustServerCertificate><Password encrypted=\"1\">{saved}</Password>\
-<AuthenticationType>SqlPassword</AuthenticationType></DataSource{n}>",
-            server.host, server.user
-        )
-    };
-    let scp = format!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Project version=\"5\" type=\"SQLComparisonToolsProject\">{}{}<Options>Default</Options><Direction>0</Direction></Project>", side(1, a), side(2, b));
-    let path = std::env::temp_dir().join(format!("quill-fixprojects-{}.sdc", std::process::id()));
-    std::fs::write(&path, scp).unwrap();
-    // No /password switches: the project's saved passwords sign in.
-    let (code, out) = quill("data", &[format!("/project:{}", path.display())]);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("[dbo].[Customer]"), "{out}");
-    server.drop(a);
-    server.drop(b);
-    let _ = std::fs::remove_file(&path);
-}

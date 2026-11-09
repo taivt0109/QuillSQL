@@ -366,22 +366,20 @@ namespace QuillSql.Compare
             var defs = await OptionDefinitions();
             var project = await Ui.Try(_host.Owner, () => _engine.RequestObject("project_load", new JsonObject { ["path"] = path }));
             if (project == null) return;
-            var imported = path.EndsWith(".scp", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".sdc", StringComparison.OrdinalIgnoreCase);
-            _session = new CompareSession(_engine, _host, project) { OptionDefinitions = defs, FilePath = imported ? null : path };
-            if (!imported) CompareSettings.Load().AddRecent(path);
+            _session = new CompareSession(_engine, _host, project) { OptionDefinitions = defs, FilePath = path };
+            CompareSettings.Load().AddRecent(path);
             _schemaResults = null;
             _dataResults = null;
             ShowEditor();
             Baseline();
-            _dirty = imported;
-            if (imported) _status.Text = "Imported from " + Path.GetFileName(path) + ". Passwords are not imported; save as a QuillSQL project.";
+            _dirty = false;
         }
 
         private async Task OpenDialog()
         {
             var d = new OpenFileDialog
             {
-                Filter = "Compare projects (*.qsc, *.qdc)|*.qsc;*.qdc|SQL Compare and Data Compare projects (*.scp, *.sdc)|*.scp;*.sdc|All files|*.*",
+                Filter = "Compare projects (*.qsc, *.qdc)|*.qsc;*.qdc",
             };
             if (Dialogs.Show(d, _host.Owner) == true) await Open(d.FileName);
         }
@@ -398,23 +396,16 @@ namespace QuillSql.Compare
                 var d = new SaveFileDialog
                 {
                     Filter = _session.IsData
-                        ? "Data compare project (*.qdc)|*.qdc|SQL Data Compare project (*.sdc)|*.sdc"
-                        : "Schema compare project (*.qsc)|*.qsc|SQL Compare project (*.scp)|*.scp",
+                        ? "Data compare project (*.qdc)|*.qdc"
+                        : "Schema compare project (*.qsc)|*.qsc",
                     DefaultExt = ext,
                     FileName = SuggestedName() + "." + ext,
                 };
                 if (Dialogs.Show(d, _host.Owner) != true) return false;
                 path = d.FileName;
             }
-            // SQL Compare and SQL Data Compare projects are written in their format, without passwords.
-            var vendor = path.EndsWith(".scp", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".sdc", StringComparison.OrdinalIgnoreCase);
-            var ok = await Ui.Try(_host.Owner, () => _engine.Request(vendor ? "project_export" : "project_save", new JsonObject { ["path"] = path, ["project"] = _session.Project }));
+            var ok = await Ui.Try(_host.Owner, () => _engine.Request("project_save", new JsonObject { ["path"] = path, ["project"] = _session.Project }));
             if (ok == null) return false;
-            if (vendor)
-            {
-                _status.Text = "Saved " + path + " for SQL Compare. Keep saving as a QuillSQL project to keep every setting.";
-                return true;
-            }
             _session.FilePath = path;
             Baseline();
             CompareSettings.Load().AddRecent(path);

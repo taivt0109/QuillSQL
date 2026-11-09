@@ -1,2 +1,0 @@
-kind = "data"
-about = "Identity column: rows only in db1 are inserted with their identity values, the seed is reseeded"

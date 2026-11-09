@@ -1,3 +1,0 @@
-kind = "schema"
-about = "Column collation differs, /options:Default,IgnoreCollations"
-args = ['/options:Default,IgnoreCollations']

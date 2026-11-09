@@ -51,7 +51,7 @@ fn data_options_aliases_repetition_and_rules() {
 }
 
 #[test]
-fn data_empty2_and_sdc_output_projects() {
+fn data_empty2_and_qdc_output_projects() {
     let a = folder("empty-a", &[(1, "Anh"), (2, "Binh")]);
     let s1 = format!("/scripts1:{}", s(&a));
     let script = a.with_file_name(format!("quill-prjcli-empty-{}.sql", std::process::id()));
@@ -63,20 +63,20 @@ fn data_empty2_and_sdc_output_projects() {
     let (code, _) = quill("data", &[&s1, "/empty2", "/synchronize"]);
     assert_eq!(code, 8);
 
-    // /outputProject writes a SQL Data Compare project for any sides, and it loads again.
+    // /outputProject writes a QuillSQL data project for any sides, and it loads again.
     let b = folder("empty-b", &[(1, "Anh")]);
-    let sdc = a.with_file_name(format!("quill-prjcli-{}.sdc", std::process::id()));
-    let _ = std::fs::remove_file(&sdc);
-    let (code, out) = quill("data", &[&s1, &format!("/scripts2:{}", s(&b)), &format!("/outputProject:{}", s(&sdc))]);
+    let qdc = a.with_file_name(format!("quill-prjcli-{}.qdc", std::process::id()));
+    let _ = std::fs::remove_file(&qdc);
+    let (code, out) = quill("data", &[&s1, &format!("/scripts2:{}", s(&b)), &format!("/outputProject:{}", s(&qdc))]);
     assert_eq!(code, 0, "{out}");
-    let p = quillsql::project::Project::load(&sdc).unwrap();
+    let p = quillsql::project::Project::load(&qdc).unwrap();
     assert!(p.source.is_scripts() && p.target.is_scripts() && p.target.path == s(&b), "{p:?}");
-    let (code, out) = quill("data", &[&s1, &format!("/scripts2:{}", s(&b)), &format!("/outputProject:{}", s(&sdc))]);
+    let (code, out) = quill("data", &[&s1, &format!("/scripts2:{}", s(&b)), &format!("/outputProject:{}", s(&qdc))]);
     // The console wraps at 80 columns, so where the line breaks depends on the project's path.
     let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(code == 73 && flat.contains("already exists. Use /force to overwrite it."), "{code} {out}");
     // The project runs again.
-    let (code, out) = quill("data", &[&format!("/project:{}", s(&sdc))]);
+    let (code, out) = quill("data", &[&format!("/project:{}", s(&qdc))]);
     assert_eq!(code, 0, "{out}");
 }
 

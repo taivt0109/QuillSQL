@@ -577,7 +577,6 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
- "md5",
  "regex",
  "roxmltree",
  "rustls-native-certs",

@@ -1,2 +1,0 @@
-kind = "data"
-about = "No primary key, but a unique index is the comparison key"

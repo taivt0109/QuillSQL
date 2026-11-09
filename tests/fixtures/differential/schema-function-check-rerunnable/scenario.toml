@@ -1,4 +1,0 @@
-kind = "schema"
-about = "A function used by a check constraint and a computed column is dropped and re-created (DropAndCreateInsteadOfAlter)"
-finding = "schema-deploy M3, M1"
-args = ["/options:Default,DropAndCreateInsteadOfAlter,ObjectExistenceChecks"]

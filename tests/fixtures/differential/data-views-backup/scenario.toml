@@ -1,5 +1,0 @@
-kind = "data"
-about = "Indexed view with IncludeIndexedViews, database 1 is a backup"
-finding = "data H1"
-source = "backup"
-args = ['/options:Default,IncludeIndexedViews']

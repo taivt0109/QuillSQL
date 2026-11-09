@@ -1,3 +1,0 @@
-kind = "schema"
-about = "Only a view is included; IncludeDependencies (default) brings the changed table along"
-args = ['/include:View']

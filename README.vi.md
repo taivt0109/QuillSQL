@@ -364,7 +364,6 @@ Windows (nền Mica trên Windows 11); trong SSMS thì theo theme màu của SSM
 
 Project lưu thành file JSON `.qsc` (schema) và `.qdc` (dữ liệu), để trong Git được. Password
 không bao giờ được ghi vào file: "Remember credentials" lưu trong Windows Credential Manager.
-Mở được cả project `.scp` của SQL Compare và `.sdc` của SQL Data Compare (không kèm password).
 
 ### Dòng lệnh
 

@@ -1,3 +1,0 @@
-kind = "schema"
-about = "Procedures differ only in comments and whitespace, /options:Default,IgnoreComments"
-args = ['/options:Default,IgnoreComments']

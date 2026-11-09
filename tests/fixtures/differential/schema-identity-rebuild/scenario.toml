@@ -1,2 +1,0 @@
-kind = "schema"
-about = "A column becomes IDENTITY (table rebuild) while db2 has rows"

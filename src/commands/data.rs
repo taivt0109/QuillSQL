@@ -589,8 +589,7 @@ fn describe(spec: &ConnectionSpec, db: &Database) -> String {
     format!("{}.{}", spec.server, if db.name.is_empty() { &spec.database } else { &db.name })
 }
 
-/// `/outputProject`: the settings of this run as a QuillSQL project (`.qdc`) or a SQL Data
-/// Compare project (any other name).
+/// `/outputProject`: the settings of this run as a QuillSQL project (`.qdc`).
 fn save_project(
     path: &str,
     project: Option<&crate::project::Project>,
@@ -616,11 +615,11 @@ fn save_project(
     p.include = args.all("include").to_vec();
     p.exclude = args.all("exclude").to_vec();
     let failed = |e: String| ArgError::new(CANNOT_CREATE, format!("Error occurred writing project to file '{path}': {e}"));
-    if path.to_ascii_lowercase().ends_with(".qdc") {
-        p.save(Path::new(path)).map_err(failed)
-    } else {
-        std::fs::write(path, crate::project::export_vendor(&p, &console::now().invariant_format())).map_err(|e| failed(e.to_string()))
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".scp") || lower.ends_with(".sdc") {
+        return Err(failed("only QuillSQL projects (.qsc, .qdc) can be written".into()));
     }
+    p.save(Path::new(path)).map_err(failed)
 }
 
 /// `/makescripts`: database 1 as a scripts folder (object scripts and QuillDatabaseInfo.xml)

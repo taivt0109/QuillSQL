@@ -1,3 +1,0 @@
-kind = "schema"
-about = "Extended properties: int vs nvarchar value, on a view column, on a role and on a table-type column"
-finding = "schema-model L3, M6"

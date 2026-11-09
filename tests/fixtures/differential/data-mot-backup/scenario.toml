@@ -1,4 +1,0 @@
-kind = "data"
-about = "Memory-optimized table, database 1 is a backup"
-finding = "data H2"
-source = "backup"

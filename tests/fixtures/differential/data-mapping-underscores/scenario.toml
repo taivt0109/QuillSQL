@@ -1,3 +1,0 @@
-kind = "data"
-about = "Table names differ by underscores, /options:Default,IgnoreUnderscores"
-args = ['/options:Default,IgnoreUnderscores']

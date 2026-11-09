@@ -1,1 +1,0 @@
-SELECT * FROM dbo.T ORDER BY Id

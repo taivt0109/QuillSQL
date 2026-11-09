@@ -106,7 +106,7 @@ fn reads_and_writes_ssdt_projects() {
     assert!(new_file.is_file(), "{out}");
     let text = std::fs::read_to_string(ssdt.join("Db.sqlproj")).unwrap();
     assert!(text.contains(r#"<Build Include="audit\Tables\audit.Log.sql" />"#) && text.contains("Customer.sql"), "{text}");
-    assert!(ssdt.join("QuillDatabaseProperties.xml").is_file());
+    assert!(ssdt.join("QuillDatabaseInfo.xml").is_file());
     let (code, out) = quill(&[&format!("/scripts1:{}", s(&a)), &format!("/scripts2:{}", s(&ssdt))]);
     assert_eq!(code, 63, "{out}");
     for d in [a, ssdt] {

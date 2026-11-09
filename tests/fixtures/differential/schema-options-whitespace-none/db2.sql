@@ -1,2 +1,0 @@
-CREATE PROCEDURE dbo.P AS
-    SELECT    1

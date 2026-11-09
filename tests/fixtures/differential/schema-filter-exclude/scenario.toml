@@ -1,3 +1,0 @@
-kind = "schema"
-about = "/exclude:StoredProcedure and /exclude:Table:Skip"
-args = ['/exclude:StoredProcedure', '/exclude:Table:Skip']

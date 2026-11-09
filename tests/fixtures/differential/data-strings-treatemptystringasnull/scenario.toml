@@ -1,3 +1,0 @@
-kind = "data"
-about = "String edge cases with /options:Default,TreatEmptyStringAsNull"
-args = ['/options:Default,TreatEmptyStringAsNull']

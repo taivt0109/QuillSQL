@@ -1,1 +1,0 @@
-CREATE QUEUE dbo.OldQueue

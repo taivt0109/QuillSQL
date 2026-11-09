@@ -1,5 +1,0 @@
-kind = "data"
-about = "Project SessionSettings = 6: rows only in database 2 are not deployed"
-finding = "data H6, sources-cli H2"
-project = "project.sdc"
-oracles = ["outcome", "check", "diffset", "warnings", "exit"]

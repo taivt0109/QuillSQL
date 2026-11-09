@@ -1,3 +1,0 @@
-kind = "schema"
-about = "Procedures differ only in whitespace with /options:None"
-args = ['/options:None']

@@ -6,7 +6,7 @@ using QuillSql.Compare;
 
 namespace QuillCompare
 {
-    /// <summary>QuillCompare.exe [project.qsc | project.qdc | project.scp | project.sdc]</summary>
+    /// <summary>QuillCompare.exe [project.qsc | project.qdc]</summary>
     public static class Program
     {
         [STAThread]
