@@ -26,7 +26,7 @@ runs on the command line and in CI.
 | | |
 |---|---|
 | **Format** | One shortcut lays out a script or a selection: lists, joins, `CASE`, `AND`/`OR`, casing, semicolons. Configurable, and it refuses to change anything it cannot verify. |
-| **IntelliSense** | Tables, views, columns, procedures, schemas, CTEs and variables as you type, from the connected database. |
+| **IntelliSense** | Tables, views, columns, procedures, schemas, CTEs and variables as you type, from the connected database, with what you pick most often first. |
 | **Writes code for you** | Join conditions from foreign keys, `EXEC` with every parameter, `INSERT ... VALUES` and `UPDATE ... SET` with every column, `*` expanded to columns. |
 | **Snippets** | About 70 built in (`ssf` + Tab → `SELECT * FROM`), your own in JSON, and "surround with" for a selection. |
 | **Refactoring** | Qualify object names, add or remove `AS`, smart rename, encapsulate as a stored procedure, inline an `EXEC`. Each is one Undo step. |
@@ -38,33 +38,6 @@ runs on the command line and in CI.
 | **Your way** | An Options window for every behavior, keyboard shortcuts for every command, English or Vietnamese. |
 | **Schema and Data Compare** | Compare two databases' schema or data, see every difference, and deploy a script that makes them match. In SSMS, as its own app, or in CI from the command line. |
 | **Command line** | `quill` formats folders of `.sql` files and runs the analysis in CI. |
-
-## What's new
-
-- **0.4.17**: the suggestion list learns: what you pick often and lately comes first among
-  equally good matches (`s` → `SET` if you use it more than `SELECT`). Typing the whole word still
-  puts that word first. Options > Suggestions turns it off or forgets the picks.
-- **0.4.16**: Compare: with *Ignore identity property*, *Ignore identity seed and increment* or
-  *Ignore nullability*, the side-by-side SQL still shows each column as it is, but those parts no
-  longer mark the line as different.
-- **0.4.15**: Compare: the side-by-side SQL and the reports leave out what the options ignore
-  (`WITH NOCHECK`, fill factor, filegroups, indexes, triggers, statistics...), and every option
-  has a test. A procedure picked where a statement starts, without `EXEC`, brings its parameters.
-- **0.4.14**: the status bar says when a window's suggestions are being read and when they are
-  ready; typing before then shows "Reading the database's objects..." at the top of the list.
-- **0.4.13**: SSMS 22 shows only QuillSQL's list (its own "Auto list members" is turned off in
-  `settings.json`); three letters inside a built-in function's name select it (`add` → `DATEADD`).
-- **0.4.12**: Compare shows its progress for each side; the update window is sharp on scaled
-  screens.
-- **0.4.11**: procedures offered without `EXEC` where a statement starts (`sp_who2`), card-style
-  help for built-in functions and system procedures, suggestions that survive engine errors.
-- **0.4.10**: about 190 built-in functions with their help, system procedures read from the
-  server, `MS_Description` beside the list, reopening the windows of an SSMS that crashed,
-  `INSERT INTO` + Tab writing the whole statement, SSMS 22 fixes.
-- **0.4.7 – 0.4.9**: keywords, functions and data types written in upper case as you type; the
-  object card beside the suggestion list.
-
-All versions: [Releases](https://github.com/taivt0109/QuillSQL/releases).
 
 ## Install
 
@@ -187,7 +160,8 @@ As you type, a list offers:
 - after `EXEC name a, `, the parameters not given yet.
 
 The first item is selected only when what you typed matches it for sure: the whole word, its start,
-or the initials of its parts (`cid` for CustomerId). Otherwise nothing is selected and Enter and
+or the initials of its parts (`cid` for CustomerId); for a built-in function, three letters inside its
+name too (`add` for DATEADD). Otherwise nothing is selected and Enter and
 Tab keep their usual meaning. The item picked for some letters is selected first the next time.
 
 The list learns from what you pick: among matches equally good, the suggestions picked often and
@@ -210,7 +184,9 @@ Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
 background the first time a database is used and follows `USE`. When tables, columns or other
 objects change, by you or anyone else, it reloads by itself: a light check runs at most once a
 minute while you type, and at once on Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D)
-reloads everything; the status bar says when it is done, with how many objects it read.
+reloads everything. The status bar says when a window's objects are being read and when they are
+ready ("suggestions ready for ...: N objects in X s"), or why they could not be read; typed before
+then, the list shows "Reading the database's objects..." at the top.
 
 The list also writes code:
 
@@ -242,7 +218,7 @@ SQL Server keeps no catalog of its built-in functions, so they come with QuillSQ
 `%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int",
 "what": "..." }]`). The system procedures and functions (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`)
 and their parameters are read from the server, and are offered after `EXEC` and where a statement starts (a procedure may start a batch
-without `EXEC`). The descriptions
+without `EXEC`); there too, picking one writes all its parameters, as after `EXEC`. The descriptions
 people gave tables, columns, procedures and parameters (`MS_Description`) show beside the list.
 
 If SSMS closes without shutting down (a crash, a killed process), the next start offers to reopen
@@ -463,7 +439,11 @@ choose).
 The window has four tabs: **Data sources**, **Table mapping** (Data
 Compare: **Tables & views**, with keys, WHERE filters and columns to leave out), **Owner mapping**
 and **Options** (every compare option, with QuillSQL defaults, My defaults and
-Save as my defaults). Results show what differs; for schema, the SQL of both sides line by line.
+Save as my defaults). Results show what differs; for schema, the SQL of both sides line by line. What the options
+ignore is left out of that SQL and of the reports (`WITH NOCHECK`, fill factor, filegroups,
+indexes, triggers, statistics...), so it never shows as a change; with *Ignore identity property*,
+*Ignore identity seed and increment* or *Ignore nullability*, each column is still shown as it is,
+but its `IDENTITY` or `NULL` / `NOT NULL` does not mark the line as different.
 **Deploy** shows the script and its warnings (data loss, truncation, NOT NULL...) and runs it in
 one transaction, or opens it in a query window. QuillSQL Compare follows the Windows light or dark
 mode and accent color (Mica on Windows 11); in SSMS it uses the SSMS color theme.

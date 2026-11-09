@@ -29,7 +29,7 @@ QuillSQL miễn phí, mã nguồn mở. Engine viết bằng Rust, chạy nhanh,
 | | |
 |---|---|
 | **Format** | Một phím tắt sắp xếp lại cả script hoặc đoạn đang chọn: danh sách cột, JOIN, `CASE`, `AND`/`OR`, chữ hoa/thường, dấu chấm phẩy. Tùy chỉnh được. Phần nào không kiểm chứng được là đúng thì không thay đổi. |
-| **IntelliSense** | Gợi ý bảng, view, cột, procedure, schema, CTE và biến ngay khi gõ, lấy từ database đang kết nối. |
+| **IntelliSense** | Gợi ý bảng, view, cột, procedure, schema, CTE và biến ngay khi gõ, lấy từ database đang kết nối; mục bạn hay chọn được đưa lên đầu. |
 | **Viết code giúp bạn** | Sinh điều kiện JOIN từ khóa ngoại, `EXEC` kèm đủ tham số, `INSERT ... VALUES` và `UPDATE ... SET` kèm đủ cột, mở `*` thành danh sách cột. |
 | **Snippet** | Khoảng 70 snippet có sẵn (`ssf` + Tab → `SELECT * FROM`), thêm snippet riêng bằng JSON, bọc đoạn đang chọn bằng snippet. |
 | **Refactor** | Thêm schema/alias cho tên, thêm hoặc bỏ `AS`, đổi tên thông minh, gói thành stored procedure, inline một lệnh `EXEC`. Mỗi thao tác hoàn tác được bằng một lần Undo. |
@@ -41,33 +41,6 @@ QuillSQL miễn phí, mã nguồn mở. Engine viết bằng Rust, chạy nhanh,
 | **So sánh schema và dữ liệu** | So sánh schema hoặc dữ liệu của hai database, xem từng khác biệt, rồi chạy script làm chúng giống nhau. Có trong SSMS, dạng app riêng, và trong CI qua command line. |
 | **Theo ý bạn** | Cửa sổ Options cho mọi hành vi, phím tắt cho mọi lệnh, giao diện tiếng Anh hoặc tiếng Việt. |
 | **Dòng lệnh** | `quill` format cả thư mục file `.sql` và chạy phân tích code trong CI. |
-
-## Có gì mới
-
-- **0.4.17**: danh sách gợi ý học theo thói quen. Trong các gợi ý khớp như nhau, mục bạn chọn
-  nhiều và gần đây được đưa lên đầu (gõ `s` ra `SET` nếu bạn dùng nó nhiều hơn `SELECT`). Gõ đủ cả
-  từ thì từ đó vẫn đứng đầu. Có thể tắt hoặc xoá lịch sử trong Options > Suggestions.
-- **0.4.16**: Compare: khi bật *Ignore identity property*, *Ignore identity seed and increment*
-  hoặc *Ignore nullability*, SQL hai bên vẫn hiện đúng định nghĩa cột, nhưng các phần đó không còn
-  làm dòng bị đánh dấu là khác.
-- **0.4.15**: Compare: SQL hai bên và báo cáo bỏ qua những gì option đã bỏ qua (`WITH NOCHECK`,
-  fill factor, filegroup, index, trigger, statistics...), và mọi option đều có test. Chọn procedure
-  ở đầu câu lệnh mà không có `EXEC` cũng điền đủ tham số.
-- **0.4.14**: thanh trạng thái báo khi đang đọc và khi đã đọc xong gợi ý của cửa sổ; gõ trước lúc
-  đó thì đầu danh sách hiện "Reading the database's objects...".
-- **0.4.13**: SSMS 22 chỉ hiện danh sách của QuillSQL ("Auto list members" của SSMS được tắt trong
-  `settings.json`); gõ ba chữ nằm trong tên hàm có sẵn là chọn được nó (`add` → `DATEADD`).
-- **0.4.12**: Compare hiện tiến độ của từng bên; cửa sổ cập nhật hiển thị sắc nét trên màn hình
-  có scale.
-- **0.4.11**: gợi ý procedure không cần `EXEC` ở đầu câu lệnh (`sp_who2`), thẻ trợ giúp cho hàm
-  có sẵn và system procedure, gợi ý không mất khi engine gặp lỗi.
-- **0.4.10**: khoảng 190 hàm có sẵn kèm trợ giúp, system procedure đọc từ server, `MS_Description`
-  cạnh danh sách, mở lại các cửa sổ khi SSMS bị tắt đột ngột, `INSERT INTO` + Tab viết cả câu lệnh,
-  sửa lỗi trên SSMS 22.
-- **0.4.7 – 0.4.9**: keyword, hàm và kiểu dữ liệu tự viết hoa khi gõ; thẻ object cạnh danh sách
-  gợi ý.
-
-Mọi phiên bản: [Releases](https://github.com/taivt0109/QuillSQL/releases).
 
 ## Cài đặt
 
@@ -185,7 +158,7 @@ Khi gõ, danh sách gợi ý hiện ra:
 - trong DDL và phân quyền: những gì theo sau `ALTER TABLE t`, cột của bảng sau `ALTER COLUMN`, trong `CREATE INDEX ... ON t (` và `INCLUDE (`, tùy chọn cột trong `CREATE TABLE`, object sau `GRANT ... ON`; `WHEN MATCHED THEN` và các hành động trong MERGE;
 - sau `EXEC name a, `: các tham số chưa truyền.
 
-Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
+Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId); với hàm có sẵn, ba chữ nằm trong tên cũng tính (`add` cho DATEADD). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
 
 Danh sách học theo những gì bạn chọn. Trong các gợi ý khớp như nhau, mục chọn nhiều và gần đây
 đứng trước, nên gõ `s` sẽ ra `SET` trước `SELECT` nếu bạn dùng `SET` nhiều hơn. Gõ đủ cả từ thì từ
@@ -198,7 +171,7 @@ Từ khóa gõ bằng chữ thường được tự viết hoa khi gõ dấu cá
 
 Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách. Bên cạnh danh sách có ô hiện card của bảng, view, procedure hoặc function đang chọn, giống như khi rê chuột lên tên: số dòng, dung lượng, cột, index, partition và script. Phím nào dùng để chèn (Tab, Enter, Space, `.`, `,`, `(`) do bạn chọn trong Options.
 
-Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D) nạp lại toàn bộ; thanh trạng thái báo khi nào xong và đã đọc bao nhiêu object.
+Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** (Ctrl+Shift+D) nạp lại toàn bộ. Thanh trạng thái báo khi đang đọc object của cửa sổ và khi đã xong ("suggestions ready for ...: N objects in X s"), hoặc lý do không đọc được; gõ trước lúc đó thì đầu danh sách hiện "Reading the database's objects...".
 
 Danh sách còn viết code giúp bạn:
 
@@ -215,7 +188,7 @@ Danh sách còn viết code giúp bạn:
 
 Khi gõ đối số của hàm hoặc procedure, một tooltip phía trên dòng hiện các tham số, tham số hiện tại in đậm (Esc để đóng).
 
-Bên cạnh danh sách gợi ý, hàm có sẵn hiện tham số, kiểu trả về và hàm đó làm gì. SQL Server không có danh mục nào chứa các hàm có sẵn, nên chúng đi kèm QuillSQL (`src/data/functions.json`, khoảng 190 hàm); thêm hoặc sửa trong `%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int", "what": "..." }]`). Procedure và hàm hệ thống (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`) cùng tham số được đọc từ server và gợi ý sau `EXEC` cũng như ở đầu câu lệnh (procedure có thể mở đầu batch mà không cần `EXEC`). Mô tả mà người dùng đặt cho bảng, cột, procedure và tham số (`MS_Description`) hiện bên cạnh danh sách.
+Bên cạnh danh sách gợi ý, hàm có sẵn hiện tham số, kiểu trả về và hàm đó làm gì. SQL Server không có danh mục nào chứa các hàm có sẵn, nên chúng đi kèm QuillSQL (`src/data/functions.json`, khoảng 190 hàm); thêm hoặc sửa trong `%LOCALAPPDATA%\QuillSQL\functions.json` (`[{ "name": "MYFUNC", "params": ["a"], "returns": "int", "what": "..." }]`). Procedure và hàm hệ thống (`sp_who2`, `sp_helptext`, `xp_*`, `fn_*`) cùng tham số được đọc từ server và gợi ý sau `EXEC` cũng như ở đầu câu lệnh (procedure có thể mở đầu batch mà không cần `EXEC`); ở đó chọn procedure cũng điền đủ tham số như sau `EXEC`. Mô tả mà người dùng đặt cho bảng, cột, procedure và tham số (`MS_Description`) hiện bên cạnh danh sách.
 
 Nếu SSMS bị tắt ngang (crash, bị kill), lần mở sau sẽ hỏi có mở lại các cửa sổ query không, kèm nội dung và kết nối (không lưu mật khẩu). Tắt trong Options.
 
@@ -392,6 +365,10 @@ Cửa sổ có 4 tab: **Data sources**, **Table mapping** (Data Compare là
 **Tables & views**, có khóa, bộ lọc WHERE và cột bỏ qua), **Owner mapping** và **Options** (đủ mọi
 option so sánh, có QuillSQL defaults, My defaults và Save as my defaults).
 Kết quả cho thấy những gì khác nhau; với schema, SQL của hai bên đặt cạnh nhau theo từng dòng.
+Những gì option đã bỏ qua không có trong SQL đó và trong báo cáo (`WITH NOCHECK`, fill factor,
+filegroup, index, trigger, statistics...), nên không bao giờ hiện thành khác biệt; với *Ignore
+identity property*, *Ignore identity seed and increment* hoặc *Ignore nullability*, cột vẫn hiện
+đúng định nghĩa nhưng `IDENTITY` hay `NULL` / `NOT NULL` không làm dòng bị đánh dấu là khác.
 **Deploy** cho xem script và cảnh báo (mất dữ liệu, cắt chuỗi, NOT NULL...) rồi chạy trong một
 transaction, hoặc mở script trong cửa sổ query. QuillSQL Compare theo chế độ sáng/tối và màu nhấn của
 Windows (nền Mica trên Windows 11); trong SSMS thì theo theme màu của SSMS.
@@ -400,6 +377,11 @@ Trong lúc so sánh, một bảng tiến trình hiện nguồn và đích: serve
 từng bên, bước đang chạy (kết nối, từng truy vấn catalog kèm phần trăm, dựng model), rồi bước ghép
 cặp và so sánh, cùng thời gian đã chạy. **Stop** để dừng; nếu một bên không đọc được, bảng giữ
 lại lỗi của bên đó.
+
+Trong lúc so sánh, một bảng tiến độ hiện nguồn và đích, bên trên bên dưới: server và database
+(hoặc file) của mỗi bên, bước đang làm (kết nối, từng truy vấn catalog kèm phần trăm, dựng mô
+hình), rồi ghép cặp và so sánh, kèm thời gian đã chạy. **Stop** để huỷ; nếu một bên không đọc được,
+bảng vẫn giữ lỗi đó cho bạn xem.
 
 Project lưu thành file JSON `.qsc` (schema) và `.qdc` (dữ liệu), để trong Git được. Password
 không bao giờ được ghi vào file: "Remember credentials" lưu trong Windows Credential Manager.
