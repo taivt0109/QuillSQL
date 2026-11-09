@@ -235,8 +235,9 @@ FROM sys.objects WHERE is_ms_shipped = 0;";
                         }
                         return true;
                     }
-                    // After a failure, wait before trying the server again.
-                    if (!(state.StartsWith("failed:") && DateTime.UtcNow.Ticks - long.Parse(state.Substring(7)) > TimeSpan.FromSeconds(30).Ticks))
+                    // After a failure, wait before trying the server again; a login that may prompt to sign
+                    // in waits for Refresh Suggestions.
+                    if (target.Interactive || !(state.StartsWith("failed:") && DateTime.UtcNow.Ticks - long.Parse(state.Substring(7)) > TimeSpan.FromSeconds(30).Ticks))
                     {
                         return false;
                     }

@@ -22,6 +22,12 @@ namespace QuillSql.Vsix
         /// </summary>
         public Func<string> AccessToken { get; set; }
 
+        /// <summary>
+        /// The login may need someone to sign in (Microsoft Entra MFA): after a failure, do not try
+        /// again on its own, so a sign-in prompt never comes back while typing.
+        /// </summary>
+        public bool Interactive { get; set; }
+
         /// <summary>The same server and login, in another database of the server.</summary>
         public ConnectionTarget ForDatabase(string database)
         {
@@ -32,7 +38,7 @@ namespace QuillSql.Vsix
                 parts[1] = database;
             }
             var server = Description?.Split(new[] { " / " }, StringSplitOptions.None)[0];
-            return new ConnectionTarget { Key = string.Join("|", parts), ConnectionString = builder.ConnectionString, Description = server + " / " + database, AccessToken = AccessToken };
+            return new ConnectionTarget { Key = string.Join("|", parts), ConnectionString = builder.ConnectionString, Description = server + " / " + database, AccessToken = AccessToken, Interactive = Interactive };
         }
 
         /// <summary>False for logins QuillSQL cannot open a connection with.</summary>
@@ -201,6 +207,36 @@ namespace QuillSql.Vsix
                             AccessToken = () => (string)getToken.Invoke(token, null),
                         };
                     }
+                    // No token kept for the window (Microsoft Entra MFA, Integrated, Default...): open the
+                    // connection the way SSMS does, with the same method and user. SSMS's SqlClient is
+                    // the one loaded here, so the sign-in it already made is reused without a prompt.
+                    var method = EntraMethod(authentication);
+                    if (method != null)
+                    {
+                        builder.Authentication = method.Value;
+                        if (!string.IsNullOrEmpty(user))
+                        {
+                            builder.UserID = user;
+                        }
+                        var password = Get(info, "Password") as string;
+                        if ((method == SqlAuthenticationMethod.ActiveDirectoryPassword || method == SqlAuthenticationMethod.ActiveDirectoryServicePrincipal
+                            || method == SqlAuthenticationMethod.ActiveDirectoryManagedIdentity) && !string.IsNullOrEmpty(password))
+                        {
+                            builder.Password = password;
+                        }
+                        if (log && !_loggedEntra)
+                        {
+                            _loggedEntra = true;
+                            Log.Write("Microsoft Entra login (authentication type " + authentication + "): connecting with " + method.Value + " as " + (user ?? "(default)"));
+                        }
+                        return new ConnectionTarget
+                        {
+                            Key = string.Join("|", server, database ?? "", authentication, user ?? ""),
+                            ConnectionString = builder.ConnectionString,
+                            Description = server + " / " + (database ?? "(default)"),
+                            Interactive = method == SqlAuthenticationMethod.ActiveDirectoryInteractive,
+                        };
+                    }
                     if (log)
                     {
                         Log.Write("authentication type " + authentication + " is not supported for metadata; suggestions use the script only");
@@ -220,6 +256,23 @@ namespace QuillSql.Vsix
                 ConnectionString = builder.ConnectionString,
                 Description = server + " / " + (database ?? "(default)"),
             };
+        }
+
+        /// <summary>The SqlClient method SSMS uses for its authentication type; null when there is none to use.</summary>
+        private static SqlAuthenticationMethod? EntraMethod(int authentication)
+        {
+            switch (authentication)
+            {
+                case 2: return SqlAuthenticationMethod.ActiveDirectoryPassword;
+                case 3: return SqlAuthenticationMethod.ActiveDirectoryIntegrated;
+                case 4:
+                case 5: return SqlAuthenticationMethod.ActiveDirectoryInteractive;
+                case 7: return SqlAuthenticationMethod.ActiveDirectoryManagedIdentity;
+                case 8: return SqlAuthenticationMethod.ActiveDirectoryServicePrincipal;
+                case 9: return SqlAuthenticationMethod.ActiveDirectoryDefault;
+                // 6 is device code: every connection would wait for a code typed in a browser.
+                default: return null;
+            }
         }
 
         /// <summary>The first element of a sequence, or the value itself when it is not a sequence.</summary>
