@@ -159,6 +159,8 @@ Khi gõ, danh sách gợi ý hiện ra:
 
 Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
 
+Từ khóa gõ bằng chữ thường được tự viết hoa khi gõ dấu cách, xuống dòng hoặc `(`, `)`, `,`, `;` sau nó (`select` thành `SELECT`); chữ trong chuỗi, comment, ngoặc vuông và sau dấu chấm giữ nguyên. Tắt trong Options > Typing.
+
 Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách. Bên cạnh danh sách có ô hiện định nghĩa của bảng, view hoặc procedure đang chọn. Phím nào dùng để chèn (Tab, Enter, Space, `.`, `,`, `(`) do bạn chọn trong Options.
 
 Metadata được nạp ngầm ở lần đầu dùng một database và tự đổi theo `USE`. Khi bảng, cột hay object khác thay đổi (do bạn hay người khác), metadata tự nạp lại: một lần kiểm tra rất nhẹ chạy tối đa mỗi phút một lần khi bạn đang gõ, và ngay lập tức khi bấm Ctrl+Space. **Tools > QuillSQL > Refresh T-SQL Suggestions** nạp lại toàn bộ.

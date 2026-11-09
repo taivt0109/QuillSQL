@@ -120,3 +120,21 @@ fn finds_the_object_at_the_caret() {
     assert_eq!(at("exec usp_G|et"), Some("usp_Get".into()));
     assert_eq!(at("sel|ect 1"), None);
 }
+
+#[test]
+fn a_keyword_typed_in_lower_case_is_found_before_the_caret() {
+    let at = |s: &str| quillsql::tools::keyword_before(s, s.encode_utf16().count());
+    assert_eq!(at("select"), Some((0, 6, "SELECT".to_string())));
+    assert_eq!(at("SELECT * from dbo.t whEre"), Some((20, 25, "WHERE".to_string())));
+    assert_eq!(at("select * from t where n = 1 and"), Some((28, 31, "AND".to_string())));
+    // Already upper case, not a keyword, after a dot, in a string or a comment: nothing.
+    assert_eq!(at("SELECT"), None);
+    assert_eq!(at("select customer"), None);
+    assert_eq!(at("select t.order"), None);
+    assert_eq!(at("select 'from"), None);
+    assert_eq!(at("-- from"), None);
+    assert_eq!(at("/* select from"), None);
+    assert_eq!(at("select [from"), None);
+    // UTF-16 positions after non-ASCII text.
+    assert_eq!(at("select N'tiếng việt' from"), Some((21, 25, "FROM".to_string())));
+}

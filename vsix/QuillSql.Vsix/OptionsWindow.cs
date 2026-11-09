@@ -301,6 +301,7 @@ namespace QuillSql.Vsix
                 Check("Typing a closing character that was inserted for you moves over it", s.OvertypeClosing, v => s.OvertypeClosing = v),
                 Note("Nothing is closed inside a comment or an open string, or when SSMS has already closed it."),
                 Heading("Editor"),
+                Check("Write keywords in upper case as you type (select becomes SELECT after the space)", s.UppercaseKeywords, v => s.UppercaseKeywords = v),
                 Check("Show a card with columns, indexes, partitions and script when the mouse rests on an object", s.ObjectCards, v => s.ObjectCards = v),
                 Check("Highlight the other uses of the name under the caret", s.HighlightMatches, v => s.HighlightMatches = v));
         }

@@ -97,6 +97,22 @@ namespace QuillSql.Vsix
     }
 
     [DataContract]
+    internal sealed class KeywordCaseReply
+    {
+        [DataMember(Name = "error")] public string Error { get; set; }
+        [DataMember(Name = "result")] public KeywordCaseResult Result { get; set; }
+    }
+
+    /// <summary>The keyword before the caret, to write in upper case.</summary>
+    [DataContract]
+    internal sealed class KeywordCaseResult
+    {
+        [DataMember(Name = "start")] public int Start { get; set; }
+        [DataMember(Name = "end")] public int End { get; set; }
+        [DataMember(Name = "text")] public string Text { get; set; }
+    }
+
+    [DataContract]
     internal sealed class ErrorOnlyReply
     {
         [DataMember(Name = "error")] public string Error { get; set; }

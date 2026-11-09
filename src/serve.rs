@@ -248,6 +248,10 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
             let (text, count) = analysis::apply_fixes(str_field(request, "text")?, state.schemas.get(key), codes.as_deref());
             Ok(json!({ "text": text, "count": count }))
         }
+        "keyword_case" => {
+            let found = tools::keyword_before(str_field(request, "text")?, usize_field(request, "caret")?);
+            Ok(found.map_or(Value::Null, |(start, end, text)| json!({ "start": start, "end": end, "text": text })))
+        }
         "signature" => {
             let text = str_field(request, "text")?;
             let caret = usize_field(request, "caret")?;

@@ -233,7 +233,31 @@ namespace QuillSql.Vsix
                 Log.Error("auto-close", ex);
             }
 
+            // A keyword typed in lower case is written in upper case once a space, a line break or a
+            // punctuation mark ends it.
+            string keywordText = null;
+            var keywordEnd = -1;
+            try
+            {
+                if (Settings.Current.UppercaseKeywords && std2k
+                    && ((typed != ' ' && " (),;".IndexOf(typed) >= 0) || command == VSConstants.VSStd2KCmdID.RETURN || command == VSConstants.VSStd2KCmdID.TAB)
+                    && TryGetText(out var before, out var at) && at > 1 && char.IsLetter(before[at - 1]) && char.IsLower(before[at - 1]))
+                {
+                    keywordText = before;
+                    keywordEnd = at;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("keyword case", ex);
+            }
+
             var result = _next.Exec(ref group, id, options, input, output);
+
+            if (keywordText != null)
+            {
+                UppercaseKeyword(keywordText, keywordEnd);
+            }
 
             try
             {
@@ -640,6 +664,51 @@ namespace QuillSql.Vsix
                 editor?.Select(end, end);
                 UpdateSignature();
             }
+        }
+
+        /// <summary>Writes the keyword that ends at `end` of `text` in upper case, if it still reads the same.</summary>
+        private void UppercaseKeyword(string text, int end)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var sent = text.Substring(0, end);
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                try
+                {
+                    await TaskScheduler.Default;
+                    var reply = EngineProcess.Shared.Request("keyword_case", "\"text\":" + Json.Str(sent) + ",\"caret\":" + end);
+                    var found = reply == null ? null : Json.Parse<KeywordCaseReply>(reply)?.Result;
+                    if (found == null)
+                    {
+                        return;
+                    }
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    // Typed on or edited meanwhile: change it only where the same word still stands. Case
+                    // is ignored: the keyword before it may just have been written in upper case.
+                    if (!TryGetText(out var now, out _) || now.Length < found.End
+                        || string.Compare(now, found.Start, sent, found.Start, found.End - found.Start, StringComparison.OrdinalIgnoreCase) != 0
+                        || string.Compare(now, 0, sent, 0, found.Start, StringComparison.OrdinalIgnoreCase) != 0)
+                    {
+                        return;
+                    }
+                    _view.GetBuffer(out var lines);
+                    lines.GetLineIndexOfPosition(found.Start, out var startLine, out var startColumn);
+                    lines.GetLineIndexOfPosition(found.End, out var endLine, out var endColumn);
+                    var buffer = Marshal.StringToCoTaskMemUni(found.Text);
+                    try
+                    {
+                        lines.ReplaceLines(startLine, startColumn, endLine, endColumn, buffer, found.Text.Length, null);
+                    }
+                    finally
+                    {
+                        Marshal.FreeCoTaskMem(buffer);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("keyword case", ex);
+                }
+            }).FileAndForget("QuillSQL/KeywordCase");
         }
 
         private bool LineStartsWithExec()

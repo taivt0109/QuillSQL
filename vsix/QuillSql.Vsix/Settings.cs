@@ -46,6 +46,8 @@ namespace QuillSql.Vsix
         /// <summary>Own aliases, one "Table = alias" a line.</summary>
         [DataMember(Name = "ownAliases")] public string OwnAliases { get; set; }
         [DataMember(Name = "parameterHints")] public bool ParameterHints { get; set; }
+        /// <summary>A keyword typed in lower case (select) becomes upper case after the space that ends it.</summary>
+        [DataMember(Name = "uppercaseKeywords")] public bool UppercaseKeywords { get; set; }
 
         // Typing
         [DataMember(Name = "closeSingleQuote")] public bool CloseSingleQuote { get; set; }
@@ -96,6 +98,7 @@ namespace QuillSql.Vsix
             IgnoredPrefixes = "tbl, vw, tb_, t_, v_";
             OwnAliases = "";
             ParameterHints = true;
+            UppercaseKeywords = true;
             CloseSingleQuote = true;
             CloseSquareBracket = true;
             CloseParenthesis = false;

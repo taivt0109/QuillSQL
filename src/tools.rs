@@ -63,6 +63,31 @@ pub fn casing(text: &str, upper: bool) -> Result<String, String> {
     rewrite(text, |tokens| apply_casing(tokens, &Casing { keywords: Some(case), functions: Some(case), data_types: Some(case) }))
 }
 
+/// The reserved word that ends at `caret` (UTF-16), as (start, end, upper case) when it is not
+/// written in upper case yet: what typing a space or a line break after it turns it into. Words in
+/// strings and comments, after a dot (`t.order`) and in brackets are left alone.
+pub fn keyword_before(text: &str, caret: usize) -> Option<(usize, usize, String)> {
+    let end = utf16_to_byte(text, caret);
+    let (tokens, _) = crate::lexer::lex_partial(&text[..end]);
+    // An unclosed string or comment stops the lexer early: the word is inside it.
+    if tokens.iter().map(|t| t.ws.len() + t.text.len()).sum::<usize>() != end {
+        return None;
+    }
+    let last = tokens.last()?;
+    if last.kind != Kind::Word || !last.text.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
+        return None;
+    }
+    let upper = last.text.to_ascii_uppercase();
+    if upper == last.text || !crate::keywords::is_reserved(&upper) {
+        return None;
+    }
+    if tokens.len() > 1 && tokens[tokens.len() - 2].kind == Kind::Dot && last.ws.is_empty() {
+        return None;
+    }
+    let start = end - last.text.len();
+    Some((byte_to_utf16(text, start), caret, upper))
+}
+
 /// Removes every comment, keeping the line breaks around line comments.
 pub fn remove_comments(text: &str) -> Result<String, String> {
     rewrite(text, |tokens| {

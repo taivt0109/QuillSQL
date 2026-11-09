@@ -160,6 +160,10 @@ The first item is selected only when what you typed matches it for sure: the who
 or the initials of its parts (`cid` for CustomerId). Otherwise nothing is selected and Enter and
 Tab keep their usual meaning. The item picked for some letters is selected first the next time.
 
+A keyword typed in lower case is written in upper case once a space, a line break or `(`, `)`,
+`,`, `;` ends it (`select` becomes `SELECT`); words in strings, comments, brackets and after a dot
+are left alone. Options > Typing turns it off.
+
 Up/Down moves, Enter or Tab inserts, Esc closes, Ctrl+Space opens the list. Next to the list, a
 box shows the definition of the selected table, view or procedure. Which keys insert (Tab, Enter,
 Space, `.`, `,`, `(`) is up to you in Options. Metadata loads in the
