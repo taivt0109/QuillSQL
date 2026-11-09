@@ -82,6 +82,46 @@ struct State {
     next: u64,
     schema: HashMap<u64, SchemaSession>,
     data: HashMap<u64, DataSession>,
+    /// Sides read lately, as SQL Compare keeps its registrations: the mapping tabs and rename
+    /// detection reuse them, Refresh and a comparison read again.
+    sides: Vec<(String, Database, Vec<String>)>,
+}
+
+/// Progress lines of a request; both sides may report at once.
+type Progress<'a> = dyn Fn(&str) + Sync + 'a;
+
+/// A side and what its reader warned about.
+type Loaded = (Database, Vec<String>);
+
+/// Reads the project's two sides at the same time, as SQL Compare does; the target is None for
+/// an empty database. With `fresh` both are read again, else a side read lately is reused.
+fn load_sides(state: &mut State, project: &Project, decrypt: bool, fresh: bool, progress: &Progress) -> Result<(Loaded, Option<Loaded>), String> {
+    let key = |s: &SourceSpec| format!("{decrypt}|{}", serde_json::to_string(s).unwrap_or_default());
+    let cached = |s: &SourceSpec| (!fresh).then(|| state.sides.iter().find(|c| c.0 == key(s)).map(|c| (c.1.clone(), c.2.clone()))).flatten();
+    let (c1, c2) = (cached(&project.source), if project.target.is_empty_database() { None } else { cached(&project.target) });
+    let (r1, r2) = std::thread::scope(|scope| {
+        let t2 = (c2.is_none() && !project.target.is_empty_database()).then(|| scope.spawn(|| load_side_with_warnings(&project.target, 2, decrypt, progress)));
+        let r1 = match c1 {
+            Some(c) => Ok(c),
+            None => load_side_with_warnings(&project.source, 1, decrypt, progress),
+        };
+        let r2 = match t2 {
+            Some(t) => t.join().unwrap_or_else(|_| Err("reading the target failed".into())).map(Some),
+            None => Ok(c2),
+        };
+        (r1, r2)
+    });
+    let (r1, r2) = (r1?, r2?);
+    for (side, loaded) in [(&project.source, Some(&r1)), (&project.target, r2.as_ref())] {
+        let Some((db, warnings)) = loaded else { continue };
+        let k = key(side);
+        state.sides.retain(|c| c.0 != k);
+        state.sides.push((k, db.clone(), warnings.clone()));
+    }
+    // Two pairs at most, like SQL Compare's two registrations per side.
+    let excess = state.sides.len().saturating_sub(4);
+    state.sides.drain(..excess);
+    Ok((r1, r2))
 }
 
 pub fn run() -> Result<(), String> {
@@ -140,7 +180,7 @@ fn backup_files(side: &SourceSpec) -> (Vec<std::path::PathBuf>, Vec<String>) {
     (files, passwords)
 }
 
-fn open_backup(side: &SourceSpec, progress: &dyn Fn(&str)) -> Result<crate::sources::backup::Backup, String> {
+fn open_backup(side: &SourceSpec, progress: &Progress) -> Result<crate::sources::backup::Backup, String> {
     progress(&format!("Reading backup {}", side.path));
     let (files, passwords) = backup_files(side);
     let set = (!side.backup_set.is_empty()).then_some(side.backup_set.as_str());
@@ -148,12 +188,12 @@ fn open_backup(side: &SourceSpec, progress: &dyn Fn(&str)) -> Result<crate::sour
 }
 
 /// `decrypt` follows DecryptPost2kEncryptedObjects; data compare never needs module text.
-fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<Database, String> {
+fn load_side(side: &SourceSpec, n: u8, decrypt: bool, progress: &Progress) -> Result<Database, String> {
     load_side_with_warnings(side, n, decrypt, progress).map(|(db, _)| db)
 }
 
 /// A side and, for a scripts folder, what its parser skipped.
-fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &dyn Fn(&str)) -> Result<(Database, Vec<String>), String> {
+fn load_side_with_warnings(side: &SourceSpec, n: u8, decrypt: bool, progress: &Progress) -> Result<(Database, Vec<String>), String> {
     if side.is_scripts() {
         let checkout = match side.revision.as_str() {
             "" => None,
@@ -196,7 +236,7 @@ fn data_options(p: &Project) -> Result<DataOptions, String> {
     DataOptions::parse(&p.options.join(","))
 }
 
-fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result<Value, String> {
+fn handle(state: &mut State, request: &Value, progress: &Progress) -> Result<Value, String> {
     let op = request.get("op").and_then(Value::as_str).unwrap_or_default();
     match op {
         "options" => Ok(option_definitions()),
@@ -288,16 +328,15 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
                 opts = Options::parse("SsdtCompatibleOptions")?.iter().fold(opts, |o, x| o.with(x));
             }
             let decrypt = opts.has(Opt::DecryptPost2kEncryptedObjects);
-            let (mut db1, mut warnings) = load_side_with_warnings(&project.source, 1, decrypt, progress)?;
+            let ((mut db1, mut warnings), loaded2) = load_sides(state, &project, decrypt, true, progress)?;
             folder_defaults(request, "source", &mut db1);
             // An empty database (`/empty2`): every object is created; only a script can be made.
-            let db2 = if project.target.is_empty_database() {
-                Database { name: "Empty".into(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }
-            } else {
-                let (mut db2, w2) = load_side_with_warnings(&project.target, 2, decrypt, progress)?;
+            let db2 = if let Some((mut db2, w2)) = loaded2 {
                 folder_defaults(request, "target", &mut db2);
                 warnings.extend(w2);
                 db2
+            } else {
+                Database { name: "Empty".into(), server: db1.server.clone(), collation: db1.collation.clone(), ..Database::default() }
             };
             progress("Comparing");
             let comparison = compare_schemas(&db1, &db2, &opts, &project)?;
@@ -341,8 +380,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         "schema_renames" => {
             let project: Project = field(request, "project")?;
             let decrypt = schema_options(&project)?.has(Opt::DecryptPost2kEncryptedObjects);
-            let db1 = load_side(&project.source, 1, decrypt, progress)?;
-            let db2 = load_side(&project.target, 2, decrypt, progress)?;
+            let fresh = request.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            let ((db1, _), loaded2) = load_sides(state, &project, decrypt, fresh, progress)?;
+            let db2 = loaded2.map(|l| l.0).unwrap_or_default();
             Ok(json!(schema::renames::detect(&db1, &db2, &project.schema_mappings)))
         }
         // Objects the selected ones need that differ too: what "Include dependencies" adds.
@@ -454,8 +494,9 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
             if [&project.source, &project.target].iter().any(|s| s.is_snapshot() || s.is_backup()) {
                 opts = opts.without(DataOpt::IncludeViews).without(DataOpt::UseChecksumComparison);
             }
-            let db1 = load_side(&project.source, 1, false, progress)?;
-            let db2 = load_side(&project.target, 2, false, progress)?;
+            let fresh = request.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            let ((db1, _), loaded2) = load_sides(state, &project, false, fresh, progress)?;
+            let db2 = loaded2.map(|l| l.0).unwrap_or_default();
             let (mut pairs, only1, only2) = crate::data::mapping::map_tables(&db1, &db2, &opts, &project.data_mappings);
             // What the comparison will leave out with these sources.
             let kinds = [&project.source, &project.target].map(side_kind);
@@ -501,7 +542,8 @@ fn handle(state: &mut State, request: &Value, progress: &dyn Fn(&str)) -> Result
         // and what is left on each side. An empty target in a mapping unmaps a default pair.
         "mapping_preview" => {
             let project: Project = field(request, "project")?;
-            mapping_preview(&project, progress)
+            let fresh = request.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            mapping_preview(state, &project, fresh, progress)
         }
         "data_compare" => {
             let project: Project = field(request, "project")?;
@@ -816,7 +858,7 @@ fn backup_into(request: &Value, target: &SourceSpec, script: &mut DeploymentScri
     Ok(())
 }
 
-fn mapping_preview(project: &Project, progress: &dyn Fn(&str)) -> Result<Value, String> {
+fn mapping_preview(state: &mut State, project: &Project, fresh: bool, progress: &Progress) -> Result<Value, String> {
     let data = project.kind == crate::project::ProjectKind::Data;
     let (decrypt, case_sensitive) = if data {
         (false, data_options(project)?.has(DataOpt::CaseSensitiveObjectDefinition))
@@ -824,8 +866,8 @@ fn mapping_preview(project: &Project, progress: &dyn Fn(&str)) -> Result<Value, 
         let o = schema_options(project)?;
         (o.has(Opt::DecryptPost2kEncryptedObjects), o.has(Opt::CaseSensitiveObjectDefinition))
     };
-    let db1 = load_side(&project.source, 1, decrypt, progress)?;
-    let db2 = if project.target.is_empty_database() { Database::default() } else { load_side(&project.target, 2, decrypt, progress)? };
+    let ((db1, _), loaded2) = load_sides(state, project, decrypt, fresh, progress)?;
+    let db2 = loaded2.map(|l| l.0).unwrap_or_default();
     let key = |s: &str| if case_sensitive { s.to_string() } else { s.to_lowercase() };
     let same = |a: &str, b: &str| key(a) == key(b);
 
@@ -1311,7 +1353,7 @@ const UI_OPS: &[&str] = &["format_sql", "collations", "revisions", "folder_previ
 ///   Subversion: [{id, author, date, message}].
 /// - `folder_preview` {session} → {written, deleted}: the files that deploying the last script
 ///   to a scripts folder would change.
-fn ui_op(state: &mut State, op: &str, request: &Value, progress: &dyn Fn(&str)) -> Result<Value, String> {
+fn ui_op(state: &mut State, op: &str, request: &Value, progress: &Progress) -> Result<Value, String> {
     match op {
         "format_sql" => {
             let style = request
