@@ -63,10 +63,12 @@ pub fn casing(text: &str, upper: bool) -> Result<String, String> {
     rewrite(text, |tokens| apply_casing(tokens, &Casing { keywords: Some(case), functions: Some(case), data_types: Some(case) }))
 }
 
-/// The reserved word that ends at `caret` (UTF-16), as (start, end, upper case) when it is not
-/// written in upper case yet: what typing a space or a line break after it turns it into. Words in
-/// strings and comments, after a dot (`t.order`) and in brackets are left alone.
-pub fn keyword_before(text: &str, caret: usize) -> Option<(usize, usize, String)> {
+/// The keyword, function or data type that ends at `caret` (UTF-16), as (start, end, upper case)
+/// when it is not written in upper case yet: what typing `next` after it turns it into. A function
+/// counts only when `next` is `(`, a data type only where one is expected (`DECLARE @x int`,
+/// `CAST(x AS int)`, a column of `CREATE TABLE`), so a column named `count` or `date` keeps its case.
+/// Words in strings and comments, after a dot (`t.order`) and in brackets are left alone.
+pub fn keyword_before(text: &str, caret: usize, next: Option<char>) -> Option<(usize, usize, String)> {
     let end = utf16_to_byte(text, caret);
     let (tokens, _) = crate::lexer::lex_partial(&text[..end]);
     // An unclosed string or comment stops the lexer early: the word is inside it.
@@ -74,14 +76,25 @@ pub fn keyword_before(text: &str, caret: usize) -> Option<(usize, usize, String)
         return None;
     }
     let last = tokens.last()?;
-    if last.kind != Kind::Word || !last.text.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
+    let mut chars = last.text.chars();
+    if last.kind != Kind::Word
+        || !chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return None;
     }
     let upper = last.text.to_ascii_uppercase();
-    if upper == last.text || !crate::keywords::is_reserved(&upper) {
+    if upper == last.text {
         return None;
     }
     if tokens.len() > 1 && tokens[tokens.len() - 2].kind == Kind::Dot && last.ws.is_empty() {
+        return None;
+    }
+    let wanted = crate::keywords::is_reserved(&upper)
+        || (next == Some('(') && crate::keywords::is_function(&upper))
+        || (crate::keywords::is_data_type(&upper)
+            && crate::complete::complete(&text[..end], caret, None).items.iter().any(|i| i.kind == "type" && i.label.eq_ignore_ascii_case(&upper)));
+    if !wanted {
         return None;
     }
     let start = end - last.text.len();

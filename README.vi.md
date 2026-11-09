@@ -159,7 +159,7 @@ Khi gõ, danh sách gợi ý hiện ra:
 
 Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
 
-Từ khóa gõ bằng chữ thường được tự viết hoa khi gõ dấu cách, xuống dòng hoặc `(`, `)`, `,`, `;` sau nó (`select` thành `SELECT`); chữ trong chuỗi, comment, ngoặc vuông và sau dấu chấm giữ nguyên. Tắt trong Options > Typing.
+Từ khóa gõ bằng chữ thường được tự viết hoa khi gõ dấu cách, xuống dòng hoặc `(`, `)`, `,`, `;` sau nó (`select` thành `SELECT`); tên hàm có sẵn cũng vậy khi theo sau là `(` (`DATEADD(`), và kiểu dữ liệu ở chỗ cần kiểu dữ liệu (`DECLARE @x INT`, `CAST(x AS VARCHAR(10))`, cột trong `CREATE TABLE`), nên cột tên `count` hay `date` vẫn giữ nguyên. Chữ trong chuỗi, comment, ngoặc vuông và sau dấu chấm giữ nguyên. Tắt trong Options > Typing.
 
 Phím tắt: Up/Down để di chuyển, Enter hoặc Tab để chèn, Esc để đóng, Ctrl+Space để mở danh sách. Bên cạnh danh sách có ô hiện định nghĩa của bảng, view hoặc procedure đang chọn. Phím nào dùng để chèn (Tab, Enter, Space, `.`, `,`, `(`) do bạn chọn trong Options.
 

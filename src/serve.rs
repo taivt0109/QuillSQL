@@ -249,7 +249,8 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
             Ok(json!({ "text": text, "count": count }))
         }
         "keyword_case" => {
-            let found = tools::keyword_before(str_field(request, "text")?, usize_field(request, "caret")?);
+            let next = request.get("next").and_then(Value::as_str).and_then(|n| n.chars().next());
+            let found = tools::keyword_before(str_field(request, "text")?, usize_field(request, "caret")?, next);
             Ok(found.map_or(Value::Null, |(start, end, text)| json!({ "start": start, "end": end, "text": text })))
         }
         "signature" => {

@@ -233,15 +233,16 @@ namespace QuillSql.Vsix
                 Log.Error("auto-close", ex);
             }
 
-            // A keyword typed in lower case is written in upper case once a space, a line break or a
-            // punctuation mark ends it.
+            // A keyword, function or data type typed in lower case is written in upper case once a
+            // space, a line break or a punctuation mark ends it.
             string keywordText = null;
             var keywordEnd = -1;
+            var keywordNext = typed != '\0' ? typed : command == VSConstants.VSStd2KCmdID.RETURN ? '\n' : '\t';
             try
             {
                 if (Settings.Current.UppercaseKeywords && std2k
-                    && ((typed != ' ' && " (),;".IndexOf(typed) >= 0) || command == VSConstants.VSStd2KCmdID.RETURN || command == VSConstants.VSStd2KCmdID.TAB)
-                    && TryGetText(out var before, out var at) && at > 1 && char.IsLetter(before[at - 1]) && char.IsLower(before[at - 1]))
+                    && ((typed != '\0' && " (),;".IndexOf(typed) >= 0) || command == VSConstants.VSStd2KCmdID.RETURN || command == VSConstants.VSStd2KCmdID.TAB)
+                    && TryGetText(out var before, out var at) && EndsWithLowerCaseWord(before, at))
                 {
                     keywordText = before;
                     keywordEnd = at;
@@ -256,7 +257,7 @@ namespace QuillSql.Vsix
 
             if (keywordText != null)
             {
-                UppercaseKeyword(keywordText, keywordEnd);
+                UppercaseKeyword(keywordText, keywordEnd, keywordNext);
             }
 
             try
@@ -666,8 +667,21 @@ namespace QuillSql.Vsix
             }
         }
 
+        /// <summary>True when a word with a lower-case letter (int, datetime2, Select) ends at `end`.</summary>
+        private static bool EndsWithLowerCaseWord(string text, int end)
+        {
+            var lower = false;
+            var i = end;
+            while (i > 0 && (char.IsLetterOrDigit(text[i - 1]) || text[i - 1] == '_'))
+            {
+                lower |= char.IsLower(text[i - 1]);
+                i--;
+            }
+            return end - i > 1 && lower;
+        }
+
         /// <summary>Writes the keyword that ends at `end` of `text` in upper case, if it still reads the same.</summary>
-        private void UppercaseKeyword(string text, int end)
+        private void UppercaseKeyword(string text, int end, char next)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var sent = text.Substring(0, end);
@@ -676,7 +690,7 @@ namespace QuillSql.Vsix
                 try
                 {
                     await TaskScheduler.Default;
-                    var reply = EngineProcess.Shared.Request("keyword_case", "\"text\":" + Json.Str(sent) + ",\"caret\":" + end);
+                    var reply = EngineProcess.Shared.Request("keyword_case", "\"text\":" + Json.Str(sent) + ",\"caret\":" + end + ",\"next\":" + Json.Str(next.ToString()));
                     var found = reply == null ? null : Json.Parse<KeywordCaseReply>(reply)?.Result;
                     if (found == null)
                     {

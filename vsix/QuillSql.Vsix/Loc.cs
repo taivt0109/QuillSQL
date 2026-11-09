@@ -306,7 +306,7 @@ namespace QuillSql.Vsix
             ["Fill in the whole definition after ALTER PROCEDURE, VIEW or FUNCTION"] = "Điền sẵn toàn bộ định nghĩa sau ALTER PROCEDURE, VIEW hoặc FUNCTION",
             ["List"] = "Danh sách",
             ["Show the definition of the selected table, view or procedure next to the list"] = "Hiện định nghĩa của bảng, view hoặc procedure đang chọn bên cạnh danh sách",
-            ["Write keywords in upper case as you type (select becomes SELECT after the space)"] = "Tự viết hoa từ khoá khi gõ (select thành SELECT sau dấu cách)",
+            ["Write keywords, functions and data types in upper case as you type (select becomes SELECT)"] = "Tự viết hoa từ khoá, tên hàm và kiểu dữ liệu khi gõ (select thành SELECT)",
             ["Show the parameters of a function or procedure while typing its arguments"] = "Hiện tham số của hàm hoặc procedure khi đang gõ đối số",
             ["Aliases"] = "Alias",
             ["Prefixes left out of aliases"] = "Tiền tố bỏ qua khi đặt alias",
