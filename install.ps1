@@ -86,7 +86,15 @@ function Install-QuillSql {
         $asset = $release.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
         if (-not $asset) { throw "The release has no $name." }
         $file = Join-Path $download $name
-        Invoke-WebRequest $asset.browser_download_url -OutFile $file -UseBasicParsing -Headers @{ 'User-Agent' = 'QuillSQL-installer' }
+        # github.com's download links sometimes answer 504 for hours; the API serves the same file.
+        $sources = @(
+            @{ Uri = $asset.browser_download_url; Headers = @{ 'User-Agent' = 'QuillSQL-installer' } },
+            @{ Uri = $asset.url; Headers = @{ 'User-Agent' = 'QuillSQL-installer'; 'Accept' = 'application/octet-stream' } })
+        for ($try = 1; ; $try++) {
+            $source = $sources[($try - 1) % 2]
+            try { Invoke-WebRequest $source.Uri -OutFile $file -UseBasicParsing -Headers $source.Headers; break }
+            catch { if ($try -ge 6) { throw "Could not download ${name}: $($_.Exception.Message)" }; Start-Sleep -Seconds $try }
+        }
         return $file
     }
     $sums = @{}
