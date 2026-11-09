@@ -54,6 +54,22 @@ namespace QuillSql.Vsix
             }
         }
 
+        public static void Clear()
+        {
+            lock (Gate)
+            {
+                _picks = new Dictionary<string, string>(StringComparer.Ordinal);
+                try
+                {
+                    File.Delete(FilePath);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("deleting " + FilePath, ex);
+                }
+            }
+        }
+
         public static void Remember(string typed, string insert)
         {
             if (string.IsNullOrEmpty(typed) || string.IsNullOrEmpty(insert) || insert.Length > 400)

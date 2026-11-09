@@ -39,6 +39,8 @@ namespace QuillSql.Vsix
         [DataMember(Name = "aliasWithAs")] public bool AliasWithAs { get; set; }
         [DataMember(Name = "qualifyObjectNames")] public bool QualifyObjectNames { get; set; }
         [DataMember(Name = "showSystemObjects")] public bool ShowSystemObjects { get; set; }
+        /// <summary>Put the suggestions picked often and lately first.</summary>
+        [DataMember(Name = "learnFromPicks")] public bool LearnFromPicks { get; set; }
         [DataMember(Name = "showDefinitionBox")] public bool ShowDefinitionBox { get; set; }
         [DataMember(Name = "generateAlter")] public bool GenerateAlter { get; set; }
         /// <summary>Prefixes left out of generated aliases, separated by commas: "tbl, vw".</summary>
@@ -95,6 +97,7 @@ namespace QuillSql.Vsix
             AliasWithAs = true;
             QualifyObjectNames = true;
             ShowSystemObjects = false;
+            LearnFromPicks = true;
             ShowDefinitionBox = true;
             GenerateAlter = true;
             IgnoredPrefixes = "tbl, vw, tb_, t_, v_";
@@ -180,7 +183,7 @@ namespace QuillSql.Vsix
         /// <summary>The suggestion choices the engine applies, as a JSON object.</summary>
         public string CompletionOptionsJson() =>
             "{\"assignAliases\":" + Json.Bool(AssignAliases) + ",\"aliasWithAs\":" + Json.Bool(AliasWithAs)
-            + ",\"qualifyObjectNames\":" + Json.Bool(QualifyObjectNames) + ",\"showSystemObjects\":" + Json.Bool(ShowSystemObjects)
+            + ",\"qualifyObjectNames\":" + Json.Bool(QualifyObjectNames) + ",\"showSystemObjects\":" + Json.Bool(ShowSystemObjects) + ",\"learnFromPicks\":" + Json.Bool(LearnFromPicks)
             + ",\"ignoredPrefixes\":[" + string.Join(",", (IgnoredPrefixes ?? "").Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries).Select(Json.Str)) + "]"
             + ",\"aliases\":{" + string.Join(",", OwnAliasPairs().Select(p => Json.Str(p.Key) + ":" + Json.Str(p.Value))) + "}}";
 

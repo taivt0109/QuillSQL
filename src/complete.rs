@@ -1346,6 +1346,12 @@ pub struct CompleteOptions {
     pub ignored_prefixes: Vec<String>,
     /// The alias to give these tables, by name: `Customers` → `cu`.
     pub aliases: std::collections::HashMap<String, String>,
+    /// Put the suggestions picked often and lately first.
+    pub learn_from_picks: bool,
+    /// How often and lately each suggestion was picked, by [`crate::usage::item_key`]; set by the
+    /// engine, not the options.
+    #[serde(skip)]
+    pub usage: std::collections::HashMap<String, u32>,
 }
 
 impl Default for CompleteOptions {
@@ -1357,6 +1363,8 @@ impl Default for CompleteOptions {
             show_system_objects: false,
             ignored_prefixes: ["tbl", "vw", "tb_", "t_", "v_"].map(String::from).to_vec(),
             aliases: Default::default(),
+            learn_from_picks: true,
+            usage: Default::default(),
         }
     }
 }
@@ -1865,8 +1873,14 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
     }
     let likely = |it: &Item| if it.kind == "column" { usize::MAX } else { likely.iter().position(|w| w.eq_ignore_ascii_case(&it.label)).unwrap_or(usize::MAX) };
 
+    // How often the user picked it: first among matches of the same quality, after the whole word
+    // and the statement-writing items.
+    let used = |it: &Item| std::cmp::Reverse(options.usage.get(&crate::usage::item_key(it.kind, &it.label)).copied().unwrap_or(0));
+
     // Rank: prefix matches, then substring matches; then by kind, how likely, and name.
-    let mut scored: Vec<(u8, u8, bool, usize, Item)> = items
+    // (written items or the whole word first, how often picked, kind)
+    type Rank = (u8, std::cmp::Reverse<u32>, u8);
+    let mut scored: Vec<(u8, Rank, bool, usize, Item)> = items
         .into_iter()
         .filter_map(|it| {
             let exact_or_prefix = match_quality(&it.label, &prefix)?;
@@ -1886,6 +1900,7 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
             // gives it its proper case instead of a longer name that starts with it.
             let exact = !needle.is_empty() && label == needle;
             let rank = if exact { 0 } else { rank(it.kind, context) };
+            let rank = if rank == 0 { (0, std::cmp::Reverse(0), 0) } else { (1, used(&it), rank) };
             Some((quality, rank, system, likely(&it), it))
         })
         .collect();

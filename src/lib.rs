@@ -27,6 +27,7 @@ pub mod signature;
 pub mod style;
 pub mod tools;
 pub mod transform;
+pub mod usage;
 
 use lexer::{Token, lex};
 pub use options::{Enclose, Options, TableAlias};

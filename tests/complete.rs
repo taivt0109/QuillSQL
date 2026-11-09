@@ -631,3 +631,25 @@ fn three_letters_inside_a_built_in_function_select_it() {
     let r = run("select dateadd(day, 1, getdate()), add|");
     assert_eq!(r.selected.map(|i| r.items[i].label.as_str()), Some("DATEADD"), "{:?}", r.items.iter().map(|i| &i.label).collect::<Vec<_>>());
 }
+
+#[test]
+fn what_the_user_picks_often_comes_first() {
+    let labels = |text: &str, usage: &[(&str, &str, u32)]| -> Vec<String> {
+        let options = quillsql::complete::CompleteOptions {
+            usage: usage.iter().map(|(k, l, n)| (quillsql::usage::item_key(k, l), *n)).collect(),
+            ..Default::default()
+        };
+        quillsql::complete::complete_full(text, text.len(), Some(&schema()), &[], options).items.into_iter().map(|i| i.label).collect()
+    };
+    assert_eq!(labels("s", &[]).first().map(String::as_str), Some("SELECT"));
+    // Picked often: first among the words that start with what was typed.
+    let set = [("keyword", "SET", 30)];
+    let r = labels("s", &set);
+    assert_eq!(r.first().map(String::as_str), Some("SET"), "{r:?}");
+    assert_eq!(r.get(1).map(String::as_str), Some("SELECT"), "{r:?}");
+    // The whole word typed still comes first.
+    assert_eq!(labels("select", &set).first().map(String::as_str), Some("SELECT"));
+    // A table picked often comes before the others after FROM.
+    let r = labels("select * from ", &[("table", "Orders", 10)]);
+    assert_eq!(r.first().map(String::as_str), Some("Orders"), "{r:?}");
+}

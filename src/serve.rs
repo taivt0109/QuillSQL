@@ -16,6 +16,8 @@
 //! - `set_options`, `reload_snippets`, `tool`, `outline`, `execution_warnings`, `object_at`,
 //!   `table_script` and `to_alter` serve the editor commands of the same names.
 //! - `snippets` and `rules` list what is available.
+//! - `picked` {key, kind, label} notes a suggestion the user picked, so it comes first next time;
+//!   `clear_usage` forgets them all.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -25,6 +27,7 @@ use serde_json::{Value, json};
 use quillsql::complete::{CompleteOptions, Schema, complete_across, utf16_to_byte};
 use quillsql::refactor::{self, Renamed};
 use quillsql::snippets::{self, Env, Snippet};
+use quillsql::usage::{self, Usage};
 use quillsql::{Options, TableAlias, analysis, format, info, plan, script, style, tools};
 
 struct State {
@@ -32,6 +35,8 @@ struct State {
     snippets: Vec<Snippet>,
     /// Formatting options; `set_options` replaces them while the engine runs.
     options: Options,
+    /// The suggestions picked, for their order.
+    usage: Usage,
 }
 
 /// Object kinds whose description is shown next to the suggestion list.
@@ -188,7 +193,10 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
         "complete" => {
             let text = str_field(request, "text")?;
             let caret = usize_field(request, "caret")?;
-            let options: CompleteOptions = serde_json::from_value(request["options"].clone()).unwrap_or_default();
+            let mut options: CompleteOptions = serde_json::from_value(request["options"].clone()).unwrap_or_default();
+            if options.learn_from_picks {
+                options.usage = state.usage.scores(key, usage::now());
+            }
             let schema = state.schemas.get(key);
             // Other databases the script names, already loaded under these keys.
             let others: Vec<&Schema> = request["others"].as_array().into_iter().flatten().filter_map(|k| state.schemas.get(k.as_str()?)).collect();
@@ -196,6 +204,14 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
             Ok(with_descriptions(completion, schema))
         }
         "tab" => tab(request, state),
+        "picked" => {
+            state.usage.record(key, str_field(request, "kind")?, str_field(request, "label")?, usage::now());
+            Ok(json!({ "count": state.usage.len() }))
+        }
+        "clear_usage" => {
+            state.usage.clear();
+            Ok(json!({ "count": 0 }))
+        }
         "format" => {
             // `options` previews other settings without changing the engine's own.
             let preview = match request.get("options").filter(|o| o.is_object()) {
@@ -292,7 +308,7 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
 pub fn run(opts: &Options) -> std::io::Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
-    let mut state = State { schemas: HashMap::new(), snippets: load_snippets(), options: opts.clone() };
+    let mut state = State { schemas: HashMap::new(), snippets: load_snippets(), options: opts.clone(), usage: Usage::load(Usage::default_path()) };
     for line in stdin.lock().lines() {
         let line = line?;
         // A .NET client may start the stream with a UTF-8 byte order mark.

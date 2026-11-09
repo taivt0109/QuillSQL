@@ -42,6 +42,33 @@ QuillSQL miễn phí, mã nguồn mở. Engine viết bằng Rust, chạy nhanh,
 | **Theo ý bạn** | Cửa sổ Options cho mọi hành vi, phím tắt cho mọi lệnh, giao diện tiếng Anh hoặc tiếng Việt. |
 | **Dòng lệnh** | `quill` format cả thư mục file `.sql` và chạy phân tích code trong CI. |
 
+## Có gì mới
+
+- **0.4.17**: danh sách gợi ý học theo thói quen. Trong các gợi ý khớp như nhau, mục bạn chọn
+  nhiều và gần đây được đưa lên đầu (gõ `s` ra `SET` nếu bạn dùng nó nhiều hơn `SELECT`). Gõ đủ cả
+  từ thì từ đó vẫn đứng đầu. Có thể tắt hoặc xoá lịch sử trong Options > Suggestions.
+- **0.4.16**: Compare: khi bật *Ignore identity property*, *Ignore identity seed and increment*
+  hoặc *Ignore nullability*, SQL hai bên vẫn hiện đúng định nghĩa cột, nhưng các phần đó không còn
+  làm dòng bị đánh dấu là khác.
+- **0.4.15**: Compare: SQL hai bên và báo cáo bỏ qua những gì option đã bỏ qua (`WITH NOCHECK`,
+  fill factor, filegroup, index, trigger, statistics...), và mọi option đều có test. Chọn procedure
+  ở đầu câu lệnh mà không có `EXEC` cũng điền đủ tham số.
+- **0.4.14**: thanh trạng thái báo khi đang đọc và khi đã đọc xong gợi ý của cửa sổ; gõ trước lúc
+  đó thì đầu danh sách hiện "Reading the database's objects...".
+- **0.4.13**: SSMS 22 chỉ hiện danh sách của QuillSQL ("Auto list members" của SSMS được tắt trong
+  `settings.json`); gõ ba chữ nằm trong tên hàm có sẵn là chọn được nó (`add` → `DATEADD`).
+- **0.4.12**: Compare hiện tiến độ của từng bên; cửa sổ cập nhật hiển thị sắc nét trên màn hình
+  có scale.
+- **0.4.11**: gợi ý procedure không cần `EXEC` ở đầu câu lệnh (`sp_who2`), thẻ trợ giúp cho hàm
+  có sẵn và system procedure, gợi ý không mất khi engine gặp lỗi.
+- **0.4.10**: khoảng 190 hàm có sẵn kèm trợ giúp, system procedure đọc từ server, `MS_Description`
+  cạnh danh sách, mở lại các cửa sổ khi SSMS bị tắt đột ngột, `INSERT INTO` + Tab viết cả câu lệnh,
+  sửa lỗi trên SSMS 22.
+- **0.4.7 – 0.4.9**: keyword, hàm và kiểu dữ liệu tự viết hoa khi gõ; thẻ object cạnh danh sách
+  gợi ý.
+
+Mọi phiên bản: [Releases](https://github.com/taivt0109/QuillSQL/releases).
+
 ## Cài đặt
 
 Yêu cầu:
@@ -159,6 +186,13 @@ Khi gõ, danh sách gợi ý hiện ra:
 - sau `EXEC name a, `: các tham số chưa truyền.
 
 Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
+
+Danh sách học theo những gì bạn chọn. Trong các gợi ý khớp như nhau, mục chọn nhiều và gần đây
+đứng trước, nên gõ `s` sẽ ra `SET` trước `SELECT` nếu bạn dùng `SET` nhiều hơn. Gõ đủ cả từ thì từ
+đó vẫn đứng đầu, còn điều kiện JOIN và các câu lệnh được viết sẵn vẫn giữ chỗ. Keyword, hàm, kiểu
+dữ liệu và snippet tính chung cho mọi database; bảng, view, cột và procedure tính riêng từng
+database. Sau một tháng, một lần chọn chỉ còn tính một nửa. Tắt trong **Options > Suggestions**,
+và nút **Forget the suggestions picked** để xoá lịch sử.
 
 Từ khóa gõ bằng chữ thường được tự viết hoa khi gõ dấu cách, xuống dòng hoặc `(`, `)`, `,`, `;` sau nó (`select` thành `SELECT`); tên hàm có sẵn cũng vậy khi theo sau là `(` (`DATEADD(`), và kiểu dữ liệu ở chỗ cần kiểu dữ liệu (`DECLARE @x INT`, `CAST(x AS VARCHAR(10))`, cột trong `CREATE TABLE`), nên cột tên `count` hay `date` vẫn giữ nguyên. Chữ trong chuỗi, comment, ngoặc vuông và sau dấu chấm giữ nguyên. Tắt trong Options > Typing.
 
@@ -422,6 +456,7 @@ Muốn tùy chỉnh chi tiết hơn thì dùng **style theo nhóm**: các thiế
 | `%LOCALAPPDATA%\QuillSQL\ai.json` | Model AI và ngôn ngữ trả lời |
 | `%LOCALAPPDATA%\QuillSQL\Snippets\` | Snippet của bạn |
 | `%LOCALAPPDATA%\QuillSQL\history.jsonl` | Lịch sử query |
+| `%LOCALAPPDATA%\QuillSQL\usage.json`, `picks.txt` | Các gợi ý bạn đã chọn, để sắp thứ tự |
 | `%LOCALAPPDATA%\QuillSQL\quillsql.log` | Log; tạo thêm file rỗng tên `verbose` cạnh nó để ghi chi tiết hơn |
 
 ## Build từ mã nguồn

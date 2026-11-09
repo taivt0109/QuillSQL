@@ -281,12 +281,20 @@ namespace QuillSql.Vsix
                 Check("Show the definition of the selected table, view or procedure next to the list", s.ShowDefinitionBox, v => s.ShowDefinitionBox = v),
                 Check("Show the parameters of a function or procedure while typing its arguments", s.ParameterHints, v => s.ParameterHints = v),
                 Check("List sys and INFORMATION_SCHEMA views before their schema is typed", s.ShowSystemObjects, v => s.ShowSystemObjects = v),
-                ButtonFor("Refresh suggestions now", (o, e) =>
+                Check("Put the suggestions you pick often first", s.LearnFromPicks, v => s.LearnFromPicks = v, "Keywords, functions and snippets count everywhere; tables, columns and procedures in their own database. Old picks count less over time."),
+                Inline(ButtonFor("Refresh suggestions now", (o, e) =>
                 {
                     ThreadHelper.ThrowIfNotOnUIThread();
                     MetadataCache.Clear();
                     EditorContext.Status("suggestions will reload on next use.");
-                }));
+                }),
+                ButtonFor("Forget the suggestions picked", (o, e) =>
+                {
+                    ThreadHelper.ThrowIfNotOnUIThread();
+                    EngineProcess.Shared.Request("clear_usage", "");
+                    Picks.Clear();
+                    EditorContext.Status(Loc.T("the suggestions picked are forgotten."));
+                })));
         }
 
         private UIElement Typing()

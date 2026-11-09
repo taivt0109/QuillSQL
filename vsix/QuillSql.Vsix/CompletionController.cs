@@ -661,6 +661,12 @@ namespace QuillSql.Vsix
             else
             {
                 Picks.Remember(before.Substring(_replaceStart, caret - _replaceStart), item.Insert);
+                if (Settings.Current.LearnFromPicks)
+                {
+                    // Counted by the engine, for the order of the list next time.
+                    var fields = "\"key\":" + Json.Str(ConnectionResolver.TryGetActive()?.Key ?? "") + ",\"kind\":" + Json.Str(item.Kind ?? "") + ",\"label\":" + Json.Str(item.Label ?? "");
+                    System.Threading.Tasks.Task.Run(() => EngineProcess.Shared.Request("picked", fields));
+                }
             }
             // `ALTER PROCEDURE name`: fill in the object's whole definition.
             var alter = System.Text.RegularExpressions.Regex.Match(before.Substring(0, _replaceStart), @"\bALTER\s+(PROC|PROCEDURE|VIEW|FUNCTION)\s+$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);

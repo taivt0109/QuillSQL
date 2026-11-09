@@ -39,6 +39,33 @@ runs on the command line and in CI.
 | **Schema and Data Compare** | Compare two databases' schema or data, see every difference, and deploy a script that makes them match. In SSMS, as its own app, or in CI from the command line. |
 | **Command line** | `quill` formats folders of `.sql` files and runs the analysis in CI. |
 
+## What's new
+
+- **0.4.17**: the suggestion list learns: what you pick often and lately comes first among
+  equally good matches (`s` → `SET` if you use it more than `SELECT`). Typing the whole word still
+  puts that word first. Options > Suggestions turns it off or forgets the picks.
+- **0.4.16**: Compare: with *Ignore identity property*, *Ignore identity seed and increment* or
+  *Ignore nullability*, the side-by-side SQL still shows each column as it is, but those parts no
+  longer mark the line as different.
+- **0.4.15**: Compare: the side-by-side SQL and the reports leave out what the options ignore
+  (`WITH NOCHECK`, fill factor, filegroups, indexes, triggers, statistics...), and every option
+  has a test. A procedure picked where a statement starts, without `EXEC`, brings its parameters.
+- **0.4.14**: the status bar says when a window's suggestions are being read and when they are
+  ready; typing before then shows "Reading the database's objects..." at the top of the list.
+- **0.4.13**: SSMS 22 shows only QuillSQL's list (its own "Auto list members" is turned off in
+  `settings.json`); three letters inside a built-in function's name select it (`add` → `DATEADD`).
+- **0.4.12**: Compare shows its progress for each side; the update window is sharp on scaled
+  screens.
+- **0.4.11**: procedures offered without `EXEC` where a statement starts (`sp_who2`), card-style
+  help for built-in functions and system procedures, suggestions that survive engine errors.
+- **0.4.10**: about 190 built-in functions with their help, system procedures read from the
+  server, `MS_Description` beside the list, reopening the windows of an SSMS that crashed,
+  `INSERT INTO` + Tab writing the whole statement, SSMS 22 fixes.
+- **0.4.7 – 0.4.9**: keywords, functions and data types written in upper case as you type; the
+  object card beside the suggestion list.
+
+All versions: [Releases](https://github.com/taivt0109/QuillSQL/releases).
+
 ## Install
 
 Requirements: Windows with SQL Server Management Studio 21 or later. The AI commands also need
@@ -162,6 +189,13 @@ As you type, a list offers:
 The first item is selected only when what you typed matches it for sure: the whole word, its start,
 or the initials of its parts (`cid` for CustomerId). Otherwise nothing is selected and Enter and
 Tab keep their usual meaning. The item picked for some letters is selected first the next time.
+
+The list learns from what you pick: among matches equally good, the suggestions picked often and
+lately come first, so `s` gives `SET` before `SELECT` if you use it more. Typing the whole word
+still puts that word first, and the join conditions and written statements keep their place.
+Keywords, functions, data types and snippets count in every database; tables, views, columns and
+procedures in their own. A pick counts half as much after a month. **Options > Suggestions** turns
+it off, and **Forget the suggestions picked** starts over.
 
 A keyword typed in lower case is written in upper case once a space, a line break or `(`, `)`,
 `,`, `;` ends it (`select` becomes `SELECT`); so is a built-in function followed by `(`
@@ -497,6 +531,7 @@ control, a sectioned style groups settings by `whitespace`, `lists`, `joinStatem
 | `%LOCALAPPDATA%\QuillSQL\ai.json` | AI model and answer language |
 | `%LOCALAPPDATA%\QuillSQL\Snippets\` | Your snippets |
 | `%LOCALAPPDATA%\QuillSQL\history.jsonl` | Query history |
+| `%LOCALAPPDATA%\QuillSQL\usage.json`, `picks.txt` | The suggestions you picked, for their order |
 | `%LOCALAPPDATA%\QuillSQL\quillsql.log` | Log; an empty file named `verbose` next to it logs more |
 
 ## Build from source

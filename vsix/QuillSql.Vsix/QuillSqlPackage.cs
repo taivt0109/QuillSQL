@@ -23,7 +23,7 @@ namespace QuillSql.Vsix
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.4.16";
+        public const string Version = "0.4.17";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
