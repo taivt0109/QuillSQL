@@ -153,6 +153,9 @@ namespace QuillSql.Vsix
         private static DataTemplate BuildTemplate()
         {
             var panel = new FrameworkElementFactory(typeof(DockPanel));
+            // The name and the detail in full, for the mouse: either may be cut short.
+            panel.SetBinding(FrameworkElement.ToolTipProperty, new Binding(nameof(Row.Tip)));
+            panel.SetValue(ToolTipService.InitialShowDelayProperty, 300);
 
             var badge = new FrameworkElementFactory(typeof(Border));
             badge.SetValue(DockPanel.DockProperty, Dock.Left);
@@ -452,6 +455,8 @@ namespace QuillSql.Vsix
             public Row(CompletionItem item) => Item = item;
 
             public CompletionItem Item { get; }
+
+            public string Tip => string.IsNullOrEmpty(Item.Detail) ? Item.Label : Item.Label + "\n" + Item.Detail;
 
             public string Glyph
             {
