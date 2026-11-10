@@ -23,6 +23,8 @@ namespace QuillSql.Vsix
         [DataMember(Name = "time")] public DateTime Time { get; set; } = DateTime.Now;
         /// <summary>What the AI looked up in the database for an answer, as short labels.</summary>
         [DataMember(Name = "steps")] public List<string> Steps { get; set; }
+        /// <summary>How long an answer took and what it used: "12 s · 5.2k tokens · $0.02".</summary>
+        [DataMember(Name = "usage")] public string Usage { get; set; }
     }
 
     /// <summary>One conversation on one topic, saved in %LOCALAPPDATA%\QuillSQL\chats.</summary>
@@ -115,6 +117,19 @@ namespace QuillSql.Vsix
         [DataMember(Name = "result")] public string Result { get; set; }
         [DataMember(Name = "is_error")] public bool IsError { get; set; }
         [DataMember(Name = "session_id")] public string SessionId { get; set; }
+        [DataMember(Name = "total_cost_usd")] public double Cost { get; set; }
+        [DataMember(Name = "usage")] public StreamUsage Usage { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class StreamUsage
+    {
+        [DataMember(Name = "input_tokens")] public long Input { get; set; }
+        [DataMember(Name = "output_tokens")] public long Output { get; set; }
+        [DataMember(Name = "cache_read_input_tokens")] public long CacheRead { get; set; }
+        [DataMember(Name = "cache_creation_input_tokens")] public long CacheWrite { get; set; }
+
+        public long Total => Input + Output + CacheRead + CacheWrite;
     }
 
     [DataContract]
@@ -158,10 +173,13 @@ namespace QuillSql.Vsix
             "index_fragmentation, largest_tables), plans and history (estimated_plan, query_store_top, query_store_search, query_store_query, " +
             "plan_cache_top) and the server now (current_activity, wait_stats, server_info), and in-depth ones: queries_using_index, query_store_regressed, " +
             "query_store_waits, plan_warnings, parameter_sniffing, procedure_stats, memory_grants, resource_usage, blocking_chains, locks, open_transactions, " +
-            "deadlocks, unused_indexes, duplicate_indexes, unindexed_foreign_keys, heaps, stale_statistics, index_operational_stats, file_io_latency, " +
+            "deadlocks, unused_indexes, duplicate_indexes, check_index, unindexed_foreign_keys, heaps, stale_statistics, index_operational_stats, file_io_latency, " +
             "log_usage, tempdb_usage, identity_usage, recent_changes, sessions_summary and column_profile. Prefer the most specific tool over writing " +
             "your own queries on system views: they are tuned and time-limited. Use them whenever you need a fact instead of guessing " +
-            "or asking for it, and say briefly what you looked at. Before advising to change or drop something, check dependencies. " +
+            "or asking for it, and say briefly what you looked at. Before proposing an index, call check_index with its keys and includes: never " +
+            "propose one it reports a duplicate of, name the indexes it would make redundant, and give the whole CREATE INDEX statement with its " +
+            "estimated size. " +
+            "Before advising to change or drop something, check dependencies. " +
             "run_query and measure_query run the query, so they work only when the developer allows reading data; prefer the other tools. " +
             "End every answer with one last line exactly in the form `" + NextMarker + " question one | question two | question three`: " +
             "up to three short follow-up questions the developer would likely ask next, written as the developer would ask them.";
@@ -176,7 +194,7 @@ namespace QuillSql.Vsix
         /// Sends one turn and streams the answer through `delta` (called on a background thread).
         /// Returns the full answer; `session` is set to the conversation's session.
         /// </summary>
-        public static string Send(ref string session, string input, Action<string> delta, CancellationToken cancel, string toolsToken = null)
+        public static string Send(ref string session, string input, Action<string> delta, CancellationToken cancel, string toolsToken = null, Action<string> usage = null)
         {
             var claude = AiAssistant.FindClaude() ?? throw new InvalidOperationException(Loc.T("Claude Code CLI was not found. Install it from https://code.claude.com and sign in with `claude` to use the AI commands."));
             var settings = AiAssistant.LoadSettings();
@@ -299,9 +317,25 @@ namespace QuillSql.Vsix
                     throw new InvalidOperationException("Claude failed: " + (detail.Length > 300 ? detail.Substring(0, 300) : detail));
                 }
                 session = result.SessionId ?? session;
+                usage?.Invoke(Usage(watch.Elapsed, result.Usage?.Total ?? 0, result.Cost));
                 // Everything Claude wrote, including what it said before using tools.
                 return streamed.Length > 0 ? streamed.ToString().Trim() : result.Result ?? "";
             }
+        }
+
+        /// <summary>"12 s · 5.2k tokens · $0.02": the time, the tokens read and written, and their price at API rates.</summary>
+        public static string Usage(TimeSpan took, long tokens, double cost)
+        {
+            var parts = new List<string> { took.TotalSeconds < 10 ? took.TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " s" : (int)took.TotalSeconds + " s" };
+            if (tokens > 0)
+            {
+                parts.Add((tokens >= 1000 ? (tokens / 1000.0).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "k" : tokens.ToString(System.Globalization.CultureInfo.InvariantCulture)) + " tokens");
+            }
+            if (cost > 0)
+            {
+                parts.Add("$" + cost.ToString(cost < 0.1 ? "0.000" : "0.00", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            return string.Join(" · ", parts);
         }
 
         /// <summary>Splits the follow-up questions off an answer.</summary>

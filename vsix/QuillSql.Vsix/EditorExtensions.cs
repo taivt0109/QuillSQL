@@ -152,7 +152,8 @@ namespace QuillSql.Vsix
                         continue;
                     }
                     var type = issue.Severity == "warning" ? PredefinedErrorTypeNames.Warning : PredefinedErrorTypeNames.HintedSuggestion;
-                    var tip = issue.Code + ": " + Loc.Issue(issue.Message) + (issue.Fix == null ? "" : "\n" + Loc.T("Fix available: " + Loc.T(issue.Fix.Title) + " (Tools > QuillSQL > Fix Code Issues)"));
+                    var tip = issue.Code + ": " + Loc.Issue(issue.Message) + (issue.Fix == null ? "" : "\n" + Loc.T("Fix available: " + Loc.T(issue.Fix.Title) + " (Tools > QuillSQL > Fix Code Issues)"))
+                        + "\n" + Loc.T("With the caret here, QuillSQL > Fix Code Issues with AI rewrites this statement.");
                     spans.Add(Tuple.Create(snapshot.CreateTrackingSpan(start, length, SpanTrackingMode.EdgeExclusive), (IErrorTag)new ErrorTag(type, tip)));
                 }
                 Log.Verbose("underlined " + spans.Count + " issue(s): " + string.Join(",", issues.Select(i => i.Code)));

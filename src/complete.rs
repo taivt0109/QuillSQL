@@ -532,7 +532,7 @@ fn opener(head: &[Token], from: usize, to: usize) -> Option<usize> {
 }
 
 /// Whether token `i` ends a value: a name, literal, variable or closing parenthesis.
-fn ends_operand(head: &[Token], i: usize) -> bool {
+pub(crate) fn ends_operand(head: &[Token], i: usize) -> bool {
     match head[i].kind {
         Kind::Number | Kind::Str | Kind::Variable | Kind::RParen | Kind::Bracket | Kind::Quoted => true,
         // `SELECT *` and `t.*`: a `*` with no operand before it is every column, not a product.

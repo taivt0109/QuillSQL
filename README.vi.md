@@ -103,6 +103,7 @@ SSMS không cho thay extension khi đang chạy, nên bản cập nhật đượ
 | Ctrl+B, Ctrl+H | Lịch sử query |
 | Ctrl+B, Ctrl+I | Khung chat AI |
 | Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Hỏi AI / phân tích plan bằng AI |
+| Ctrl+B, Ctrl+X | Sửa lỗi của lần chạy gần nhất bằng AI |
 | Ctrl+B, Ctrl+O | Tùy chọn |
 | Ctrl+Shift+D | Làm mới gợi ý (đọc lại object của database) |
 
@@ -292,7 +293,9 @@ Các lệnh này dùng Claude Code CLI trên máy bạn. Mọi tool của Claude
 - **Claude tự tra cứu.** Trong lúc trả lời, Claude đọc được database đang kết nối qua các tool chỉ đọc: tìm đối tượng và cột, xem cấu trúc bảng (cột, khóa, index, partition), đọc định nghĩa, mức dùng index, gợi ý index còn thiếu, statistics, plan ước tính, Query Store, các query đang chạy và cấu hình server. Mỗi lần tra cứu hiện thành một bước dưới câu trả lời; bấm vào để xem Claude đã đọc được gì.
   Tra cứu chuyên sâu: query nào dùng một index, query bị chậm đi, query chờ gì, cảnh báo trong plan (implicit conversion, spill, key lookup...), parameter sniffing, thống kê procedure, memory grant, mức dùng CPU/IO/memory, chuỗi blocking, lock, transaction đang mở, deadlock gần đây, index không dùng và index trùng, khóa ngoại thiếu index, heap, statistics cũ, page split và chờ lock theo index, độ trễ file, transaction log và tempdb, cột identity sắp chạm giới hạn, thay đổi schema gần đây và các kết nối.
 - **Cho AI đọc dữ liệu** (mặc định tắt) cho phép Claude chạy câu SELECT chỉ đọc, đo một query và phân tích dữ liệu một cột, tối đa 200 dòng, trong transaction luôn được rollback; câu lệnh có ghi dữ liệu bị từ chối.
+- Trước khi đề xuất index, Claude đối chiếu nó với các index sẵn có của bảng (index trùng khoá hoặc trùng phần đầu khoá, index sẽ bị thừa) và đưa ra câu `CREATE INDEX` hoàn chỉnh kèm dung lượng tối đa, tính từ số dòng và độ rộng các cột.
 - Mỗi lần tra cứu được chạy tối đa 60 giây; chỉnh trong **Options > AI** (10 đến 600).
+- Dưới mỗi câu trả lời có thời gian trả lời, số token đã đọc và viết, và giá tính theo giá API (gói Claude không tính tiền theo từng câu trả lời).
 - Không cần cài hay cấu hình gì trong Claude Code: QuillSQL chạy các tool này ngay trong SSMS trên 127.0.0.1, chỉ trong lúc trả lời, có token dùng một lần, và chỉ truyền cho `claude` của lần trả lời đó.
 
 Các lệnh dưới đây mở chủ đề mới trong khung chat, gửi kèm sẵn dữ liệu phù hợp, để bạn hỏi tiếp:
@@ -302,9 +305,15 @@ Các lệnh dưới đây mở chủ đề mới trong khung chat, gửi kèm s�
 - **Analyze Actual Plan with AI (runs the query)...:** như trên nhưng dùng số liệu đo thật (số dòng, số lần đọc, thời gian của từng bước). Lệnh này chạy query rồi bỏ kết quả, nên chỉ nhận script chỉ đọc và hỏi bạn trước khi chạy.
 - **Find Slow Queries with AI (Query Store):** 10 query tốn nhất trong 7 ngày qua, plan của các query chậm nhất và index của các bảng liên quan.
 
-**Ask AI...** (Ctrl+B, Ctrl+G) viết SQL từ một yêu cầu ("10 khách hàng có tổng đơn hàng cao nhất năm nay"), hoặc viết lại đoạn đang chọn ("thêm phân trang"), chèn thẳng vào editor và bôi đen sẵn; một lần Undo là bỏ.
+**Ask AI...** (Ctrl+B, Ctrl+G) viết SQL từ một yêu cầu ("10 khách hàng có tổng đơn hàng cao nhất năm nay"), hoặc viết lại đoạn đang chọn ("thêm phân trang").
 
-Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ `{ "model": "sonnet", "language": "Vietnamese" }`. `language` là ngôn ngữ của phần giải thích và comment.
+**Fix Errors with AI** (Ctrl+B, Ctrl+X) đọc các lỗi mà lần chạy gần nhất in ra trong tab Messages của cửa sổ (`Msg 207 ... Invalid column name`) rồi nhờ Claude sửa script, hoặc đoạn đang chọn, kèm một comment ngắn ở mỗi chỗ sửa. **Fix Code Issues with AI** sửa những gì phân tích code gạch chân: cảnh báo tại con trỏ (trong câu lệnh chứa nó), các cảnh báo trong đoạn đang chọn, hoặc của cả script, mà không đổi kết quả của SQL.
+
+Ba lệnh này không bao giờ sửa script mà không cho xem trước. SQL Claude viết được đối chiếu với bảng và cột của database; nếu có tên không tồn tại, QuillSQL gửi lại cho Claude một lần kèm chỗ sai. Sau đó một cửa sổ hiện SQL mới bên cạnh đoạn nó thay thế, dòng bị bỏ tô đỏ, dòng mới tô xanh, chỗ còn sai ghi ở trên cùng; **Apply** (hoặc **Insert**) đưa nó vào editor trong một bước Undo.
+
+**Document Table with AI** (trong menu QuillSQL, cho bảng hoặc view tại con trỏ; hoặc chuột phải lên bảng, view trong Object Explorer) viết `MS_Description` cho bảng và các cột chưa có mô tả, dựa trên cột, khoá, tham chiếu và, khi bật **Let AI read data**, năm dòng dữ liệu mẫu. Nó mở script lưu các mô tả (`sp_addextendedproperty`, hoặc `sp_updateextendedproperty` nếu đã có) để bạn đọc, sửa rồi chạy; chưa chạy thì chưa lưu gì. Sau đó mô tả hiện trong gợi ý và trên card.
+
+Model, ngôn ngữ của phần giải thích và comment, và giới hạn thời gian tra cứu được chỉnh trong **Options > AI** (lưu trong `%LOCALAPPDATA%\QuillSQL\ai.json`).
 
 ### Nhận biết nhanh
 

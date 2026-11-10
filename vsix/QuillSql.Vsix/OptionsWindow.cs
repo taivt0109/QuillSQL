@@ -652,6 +652,7 @@ namespace QuillSql.Vsix
             return Stack(
                 statusPill,
                 Row(Label("Model (empty: your default)"), model),
+                Note("sonnet answers well and quickly, opus thinks deepest but is slower and costs more, haiku is the fastest. Under each answer in the AI chat: how long it took, the tokens it used and their price at API rates."),
                 Row(Label("Answer language"), language),
                 Note("For example Vietnamese or English. Explanations and SQL comments are written in it."),
                 Row(Label("Time limit of a database lookup (seconds)"), timeout),

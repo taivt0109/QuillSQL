@@ -23,7 +23,7 @@ namespace QuillSql.Vsix
     public sealed class QuillSqlPackage : AsyncPackage
     {
         /// <summary>Must match the VSIX manifest and Cargo.toml; scripts\set-version.ps1 changes all three.</summary>
-        public const string Version = "0.4.26";
+        public const string Version = "0.4.27";
 
         private static readonly Guid CommandSet = new Guid("c81e3b77-94a2-4f60-b1d8-5a7c2e9f0d36");
         private const int FormatCommandId = 0x0100;
@@ -44,6 +44,9 @@ namespace QuillSql.Vsix
         private const int AskAiCommandId = 0x0110;
         private const int ExplainAiCommandId = 0x0111;
         private const int ReviewAiCommandId = 0x0112;
+        private const int FixErrorsAiCommandId = 0x013C;
+        private const int FixIssuesAiCommandId = 0x013D;
+        private const int DocumentAiCommandId = 0x013E;
         private const int PlanAiCommandId = 0x0113;
         private const int ActualPlanAiCommandId = 0x0114;
         private const int SlowQueriesAiCommandId = 0x0115;
@@ -107,6 +110,9 @@ namespace QuillSql.Vsix
             add(AskAiCommandId, () => AiAssistant.AskForSql(this));
             add(ExplainAiCommandId, () => AiAssistant.Explain(this));
             add(ReviewAiCommandId, () => AiAssistant.Review(this));
+            add(FixErrorsAiCommandId, () => AiEdits.FixErrors(this));
+            add(FixIssuesAiCommandId, () => AiEdits.FixIssues(this));
+            add(DocumentAiCommandId, () => AiEdits.Document(this));
             add(PlanAiCommandId, () => AiAssistant.AnalyzePlan(this, false));
             add(ActualPlanAiCommandId, () => AiAssistant.AnalyzePlan(this, true));
             add(SlowQueriesAiCommandId, () => AiAssistant.ReviewSlowQueries(this));

@@ -495,6 +495,7 @@ namespace QuillSql.Vsix
                         }
                         view.Children.Insert(1, steps);
                     }
+                    AddCopyAnswer(view, answer, m.Usage);
                     _messages.Children.Add(view);
                     if (i == thread.Messages.Count - 1)
                     {
@@ -709,7 +710,7 @@ namespace QuillSql.Vsix
 
             _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
             {
-                string answer = null, error = null, sent = null;
+                string answer = null, error = null, sent = null, used = null;
                 var session = thread.Session;
                 await TaskScheduler.Default;
                 try
@@ -719,14 +720,14 @@ namespace QuillSql.Vsix
                     stage = Loc.T("Claude is thinking...");
                     try
                     {
-                        answer = AiChat.Send(ref session, input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token, toolsToken);
+                        answer = AiChat.Send(ref session, input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token, toolsToken, u => used = u);
                     }
                     catch (InvalidOperationException) when (session != null && streamed.Length == 0 && !cancel.IsCancellationRequested)
                     {
                         // The session is gone (for example the CLI's history was cleared): start a new
                         // one with the conversation so far.
                         session = null;
-                        answer = AiChat.Send(ref session, Transcript(thread) + input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token, toolsToken);
+                        answer = AiChat.Send(ref session, Transcript(thread) + input, d => { lock (streamed) { streamed.Append(d); } }, cancel.Token, toolsToken, u => used = u);
                     }
                 }
                 catch (OperationCanceledException)
@@ -750,8 +751,8 @@ namespace QuillSql.Vsix
                 {
                     var text = AiChat.WithoutNext(answer, out var next);
                     Render(document, text);
-                    AddCopyAnswer(answerView, text);
-                    thread.Messages.Add(new ChatMessage { Role = "assistant", Text = answer, Steps = stepLabels });
+                    AddCopyAnswer(answerView, text, used);
+                    thread.Messages.Add(new ChatMessage { Role = "assistant", Text = answer, Steps = stepLabels, Usage = used });
                     if (_thread == thread)
                     {
                         AddFollowUps(next);
@@ -1416,16 +1417,29 @@ namespace QuillSql.Vsix
             return view;
         }
 
-        private static void AddCopyAnswer(StackPanel view, string text)
+        /// <summary>Copy answer, and beside it the time and tokens the answer took.</summary>
+        private static void AddCopyAnswer(StackPanel view, string text, string usage)
         {
             var copy = Theme.FlatButton(Loc.T("Copy answer"), Theme.CopyGlyph);
-            copy.HorizontalAlignment = HorizontalAlignment.Left;
-            copy.Margin = new Thickness(0, 6, 0, 0);
             copy.Background = Brushes.Transparent;
             copy.BorderThickness = new Thickness(0);
             copy.Opacity = 0.8;
             copy.Click += (s, e) => Copy(text);
-            view.Children.Add(copy);
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+            row.Children.Add(copy);
+            if (!string.IsNullOrEmpty(usage))
+            {
+                row.Children.Add(new TextBlock
+                {
+                    Text = usage,
+                    Opacity = 0.6,
+                    FontSize = 11,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(10, 0, 0, 0),
+                    ToolTip = Loc.T("How long the answer took and the tokens it read and wrote; the price is at API rates (a Claude subscription is not charged per answer)."),
+                });
+            }
+            view.Children.Add(row);
         }
 
         private UIElement ErrorMessage(string message, Action retry)

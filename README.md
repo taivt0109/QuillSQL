@@ -96,6 +96,7 @@ daily check off, create `%LOCALAPPDATA%\QuillSQL\settings.json` containing
 | Ctrl+B, Ctrl+H | Query history |
 | Ctrl+B, Ctrl+I | AI Chat |
 | Ctrl+B, Ctrl+G / Ctrl+B, Ctrl+P | Ask AI / analyze the plan with AI |
+| Ctrl+B, Ctrl+X | Fix the errors of the last run with AI |
 | Ctrl+B, Ctrl+O | Options |
 | Ctrl+Shift+D | Refresh suggestions (read the database's objects again) |
 
@@ -347,7 +348,12 @@ windows for a conversation on one topic: ask, then keep asking, and Claude remem
 - **Let AI read data** (off by default) also lets Claude run read-only SELECTs, measure a query
   and profile a column, at most 200 rows, in a transaction that is always rolled back; statements
   that write are refused.
+- Before proposing an index, Claude checks it against the table's indexes (one with the same or
+  leading keys, one it would make redundant) and gives the whole `CREATE INDEX` with its size at
+  most, from the rows and the columns' widths.
 - Each lookup may take at most 60 seconds; change it in **Options > AI** (10 to 600).
+- Under each answer: how long it took, the tokens it read and wrote, and their price at API rates
+  (a Claude subscription is not charged per answer).
 - Nothing needs installing or configuring in Claude Code: QuillSQL serves these tools from SSMS
   on 127.0.0.1, only during an answer, behind a one-time token, and passes them to `claude` for
   that answer only.
@@ -365,10 +371,29 @@ questions:
   the plans of the slowest, and their tables' indexes.
 
 **Ask AI...** (Ctrl+B, Ctrl+G) writes SQL from a request ("top 10 customers by order total this
-year"), or rewrites the selection ("add paging"), straight into the editor, selected, as one Undo
-step. Optional settings in
-`%LOCALAPPDATA%\QuillSQL\ai.json`: `{ "model": "sonnet", "language": "English" }`, where
-`language` is the language of explanations and comments.
+year"), or rewrites the selection ("add paging").
+
+**Fix Errors with AI** (Ctrl+B, Ctrl+X) reads the errors the last run printed in the window's
+Messages tab (`Msg 207 ... Invalid column name`) and has Claude correct the script, or the
+selection, with a short comment at each fix. **Fix Code Issues with AI** fixes what code analysis
+underlines: the issue at the caret, in its statement; those in the selection; or the whole
+script's, keeping what the SQL does.
+
+These three never change the script without showing it first. The SQL Claude writes is checked
+against the database's tables and columns; when it names one that does not exist, it goes back to
+Claude once with what was wrong. Then a window shows it beside the text it replaces, the removed
+lines red and the new ones green, with what is still wrong at the top; **Apply** (or **Insert**)
+puts it in the editor as one Undo step.
+
+**Document Table with AI** (in the QuillSQL menu, on the table or view at the caret; or
+right-click a table or view in Object Explorer) writes the `MS_Description` of the table and of its
+columns that have none, from its columns, keys, references and, when **Let AI read data** is on,
+five sample rows. It opens the script that saves them (`sp_addextendedproperty`, or
+`sp_updateextendedproperty` for one already there) to read, correct and run; nothing is saved
+before you run it. The descriptions then show in the suggestions and on the cards.
+
+The model, the language of explanations and comments and the lookup time limit are set in
+**Options > AI** (saved in `%LOCALAPPDATA%\QuillSQL\ai.json`).
 
 ### Safety at a glance
 

@@ -184,12 +184,52 @@ static class HookDriver
             var tabs = Send("tabs");
             Check("query tab colored", int.TryParse(tabs, out var n) && n > 0, tabs);
 
+            // Fix with AI reads the errors of the last run from the Messages tab.
+            Send("set|select Emial from dbo.Customers|"); Send("command|Query.Execute");
+            var errors = "";
+            for (var i = 0; i < 20 && !errors.Contains("Msg "); i++) { Send("wait|500"); errors = Send("errors"); }
+            Check("errors read from the Messages tab", errors.Contains("Msg 207") && errors.Contains("Emial"), errors);
+
+            // The AI edits, with Claude itself when its CLI is installed: the review window shows, then applies itself.
+            if (Send("claude") == "yes")
+            {
+                Send("autoapply");
+                Send("set|select Nme from dbo.Customers|"); Send("command|Query.Execute");
+                for (var i = 0; i < 20 && !Send("errors").Contains("Msg 207"); i++) Send("wait|500");
+                Send("command|QuillSQL.FixErrorsWithAI");
+                t = "";
+                for (var i = 0; i < 360 && !t.Contains("Name"); i++) { Send("wait|500"); t = Send("text"); }
+                Check("Fix Errors with AI corrects the column", t.Contains("Name") && !t.Contains("Nme "), t);
+                var review = Send("review");
+                Check("the fix was shown before it was applied", review.Contains("before:\nselect Nme") && review.Contains("Name"), review);
+
+                Send("set|SELECT * FROM dbo.Customers ORDER BY 1|");
+                Send("command|QuillSQL.FixCodeIssuesWithAI");
+                t = "";
+                for (var i = 0; i < 360 && (t.Length == 0 || t.Contains("ORDER BY 1")); i++) { Send("wait|500"); t = Send("text"); }
+                Check("Fix Code Issues with AI rewrites ORDER BY 1", !t.Contains("ORDER BY 1") && t.Contains("ORDER BY"), t);
+
+                Send("set|select * from dbo.Tickets|");
+                Send("command|QuillSQL.DocumentTableWithAI");
+                t = "";
+                for (var i = 0; i < 360 && !t.Contains("sp_addextendedproperty"); i++) { Send("wait|500"); t = Send("text"); }
+                Check("Document Table with AI writes the script", t.Contains("sp_addextendedproperty") && t.Contains("@level2name = N'State'"), t);
+                Send("command|Query.Execute"); Send("wait|3000");
+                errors = Send("errors");
+                Check("the description script runs", errors == "(none)", errors);
+            }
+            else
+            {
+                Console.WriteLine("SKIP the AI edits: the Claude Code CLI is not installed");
+            }
+
             // SSMS killed with a query window open: the next start reopens it.
             Send("set|select 'restore me' as probe"); Send("save");
             ssms.Kill(); ssms.WaitForExit(30000);
             ssms = Launch(ide);
             var reopened = Send("reopen");
-            t = Send("text");
+            // Every reopened window: the AI steps leave more than one open.
+            t = Send("alltext");
             Check("query windows reopened after SSMS was killed", reopened != "0" && t.Contains("restore me"), reopened + " / " + t);
 
             Console.WriteLine(failures == 0 ? "ALL PASSED" : failures + " FAILED");

@@ -31,6 +31,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="AiAssistant.cs" />
+    <Compile Include="AiEdits.cs" />
     <Compile Include="SignatureTip.cs" />
     <Compile Include="TestHook.cs" />
     <Compile Include="SessionKeeper.cs" />

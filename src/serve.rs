@@ -296,6 +296,10 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
             let budget = request["budget"].as_u64().map_or(40_000, |v| v as usize);
             Ok(json!({ "text": state.schemas.get(key).map(|s| info::schema_context(text, s, budget)) }))
         }
+        "check_sql" => {
+            let text = str_field(request, "text")?;
+            Ok(json!({ "problems": state.schemas.get(key).map(|s| quillsql::check::problems(text, s)).unwrap_or_default() }))
+        }
         "plan_target" => {
             let text = str_field(request, "text")?;
             let objects = state.schemas.get(key).map(|s| info::referenced_objects(text, s)).unwrap_or_default();

@@ -12,7 +12,8 @@ namespace QuillSql.Vsix
 {
     /// <summary>
     /// Adds "QuillSQL: Tab Color..." to the right-click menu of servers and databases in Object
-    /// Explorer. Object Explorer's menus take items derived from its ToolsMenuItemBase class; SSMS's
+    /// Explorer, the Compare commands to databases and "Document with AI" to tables and views. Object
+    /// Explorer's menus take items derived from its ToolsMenuItemBase class; SSMS's
     /// assemblies are not available when QuillSQL is built, so the item type is made at run time
     /// and everything else goes through reflection. If any of it is missing, the menu item simply
     /// does not appear; the command in the QuillSQL menu does the same for the active window.
@@ -23,7 +24,7 @@ namespace QuillSql.Vsix
         private static readonly ConditionalWeakTable<object, object> Extended = new ConditionalWeakTable<object, object>();
         private static DispatcherTimer _retry;
         private static object _explorer;
-        private static Type _itemType, _schemaItemType, _dataItemType, _explorerType, _nodeType, _contextType, _menuHandlerType;
+        private static Type _itemType, _schemaItemType, _dataItemType, _documentItemType, _explorerType, _nodeType, _contextType, _menuHandlerType;
         private static ModuleBuilder _module;
 
         /// <summary>The package, for opening Compare windows from the menu.</summary>
@@ -78,6 +79,7 @@ namespace QuillSql.Vsix
                 _itemType = MakeItemType(itemBase, "QuillSql.TabColorMenuItem", typeof(ObjectExplorerCallbacks));
                 _schemaItemType = MakeItemType(itemBase, "QuillSql.CompareSchemaMenuItem", typeof(CompareSchemaCallbacks));
                 _dataItemType = MakeItemType(itemBase, "QuillSql.CompareDataMenuItem", typeof(CompareDataCallbacks));
+                _documentItemType = MakeItemType(itemBase, "QuillSql.DocumentMenuItem", typeof(DocumentCallbacks));
                 changed.AddEventHandler(actionContext, new EventHandler(OnSelectionChanged));
                 Log.Write("Object Explorer menu ready");
                 return true;
@@ -129,6 +131,8 @@ namespace QuillSql.Vsix
 
         public static object NewDataItem() => Item(_dataItemType, "QuillSQL: Compare Data With...");
 
+        public static object NewDocumentItem() => Item(_documentItemType, "QuillSQL: Document with AI...");
+
         private static object Item(Type type, string text)
         {
             var item = Activator.CreateInstance(type);
@@ -156,7 +160,8 @@ namespace QuillSql.Vsix
                 var node = nodes.GetValue(0);
                 var path = _contextType.GetProperty("UrnPath")?.GetValue(node) as string;
                 Log.Verbose("Object Explorer selection: " + path);
-                if (path != "Server" && path != "Server/Database")
+                var objectNode = path == "Server/Database/Table" || path == "Server/Database/View";
+                if (path != "Server" && path != "Server/Database" && !objectNode)
                 {
                     return;
                 }
@@ -166,6 +171,11 @@ namespace QuillSql.Vsix
                 }
                 Extended.Add(menu, null);
                 var addChild = menu.GetType().GetMethod("AddChild", new[] { typeof(string), typeof(object) });
+                if (objectNode)
+                {
+                    addChild?.Invoke(menu, new object[] { string.Empty, NewDocumentItem() });
+                    return;
+                }
                 addChild?.Invoke(menu, new object[] { string.Empty, NewItem() });
                 if (path == "Server/Database" && _schemaItemType != null)
                 {
@@ -196,6 +206,15 @@ namespace QuillSql.Vsix
             }
             var server = part("Server");
             return server == null ? null : Tuple.Create(server, part("Database"));
+        }
+
+        /// <summary>The schema.name of a table or view node, from its context path.</summary>
+        public static string ObjectName(object item)
+        {
+            var node = item.GetType().GetProperty("Parent")?.GetValue(item);
+            var context = node == null ? null : _contextType.GetProperty("Context")?.GetValue(node) as string;
+            var m = context == null ? null : Regex.Match(context, @"(?:Table|View)\[@Name='((?:[^']|'')*)' and @Schema='((?:[^']|'')*)'\]");
+            return m == null || !m.Success ? null : m.Groups[2].Value.Replace("''", "'") + "." + m.Groups[1].Value.Replace("''", "'");
         }
     }
 
@@ -228,6 +247,56 @@ namespace QuillSql.Vsix
         }
 
         public static object Clone(object item) => ObjectExplorerMenu.NewItem();
+    }
+
+    /// <summary>
+    /// "QuillSQL: Document with AI..." on a table or view: a new query window on its database, where
+    /// the script that sets the descriptions Claude writes appears, to review and run.
+    /// </summary>
+    public static class DocumentCallbacks
+    {
+        public static void Invoke(object item)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            try
+            {
+                var name = ObjectExplorerMenu.ObjectName(item);
+                if (name == null || ObjectExplorerMenu.HostPackage == null)
+                {
+                    EditorContext.Status("could not read the name of this table.");
+                    return;
+                }
+                // New Query connects to the database selected in Object Explorer.
+                EditorContext.Dte?.ExecuteCommand("File.NewQuery");
+                var target = ConnectionResolver.TryGetActive();
+                var view = EditorContext.Active()?.View;
+                if (target == null || !target.CanQuery || view == null)
+                {
+                    EditorContext.Status("could not open a query window on this database.");
+                    return;
+                }
+                EditorContext.For(view)?.Replace(0, 0, "-- " + Loc.T("Claude is describing " + name + "...") + Environment.NewLine);
+                AiEdits.DocumentTable(ObjectExplorerMenu.HostPackage, target, name, script =>
+                {
+                    ThreadHelper.ThrowIfNotOnUIThread();
+                    var editor = EditorContext.For(view);
+                    if (editor != null)
+                    {
+                        editor.ReplaceAll(script);
+                    }
+                    else
+                    {
+                        EditorContext.OpenInNewQuery(script);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error("document with AI from Object Explorer", ex);
+            }
+        }
+
+        public static object Clone(object item) => ObjectExplorerMenu.NewDocumentItem();
     }
 
     /// <summary>"QuillSQL: Compare Schema With..." on a database: a Compare window with it as the source.</summary>

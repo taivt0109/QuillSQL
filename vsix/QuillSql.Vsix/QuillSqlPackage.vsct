@@ -230,6 +230,33 @@
           <LocCanonicalName>.QuillSQL.ReviewWithAI</LocCanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidQuillSqlCmdSet" id="FixErrorsAiCommandId" priority="0x0102" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>Fix Errors with AI</ButtonText>
+          <CanonicalName>.QuillSQL.FixErrorsWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.FixErrorsWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="FixIssuesAiCommandId" priority="0x0102" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>Fix Code Issues with AI</ButtonText>
+          <CanonicalName>.QuillSQL.FixCodeIssuesWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.FixCodeIssuesWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidQuillSqlCmdSet" id="DocumentAiCommandId" priority="0x0105" type="Button">
+        <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings>
+          <ButtonText>Document Table with AI</ButtonText>
+          <CanonicalName>.QuillSQL.DocumentTableWithAI</CanonicalName>
+          <LocCanonicalName>.QuillSQL.DocumentTableWithAI</LocCanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidQuillSqlCmdSet" id="PlanAiCommandId" priority="0x0103" type="Button">
         <Parent guid="guidQuillSqlCmdSet" id="AiGroup" />
         <CommandFlag>TextChanges</CommandFlag>
@@ -552,6 +579,7 @@
     <KeyBinding guid="guidQuillSqlCmdSet" id="AiChatCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="I" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="AskAiCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="G" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="PlanAiCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="P" mod2="Control" />
+    <KeyBinding guid="guidQuillSqlCmdSet" id="FixErrorsAiCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="X" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="FormatCommandId" editor="guidVSStd97" key1="K" mod1="Control" key2="Y" mod2="Control" />
   </KeyBindings>
 
@@ -609,6 +637,9 @@
       <IDSymbol name="AskAiCommandId" value="0x0110" />
       <IDSymbol name="ExplainAiCommandId" value="0x0111" />
       <IDSymbol name="ReviewAiCommandId" value="0x0112" />
+      <IDSymbol name="FixErrorsAiCommandId" value="0x013C" />
+      <IDSymbol name="FixIssuesAiCommandId" value="0x013D" />
+      <IDSymbol name="DocumentAiCommandId" value="0x013E" />
       <IDSymbol name="PlanAiCommandId" value="0x0113" />
       <IDSymbol name="ActualPlanAiCommandId" value="0x0114" />
       <IDSymbol name="SlowQueriesAiCommandId" value="0x0115" />

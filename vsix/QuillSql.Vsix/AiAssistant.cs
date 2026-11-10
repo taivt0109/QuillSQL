@@ -53,7 +53,7 @@ namespace QuillSql.Vsix
         private const int TimeoutSeconds = 180;
         private static readonly string Folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuillSQL");
 
-        private const string SqlOnly =
+        internal const string SqlOnly =
             "You are a T-SQL assistant inside SQL Server Management Studio. Reply with T-SQL only: no Markdown, no code fences, " +
             "and any explanation as SQL comments. Use only the tables, columns and procedures in the schema you are given; " +
             "if something you need is missing, say so in a comment. Keep the user's style and casing.";
@@ -124,7 +124,7 @@ namespace QuillSql.Vsix
         }
 
         /// <summary>Runs one Claude request and returns its answer; throws with a readable message on failure.</summary>
-        private static string Ask(string systemPrompt, string input)
+        internal static string Ask(string systemPrompt, string input)
         {
             var claude = FindClaude() ?? throw new InvalidOperationException("Claude Code CLI was not found. Install it and sign in with `claude` first.");
             var settings = LoadSettings();
@@ -201,7 +201,7 @@ namespace QuillSql.Vsix
         }
 
         /// <summary>Removes a Markdown code fence if the model added one anyway.</summary>
-        private static string StripFence(string text)
+        internal static string StripFence(string text)
         {
             var t = text.Trim();
             if (!t.StartsWith("```", StringComparison.Ordinal))
@@ -221,7 +221,7 @@ namespace QuillSql.Vsix
             return string.IsNullOrEmpty(schema) ? "(No database metadata: not connected, or still loading.)" : schema;
         }
 
-        private static void Start(AsyncPackage package, string what, Func<string> work, Action<string> done)
+        internal static void Start(AsyncPackage package, string what, Func<string> work, Action<string> done)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             EditorContext.Status("asking Claude to " + what + "...");
@@ -273,29 +273,8 @@ namespace QuillSql.Vsix
             var selected = editor.HasSelection ? editor.Text.Substring(editor.SelectionStart, editor.SelectionEnd - editor.SelectionStart) : null;
             var input = "Request: " + request + "\n\nSchema:\n" + Context(editor, key)
                 + (selected != null ? "\nRewrite this SQL (reply with the replacement only):\n" + selected : "\nThe script so far, for context (reply with only the new SQL to insert):\n" + editor.Text);
-            Start(package, "write SQL", () => StripFence(Ask(SqlOnly, input)), answer =>
-            {
-                ThreadHelper.ThrowIfNotOnUIThread();
-                var now = EditorContext.For(editor.View);
-                if (now == null || now.Text != editor.Text)
-                {
-                    EditorContext.Status("the script changed while Claude was answering; nothing was inserted.");
-                    Commands.WriteOutput(new[] { "Claude's answer (not inserted):", answer });
-                    return;
-                }
-                if (selected != null)
-                {
-                    now.Replace(editor.SelectionStart, editor.SelectionEnd, answer);
-                    now.Select(editor.SelectionStart, editor.SelectionStart + answer.Length);
-                }
-                else
-                {
-                    var text = (editor.Caret > 0 && editor.Text[editor.Caret - 1] != '\n' ? Environment.NewLine : "") + answer + Environment.NewLine;
-                    now.Replace(editor.Caret, editor.Caret, text);
-                    now.Select(editor.Caret, editor.Caret + text.Length);
-                }
-                EditorContext.Status("Claude's SQL inserted; review it before running. Undo removes it.");
-            });
+            AiEdits.Edit(package, "write SQL", "Ask AI", editor, editor.SelectionStart, editor.SelectionEnd, input, key,
+                selected != null ? "Claude's SQL replaced the selection; review it before running. Undo reverts it." : "Claude's SQL inserted; review it before running. Undo removes it.");
         });
 
         internal static PlanTarget Target(string key, string sql)

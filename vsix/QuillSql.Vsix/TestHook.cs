@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
 using System.Linq;
@@ -212,6 +213,28 @@ namespace QuillSql.Vsix
                 }
                 case "status":
                     return EditorContext.Dte?.StatusBar.Text ?? "";
+                case "alltext":
+                {
+                    // The text of every open document, one after the other.
+                    var all = new List<string>();
+                    foreach (EnvDTE.Document d in EditorContext.Dte.Documents)
+                    {
+                        if (d.Object("TextDocument") is EnvDTE.TextDocument document)
+                        {
+                            all.Add(document.StartPoint.CreateEditPoint().GetText(document.EndPoint));
+                        }
+                    }
+                    return string.Join("\n----\n", all);
+                }
+                case "claude":
+                    return AiAssistant.FindClaude() != null ? "yes" : "no";
+                case "autoapply":
+                    AiEdits.AutoApply = true;
+                    return "ok";
+                case "review":
+                    return AiEdits.LastReview ?? "";
+                case "errors":
+                    return AiEdits.Errors(AiEdits.Messages(AiEdits.ActiveDocView())) ?? "(none)";
                 case "tabs":
                     return TabColorizer.ColoredTabs.ToString();
                 case "command":

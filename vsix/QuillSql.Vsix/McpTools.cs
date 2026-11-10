@@ -33,6 +33,19 @@ namespace QuillSql.Vsix
         /// <summary>"[name]" without its brackets, so names can be given either way.</summary>
         private static string Bare(string name) => name.Trim().TrimStart('[').TrimEnd(']');
 
+        /// <summary>The columns of "a, [b] DESC": their names and whether descending.</summary>
+        private static List<(string Name, bool Descending)> IndexColumns(string list) => list
+            .Split(',')
+            .Select(c => c.Trim())
+            .Where(c => c.Length > 0)
+            .Select(c =>
+            {
+                var descending = c.EndsWith(" DESC", StringComparison.OrdinalIgnoreCase);
+                var name = descending ? c.Substring(0, c.Length - 5) : c.EndsWith(" ASC", StringComparison.OrdinalIgnoreCase) ? c.Substring(0, c.Length - 4) : c;
+                return (Bare(name), descending);
+            })
+            .ToList();
+
         /// <summary>How a plan uses an index: its operators on it, such as "Index Seek, Key Lookup".</summary>
         private static string IndexAccess(string planXml, string index)
         {
@@ -578,6 +591,68 @@ FROM k AS a JOIN k AS b ON a.object_id = b.object_id AND a.index_id <> b.index_i
     AND LEFT(b.keys, LEN(a.keys)) = a.keys AND (a.keys <> b.keys OR a.index_id > b.index_id) AND a.filter = b.filter
 WHERE a.type_desc = 'NONCLUSTERED' AND a.is_unique = 0
 ORDER BY [table], a.name;", 60, new SqlParameter("@t", (object)Text(a, "table", false) ?? DBNull.Value)),
+            },
+            new Tool
+            {
+                Name = "check_index",
+                Description = "Checks an index before you propose it: the existing indexes of the table with the same keys, or keys that start with the proposed ones (it would duplicate them) or that the proposed keys start with (it would make them redundant), and its size at most, from the table's rows and the columns' widths. Call it before every CREATE INDEX you propose and say what it found.",
+                Parameters = new[]
+                {
+                    new[] { "table", "string", "schema.name of the table.", "required" },
+                    new[] { "keys", "string", "The key columns in order, comma-separated; DESC after a descending one.", "required" },
+                    new[] { "include", "string", "The included columns, comma-separated.", "" },
+                },
+                Run = (s, a) =>
+                {
+                    var keys = IndexColumns(Text(a, "keys"));
+                    var include = IndexColumns(Text(a, "include", false) ?? "");
+                    var columns = Rows(s, @"
+SELECT c.name, CAST(c.max_length AS int),
+    CASE WHEN EXISTS (SELECT 1 FROM sys.index_columns AS ic WHERE ic.object_id = c.object_id AND ic.index_id = 1 AND ic.column_id = c.column_id AND ic.key_ordinal > 0) THEN 1 ELSE 0 END,
+    (SELECT SUM(p.rows) FROM sys.partitions AS p WHERE p.object_id = c.object_id AND p.index_id IN (0, 1))
+FROM sys.columns AS c WHERE c.object_id = OBJECT_ID(@t) ORDER BY c.column_id;", new SqlParameter("@t", Text(a, "table")));
+                    if (columns.Count == 0)
+                    {
+                        throw new ToolException("No table " + Text(a, "table") + "; use search_objects to find it.");
+                    }
+                    var names = columns.Select(c => (string)c[0]).ToList();
+                    var missing = keys.Concat(include).Select(k => k.Name).Where(n => !names.Contains(n, StringComparer.OrdinalIgnoreCase)).ToList();
+                    if (missing.Count > 0)
+                    {
+                        throw new ToolException("No column " + string.Join(", ", missing) + " in " + Text(a, "table") + "; its columns: " + string.Join(", ", names) + ".");
+                    }
+                    // A leaf row holds the keys, the includes and the clustered key; variable-length columns count at their maximum.
+                    var stored = keys.Select(k => k.Name).Concat(include.Select(i => i.Name)).Concat(columns.Where(c => Convert.ToInt32(c[2], CultureInfo.InvariantCulture) == 1).Select(c => (string)c[0]))
+                        .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    var width = 9 + stored.Sum(n =>
+                    {
+                        var length = Convert.ToInt32(columns.First(c => string.Equals((string)c[0], n, StringComparison.OrdinalIgnoreCase))[1], CultureInfo.InvariantCulture);
+                        return length < 0 ? 200 : length;
+                    });
+                    var rows = Convert.ToInt64(columns[0][3] ?? 0L, CultureInfo.InvariantCulture);
+                    var perPage = Math.Max(1, (int)(8096 * 0.9 / width));
+                    var mb = (rows / perPage + 1) * 8 / 1024.0;
+                    var proposed = string.Join("", keys.Select(k => k.Name + (k.Descending ? " DESC" : "") + ","));
+                    var existing = Table(s, @"
+WITH k AS (
+    SELECT i.index_id, i.name, i.type_desc, i.is_unique, ISNULL(i.filter_definition, '') AS filter,
+        (SELECT c.name + CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE '' END + ','
+         FROM sys.index_columns AS ic JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.key_ordinal > 0 ORDER BY ic.key_ordinal FOR XML PATH('')) AS keys,
+        ISNULL((SELECT c.name + ','
+         FROM sys.index_columns AS ic JOIN sys.columns AS c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+         WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1 ORDER BY c.name FOR XML PATH('')), '') AS includes
+    FROM sys.indexes AS i WHERE i.object_id = OBJECT_ID(@t) AND i.type IN (1, 2) AND i.is_hypothetical = 0)
+SELECT name AS [index], type_desc AS kind, is_unique AS [unique], keys, includes, filter,
+    CASE WHEN LOWER(keys) = LOWER(@p) THEN 'same keys: the proposed index duplicates it'
+         WHEN LOWER(LEFT(keys, LEN(@p))) = LOWER(@p) THEN 'its keys start with the proposed ones: it already serves those seeks'
+         WHEN LOWER(LEFT(@p, LEN(keys))) = LOWER(keys) THEN 'the proposed keys start with its keys: the new index would make it redundant'
+         ELSE '' END AS overlap
+FROM k ORDER BY CASE WHEN LOWER(keys) = LOWER(@p) THEN 0 WHEN LOWER(LEFT(keys, LEN(@p))) = LOWER(@p) OR LOWER(LEFT(@p, LEN(keys))) = LOWER(keys) THEN 1 ELSE 2 END, index_id;", 50,
+                        new SqlParameter("@t", Text(a, "table")), new SqlParameter("@p", proposed));
+                    return "The proposed index takes at most " + mb.ToString("N1", CultureInfo.InvariantCulture) + " MB: " + rows.ToString("N0", CultureInfo.InvariantCulture)
+                        + " rows of at most " + width + " bytes at the leaf (" + string.Join(", ", stored) + ").\nThe table's indexes:\n" + existing;
+                },
             },
             new Tool
             {
