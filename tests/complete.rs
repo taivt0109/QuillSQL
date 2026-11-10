@@ -662,9 +662,9 @@ fn only_what_the_syntax_allows_next() {
     assert_eq!(first("UPDATE c S|"), "SET");
     // An operand alone needs an operator, not a statement.
     let after_operand = labels("SELECT * FROM dbo.Customers WHERE CustomerId I|");
-    assert_eq!(after_operand, ["IN", "IS"], "{after_operand:?}");
+    assert_eq!(after_operand, ["IN", "IS NULL", "IS NOT NULL"], "{after_operand:?}");
     let joined = labels("SELECT * FROM dbo.Customers c JOIN sales.Orders o ON o.CustomerId I|");
-    assert_eq!(joined, ["IN", "IS"], "{joined:?}");
+    assert_eq!(joined, ["IN", "IS NULL", "IS NOT NULL"], "{joined:?}");
     // A whole condition goes on with AND, OR, a clause or the next statement.
     let complete = labels("SELECT * FROM dbo.Customers WHERE CustomerId = 1 I|");
     assert!(complete.contains(&"INSERT".to_string()) && !complete.contains(&"IN".to_string()), "{complete:?}");
@@ -681,7 +681,7 @@ fn only_what_the_syntax_allows_next() {
     assert_eq!(first("SELECT * F|"), "FROM");
     assert_eq!(first("SELECT Name F|"), "FROM");
     assert_eq!(first("IF @x = 1 B|"), "BEGIN");
-    assert_eq!(labels("IF @x I|"), ["IN", "IS"]);
+    assert_eq!(labels("IF @x I|"), ["IN", "IS NULL", "IS NOT NULL"]);
     assert_eq!(first("SELECT * FROM dbo.Customers WHERE (CustomerId = 1) A|"), "AND");
     assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId IS NULL O|"), "OR");
     assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId IN (1, 2) A|"), "AND");
@@ -691,4 +691,44 @@ fn only_what_the_syntax_allows_next() {
     let text = "SELECT * FROM dbo.Customers WHERE N";
     let r: Vec<String> = quillsql::complete::complete_full(text, text.len(), Some(&schema()), &[], options).items.into_iter().map(|i| i.label).collect();
     assert_eq!(r.first().map(String::as_str), Some("Name"), "{r:?}");
+}
+
+#[test]
+fn tab_writes_what_the_word_takes() {
+    let first = |sql: &str| run(sql).items.into_iter().next().map(|i| i.insert).unwrap_or_default();
+    // Parentheses, quotes or the AND of BETWEEN, the caret where the value goes.
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId I|"), "IN ($CURSOR$)");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE Name L|"), "LIKE '$CURSOR$'");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId B|"), "BETWEEN $CURSOR$ AND ");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE NOT EXIS|"), "EXISTS ($CURSOR$)");
+    assert_eq!(first("DECLARE @x NVARCH|"), "NVARCHAR($CURSOR$)");
+    assert_eq!(first("DECLARE @x I|"), "INT");
+    // After a comparison, a literal of the column's type, selected.
+    let c = run("SELECT * FROM dbo.Customers c WHERE c.Name = |");
+    assert_eq!(c.items.first().map(|i| (i.label.as_str(), i.insert.as_str())), Some(("N''", "N'$CURSOR$'")));
+    assert_eq!(c.selected, Some(0));
+    let c = run("UPDATE dbo.Customers SET Name = |");
+    assert_eq!(c.items.first().map(|i| i.insert.as_str()), Some("N'$CURSOR$'"));
+    // A number has no quotes, and nothing is selected.
+    let c = run("SELECT * FROM dbo.Customers WHERE CustomerId = |");
+    assert!(c.items.iter().all(|i| i.kind != "value") && c.selected.is_none());
+    // Typing goes on with the usual suggestions.
+    assert_eq!(labels("SELECT * FROM dbo.Customers c WHERE c.Name = N|").first().map(String::as_str), Some("Name"));
+}
+
+#[test]
+fn snippets_only_where_a_statement_begins() {
+    let snippets = quillsql::snippets::builtins();
+    let labels = |sql: &str| -> Vec<String> {
+        let caret = sql.find('|').unwrap();
+        let text = sql.replace('|', "");
+        complete_with(&text, text[..caret].encode_utf16().count(), Some(&schema()), &snippets).items.into_iter().map(|i| i.label).collect()
+    };
+    // `be` is the BEGIN...END snippet, but after an operand only BETWEEN fits.
+    assert_eq!(labels("SELECT * FROM dbo.Customers c WHERE c.CustomerId Be|"), ["BETWEEN"]);
+    assert!(labels("be|").contains(&"be".to_string()));
+    assert!(labels("SELECT 1;
+ss|").contains(&"ssf".to_string()));
+    assert!(labels("SELECT * FROM dbo.Customers WHERE CustomerId IN (ss|").contains(&"ssf".to_string()));
+    assert!(!labels("SELECT * FROM dbo.Customers WHERE ss|").contains(&"ssf".to_string()));
 }

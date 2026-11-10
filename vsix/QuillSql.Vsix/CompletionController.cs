@@ -55,7 +55,7 @@ namespace QuillSql.Vsix
         private CompletionController(IVsTextView view)
         {
             _view = view;
-            _popup.Committed += Commit;
+            _popup.Committed += () => Commit(true);
             _popup.Clicked += () =>
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
@@ -191,7 +191,7 @@ namespace QuillSql.Vsix
                             // With nothing selected the list only shows guesses: the key does its usual job.
                             if (_popup.Selected != null && (command == VSConstants.VSStd2KCmdID.TAB ? Settings.Current.InsertWithTab : Settings.Current.InsertWithEnter))
                             {
-                                Commit();
+                                Commit(true);
                                 return VSConstants.S_OK;
                             }
                             _popup.Close();
@@ -203,7 +203,8 @@ namespace QuillSql.Vsix
                             if (_popup.Selected != null && ((typedChar == ' ' && settings.InsertWithSpace) || (typedChar == '.' && settings.InsertWithDot)
                                 || (typedChar == ',' && settings.InsertWithComma) || (typedChar == '(' && settings.InsertWithParenthesis)))
                             {
-                                Commit();
+                                // The key types itself next: the word alone, without its parentheses or quotes.
+                                Commit(false);
                             }
                             break;
                         case VSConstants.VSStd2KCmdID.CANCEL:
@@ -637,7 +638,11 @@ namespace QuillSql.Vsix
             Log.Verbose("suggest " + items.Length + ": " + LastShown);
         }
 
-        private void Commit()
+        /// <summary>
+        /// Inserts the selected suggestion. `shaped` (Tab, Enter, a double click) writes what the word
+        /// takes too, `IN ()` or `N''`, with the caret where the engine's `$CURSOR$` stands.
+        /// </summary>
+        private void Commit(bool shaped)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
             var item = _popup.Selected;
@@ -685,19 +690,32 @@ namespace QuillSql.Vsix
                 Commands.ApplyEdit(editor, reply == null ? null : Json.Parse<TabReply>(reply)?.Result);
                 return;
             }
+            const string marker = "$CURSOR$";
+            var insert = item.Insert ?? "";
+            if (insert.Contains(marker) && !shaped)
+            {
+                insert = item.Kind == "value" ? insert.Replace(marker, "") : item.Label;
+            }
+            var at = insert.IndexOf(marker, StringComparison.Ordinal);
+            insert = insert.Replace(marker, "");
             _view.GetBuffer(out var lines);
             lines.GetLineIndexOfPosition(_replaceStart, out var startLine, out var startColumn);
             lines.GetLineIndexOfPosition(caret, out var endLine, out var endColumn);
-            var buffer = Marshal.StringToCoTaskMemUni(item.Insert);
+            var buffer = Marshal.StringToCoTaskMemUni(insert);
             try
             {
-                lines.ReplaceLines(startLine, startColumn, endLine, endColumn, buffer, item.Insert.Length, null);
+                lines.ReplaceLines(startLine, startColumn, endLine, endColumn, buffer, insert.Length, null);
             }
             finally
             {
                 Marshal.FreeCoTaskMem(buffer);
             }
-            Log.Verbose("inserted " + item.Insert);
+            Log.Verbose("inserted " + insert);
+            if (at >= 0)
+            {
+                EditorContext.For(_view)?.Select(_replaceStart + at, _replaceStart + at);
+                return;
+            }
             // Functions are inserted with their parentheses; put the caret between them.
             if (item.Insert.EndsWith("()", StringComparison.Ordinal) && (item.Kind == "function"))
             {

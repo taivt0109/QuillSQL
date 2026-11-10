@@ -15,7 +15,7 @@ const KEEP: usize = 3000;
 /// Kinds that mean the same in every database.
 const GENERAL: &[&str] = &["keyword", "function", "type", "snippet", "global_variable"];
 /// Kinds not worth remembering: written for the script at hand.
-const NEVER: &[&str] = &["body", "picker", "join", "join_guess", "alias", "variable", "parameter", "cte", "loading"];
+const NEVER: &[&str] = &["body", "picker", "join", "join_guess", "alias", "variable", "parameter", "cte", "loading", "value"];
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 struct Entry {

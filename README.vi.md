@@ -160,6 +160,8 @@ Khi gõ, danh sách gợi ý hiện ra:
 
 Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId); với hàm có sẵn, ba chữ nằm trong tên cũng tính (`add` cho DATEADD). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
 
+Tab và Enter còn viết luôn những gì từ đó cần, con trỏ đặt sẵn ở chỗ điền giá trị: `IN (|)`, `EXISTS (|)`, `LIKE '|'`, `BETWEEN | AND `, `NVARCHAR(|)`. Sau `c.Name = `, cột kiểu chữ, ngày giờ hoặc GUID có sẵn giá trị đứng đầu và được chọn: `N'|'` cho chuỗi Unicode, `'|'` cho các kiểu còn lại. Phím cách, dấu phẩy và `(` chỉ chèn chữ trơn. Snippet chỉ được gợi ý ở chỗ có thể bắt đầu câu lệnh, hoặc sau `(`.
+
 Danh sách học theo những gì bạn chọn. Trong các gợi ý khớp như nhau và cùng loại, mục chọn nhiều và gần đây
 đứng trước (keyword hay dùng không vượt lên trên cột), nên gõ `s` sẽ ra `SET` trước `SELECT` nếu bạn dùng `SET` nhiều hơn. Gõ đủ cả từ thì từ
 đó vẫn đứng đầu, còn điều kiện JOIN và các câu lệnh được viết sẵn vẫn giữ chỗ. Keyword, hàm, kiểu

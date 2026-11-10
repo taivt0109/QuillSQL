@@ -130,6 +130,12 @@ static class HookDriver
             typed("", "insert Custo"); Send("key|enter"); t = Send("text");
             Check("INSERT without INTO + Enter", t.Contains("dbo.Customers") && t.Contains("VALUES"), t);
 
+            // Tab writes what the word takes, the caret inside: typing goes there.
+            typed("", "select * from dbo.Customers c where c.CustomerId i"); Send("key|tab"); Send("type|1"); t = Send("text");
+            Check("IN + Tab writes the parentheses", t.EndsWith("c.CustomerId IN (1)"), t);
+            typed("", "select * from dbo.Customers c where c.Name = "); Send("key|tab"); Send("type|x"); t = Send("text");
+            Check("a text column's value is quoted", t.EndsWith("c.Name = N'x'"), t);
+
             Send("set|select | from dbo.Customers AS c"); Send("type|Na"); Send("key|enter"); t = Send("text");
             Check("column written with its table's alias", t == "select c.Name from dbo.Customers AS c", t);
 
@@ -146,7 +152,7 @@ static class HookDriver
             Check("temp table columns", t.EndsWith("t.Code"), t);
 
             typed("", "select * from dbo.Customers c where c.Name l"); Send("key|tab"); t = Send("text");
-            Check("operators after an operand", t.EndsWith("c.Name LIKE"), t);
+            Check("operators after an operand", t.EndsWith("c.Name LIKE ''"), t);
 
             typed("", "select * from master.sys.tabl"); Send("key|tab"); t = Send("text");
             Check("other database, shortest name first", t.StartsWith("SELECT * FROM master.sys.tables"), t);

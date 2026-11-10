@@ -165,6 +165,11 @@ or the initials of its parts (`cid` for CustomerId); for a built-in function, th
 name too (`add` for DATEADD). Otherwise nothing is selected and Enter and
 Tab keep their usual meaning. The item picked for some letters is selected first the next time.
 
+Tab and Enter also write what the word takes, the caret where the value goes: `IN (|)`,
+`EXISTS (|)`, `LIKE '|'`, `BETWEEN | AND `, `NVARCHAR(|)`. After `c.Name = `, a text, date or GUID
+column offers its literal first, selected: `N'|'` for Unicode text, `'|'` for the others. Space,
+comma and `(` insert the word alone. Snippets are offered where a statement can begin, or after `(`.
+
 The list learns from what you pick: among matches equally good and of the same kind, the
 suggestions picked often and lately come first (a keyword picked often never passes a column), so `s` gives `SET` before `SELECT` if you use it more. Typing the whole word
 still puts that word first, and the join conditions and written statements keep their place.

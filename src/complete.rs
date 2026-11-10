@@ -191,7 +191,33 @@ const CONDITION_NEXT: &[&str] = &["AND", "OR", "IS", "IN", "LIKE", "BETWEEN", "N
 const CASE_NEXT: &[&str] = &["THEN", "WHEN", "ELSE", "END", "AND", "OR", "IS", "IN", "LIKE", "BETWEEN", "NOT"];
 
 /// What may follow an operand that is not yet compared: `WHERE Id |`.
-const OPERAND_NEXT: &[&str] = &["IN", "IS", "LIKE", "BETWEEN", "NOT"];
+const OPERAND_NEXT: &[&str] = &["IN", "IS NULL", "IS NOT NULL", "LIKE", "BETWEEN", "NOT IN", "NOT LIKE", "NOT BETWEEN"];
+
+/// How Tab or Enter writes a word that takes something after it; `$CURSOR$` is where the caret goes.
+/// Other keys that insert a suggestion write the word alone.
+fn shaped(label: &str, kind: &str, context: Context) -> Option<String> {
+    let s = match (kind, label) {
+        ("keyword", "IN" | "NOT IN" | "EXISTS" | "NOT EXISTS" | "VALUES") if context != Context::Keywords || label != "EXISTS" => format!("{label} ($CURSOR$)"),
+        ("keyword", "LIKE" | "NOT LIKE") => format!("{label} '$CURSOR$'"),
+        ("keyword", "BETWEEN" | "NOT BETWEEN") => format!("{label} $CURSOR$ AND "),
+        ("keyword", "OVER") => "OVER ($CURSOR$)".to_string(),
+        // Types that take a length or a precision: `NVARCHAR(|)`.
+        ("type", "VARCHAR" | "NVARCHAR" | "CHAR" | "NCHAR" | "VARBINARY" | "BINARY" | "DECIMAL" | "NUMERIC") => format!("{label}($CURSOR$)"),
+        _ => return None,
+    };
+    Some(s)
+}
+
+/// A literal of the type, the caret inside its quotes: N'' for Unicode text, '' for other text,
+/// dates, times and GUIDs; none for numbers.
+fn literal_for(data_type: &str) -> Option<&'static str> {
+    let base = data_type.split('(').next().unwrap_or("").trim().to_ascii_lowercase();
+    match base.as_str() {
+        "nvarchar" | "nchar" | "ntext" | "sysname" => Some("N'$CURSOR$'"),
+        "varchar" | "char" | "text" | "date" | "datetime" | "datetime2" | "smalldatetime" | "datetimeoffset" | "time" | "uniqueidentifier" | "xml" => Some("'$CURSOR$'"),
+        _ => None,
+    }
+}
 
 /// What may follow a comparison: `WHERE Id = 1 |`.
 const AFTER_COMPARISON: &[&str] = &["AND", "OR"];
@@ -1389,7 +1415,7 @@ fn wants(context: Context, kind: &str) -> bool {
 /// Lower ranks sort first.
 fn rank(kind: &str, context: Context) -> u8 {
     match (context, kind) {
-        (_, "join" | "body" | "picker") => 0,
+        (_, "join" | "body" | "picker" | "value") => 0,
         (Context::Expression, "column") => 1,
         (Context::Expression, "alias") => 2,
         (Context::Expression, "variable") => 3,
@@ -1825,6 +1851,27 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                             items.push(Item { label: "(all columns)".into(), insert: body, kind: "body", detail: format!("{}.{}", o.schema, o.name) });
                         }
                     }
+                // `c.Name = |`: a literal of the column's type, quoted, the caret inside.
+                if prefix.is_empty()
+                    && !variable
+                    && let Some(op) = (0..k).rev().find(|&j| !head[j].is_comment())
+                    && head[op].kind == Kind::Op
+                    && head[op].text.chars().all(|c| matches!(c, '=' | '<' | '>' | '!'))
+                    && let Some(l) = (0..op).rev().find(|&j| !head[j].is_comment()).filter(|&l| is_name(&head[l]))
+                {
+                    let column = bare(&head[l]);
+                    let qualifier = (l >= 2 && head[l - 1].kind == Kind::Dot && is_name(&head[l - 2])).then(|| bare(&head[l - 2]));
+                    let typed = sources
+                        .iter()
+                        .filter(|s| qualifier.as_ref().is_none_or(|q| eq(q, &s.reference) || s.parts.last().is_some_and(|p| eq(p, q))))
+                        .flat_map(|s| source_columns(s, schema))
+                        .find(|(c, _)| eq(c, &column));
+                    if let Some((c, ty)) = typed
+                        && let Some(literal) = literal_for(&ty)
+                    {
+                        items.push(Item { label: literal.replace("$CURSOR$", ""), insert: literal.to_string(), kind: "value", detail: format!("{c} · {ty}") });
+                    }
+                }
                 // Columns of every source. A column of a source with an alias (`dbo.JitBin AS jb`) is
                 // written with it (`jb.Name`), and so is a name in more than one source.
                 let all: Vec<(String, String, String, bool)> = sources
@@ -1922,7 +1969,15 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
         }
     }
 
-    if prefix.chars().count() >= 2 && qualifier.is_empty() && !variable && !matches!(context, Context::InsertColumns | Context::InsertTarget | Context::ExecArgs) {
+    // Snippets write statements: only where one may begin, or a subquery after `(`; `WHERE Id be`
+    // is BETWEEN, not a BEGIN...END block.
+    let statement_here = match (context, &next) {
+        (Context::Keywords, Some(Next::Words(words, _))) => words.contains(&"BEGIN") || words.contains(&"SELECT"),
+        (Context::AfterSource, _) => true,
+        (Context::Expression, _) => prev_word.as_ref().is_some_and(|(kind, _)| *kind == Kind::LParen),
+        _ => false,
+    };
+    if prefix.chars().count() >= 2 && qualifier.is_empty() && !variable && statement_here {
         for sn in snippets {
             items.push(Item { label: sn.prefix.clone(), insert: sn.prefix.clone(), kind: "snippet", detail: sn.description.clone() });
         }
@@ -1991,12 +2046,20 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
     let length = |it: &Item| if prefix.is_empty() { 0 } else { it.label.len() };
     scored.sort_by_key(|x| (x.0, x.1, x.2, x.3, length(&x.4), x.4.label.to_ascii_lowercase()));
     scored.dedup_by(|x, y| x.4.insert == y.4.insert && x.4.kind == y.4.kind);
-    let items: Vec<Item> = scored.into_iter().take(MAX_ITEMS).map(|(_, _, _, _, it)| it).collect();
+    let mut items: Vec<Item> = scored.into_iter().take(MAX_ITEMS).map(|(_, _, _, _, it)| it).collect();
+    for it in items.iter_mut() {
+        if let Some(s) = shaped(&it.label, it.kind, context) {
+            it.insert = s;
+        }
+    }
     // Select the first item only when something was typed and it matches for sure; a list of guesses,
     // or one opened by a space before anything is typed, starts with nothing selected.
     // Three letters inside a built-in function's name count too (`add` for DATEADD): their names
     // are known words, unlike the database's names, where they may be the start of a new one.
     let sure = |it: &Item, q: u8| q <= 2 || (q == 3 && it.kind == "function" && prefix.chars().count() >= 3);
-    let selected = items.first().filter(|it| !prefix.is_empty() && match_quality(&it.label, &prefix).is_some_and(|q| sure(it, q))).map(|_| 0);
+    let selected = items
+        .first()
+        .filter(|it| (prefix.is_empty() && it.kind == "value") || (!prefix.is_empty() && match_quality(&it.label, &prefix).is_some_and(|q| sure(it, q))))
+        .map(|_| 0);
     Completion { start: byte_to_utf16(text, prefix_start), items, selected }
 }
