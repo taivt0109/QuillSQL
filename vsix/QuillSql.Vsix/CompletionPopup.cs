@@ -29,6 +29,11 @@ namespace QuillSql.Vsix
         private readonly ScrollViewer _definitionScroll;
         private readonly DispatcherTimer _cardDelay = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         private bool _showDefinition;
+        // While the popup stays open the list only grows and the definition keeps its place, so
+        // names of other lengths do not make it jump.
+        private double _listWidth;
+        private double _listHeight;
+        private bool _definitionShown;
         private ConnectionTarget _target;
         private int _cardVersion;
 
@@ -43,7 +48,7 @@ namespace QuillSql.Vsix
             {
                 Focusable = false,
                 MaxHeight = 300,
-                MinWidth = 300,
+                MinWidth = 420,
                 MaxWidth = 560,
                 BorderThickness = new Thickness(0),
                 Padding = new Thickness(0, 2, 0, 2),
@@ -88,6 +93,23 @@ namespace QuillSql.Vsix
             _definition.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.CommandBarMenuSeparatorBrushKey);
             _definition.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.CommandBarMenuBackgroundGradientBrushKey);
             _list.SelectionChanged += (s, e) => UpdateDefinition();
+            _list.SizeChanged += (s, e) =>
+            {
+                if (!_popup.IsOpen)
+                {
+                    return;
+                }
+                if (e.NewSize.Width > _listWidth)
+                {
+                    _listWidth = e.NewSize.Width;
+                    _list.MinWidth = _listWidth;
+                }
+                if (e.NewSize.Height > _listHeight)
+                {
+                    _listHeight = e.NewSize.Height;
+                    _list.MinHeight = _listHeight;
+                }
+            };
 
             var layout = new StackPanel { Orientation = Orientation.Horizontal };
             layout.Children.Add(_list);
@@ -202,7 +224,7 @@ namespace QuillSql.Vsix
             var info = item?.Info;
             if (string.IsNullOrEmpty(info))
             {
-                _definition.Visibility = Visibility.Collapsed;
+                Hide();
                 return;
             }
             var title = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
@@ -331,14 +353,36 @@ namespace QuillSql.Vsix
         private void Show(UIElement content, bool card)
         {
             _definitionScroll.Content = new Border { Child = content, Padding = new Thickness(10, 8, 10, 8) };
-            _definition.MaxWidth = card ? 720 : 540;
-            _definition.MaxHeight = card ? 440 : 320;
+            // One width and a height that only grows: the popup keeps its size from item to item.
+            _definition.Width = 560;
+            _definition.MaxHeight = 440;
             _definition.Visibility = Visibility.Visible;
+            _definitionShown = true;
+            _definition.UpdateLayout();
+            _definition.MinHeight = Math.Min(_definition.MaxHeight, Math.Max(_definition.MinHeight, _definition.ActualHeight));
+        }
+
+        /// <summary>Nothing to show: once shown, the definition keeps its place, empty.</summary>
+        private void Hide()
+        {
+            if (_definitionShown && _popup.IsOpen)
+            {
+                _definitionScroll.Content = null;
+                _definition.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                _definition.Visibility = Visibility.Collapsed;
+            }
         }
 
         /// <summary>Opens the list with `select` selected, or nothing selected when it is -1.</summary>
         public void Show(IList<CompletionItem> items, IntPtr window, int screenX, int screenY, bool showDefinition, int select, ConnectionTarget target = null)
         {
+            if (!_popup.IsOpen)
+            {
+                Reset();
+            }
             _showDefinition = showDefinition;
             _target = target;
             var rows = items.Select(i => new Row(i)).ToList();
@@ -374,6 +418,18 @@ namespace QuillSql.Vsix
             _cardDelay.Stop();
             _cardVersion++;
             _popup.IsOpen = false;
+            Reset();
+        }
+
+        private void Reset()
+        {
+            _listWidth = 0;
+            _listHeight = 0;
+            _list.MinWidth = 420;
+            _list.MinHeight = 0;
+            _definitionShown = false;
+            _definition.MinHeight = 0;
+            _definition.Visibility = Visibility.Collapsed;
         }
 
         [DllImport("user32.dll")]
