@@ -3,7 +3,7 @@
 
 use serde::Serialize;
 
-use crate::complete::{Analysis, DbObject, Schema, Source, bare, byte_to_utf16, eq, is_name, resolve, source_columns, utf16_to_byte};
+use crate::complete::{Analysis, Column, DbObject, Schema, Source, bare, byte_to_utf16, eq, is_name, resolve, source_columns, utf16_to_byte};
 use crate::keywords::is_reserved;
 use crate::lexer::Kind;
 use crate::refactor::{declared_types, end_of};
@@ -65,7 +65,9 @@ pub fn describe_object(o: &DbObject) -> String {
 fn describe_column(source: &Source, schema: Option<&Schema>, name: &str) -> Option<String> {
     if let Some(o) = schema.and_then(|s| resolve(source, s)) {
         let c = o.columns.iter().find(|c| eq(&c.name, name))?;
-        return Some(format!("column {}.{}.{} {}{}", o.schema, o.name, c.name, c.data_type, if c.nullable { " NULL" } else { " NOT NULL" }));
+        let description = c.description.as_deref().map(str::trim).filter(|d| !d.is_empty()).map_or(String::new(), |d| format!("
+{d}"));
+        return Some(format!("column {}.{}.{} {}{}{description}", o.schema, o.name, c.name, c.data_type, if c.nullable { " NULL" } else { " NOT NULL" }));
     }
     source_columns(source, schema).into_iter().find(|(c, _)| eq(c, name)).map(|(c, _)| format!("column {}.{c}", source.reference))
 }
@@ -243,6 +245,41 @@ pub fn schema_context(text: &str, schema: &Schema, budget: usize) -> String {
 
 /// The object the name at the caret (UTF-16) refers to: a table, view, procedure or function
 /// by name, the object behind an alias, or the table of an `alias.column`.
+/// The table or view column at the caret (UTF-16), for its card: `c.Name`, `dbo.Customers.Name`,
+/// or a name only one table of the statement has.
+pub fn column_at<'s>(text: &str, caret: usize, schema: &'s Schema) -> Option<(&'s DbObject, &'s Column)> {
+    let a = Analysis::new(text);
+    let i = token_at(&a, utf16_to_byte(text, caret))?;
+    let t = &a.tokens[i];
+    if !is_name(t) || (t.kind == Kind::Word && is_reserved(&a.up[i])) || a.tokens.get(i + 1).is_some_and(|n| n.kind == Kind::Dot) {
+        return None;
+    }
+    let name = bare(t);
+    let stmt = statement_of(&a, i);
+    let sources = a.sources(stmt.0, stmt.1);
+    let column = |o: &'s DbObject| o.columns.iter().find(|c| eq(&c.name, &name)).map(|c| (o, c));
+    if i >= 2 && a.tokens[i - 1].kind == Kind::Dot && is_name(&a.tokens[i - 2]) {
+        let q = bare(&a.tokens[i - 2]);
+        let alias_of_source = !(i >= 4 && a.tokens[i - 3].kind == Kind::Dot);
+        if let Some(found) = sources.iter().filter(|s| alias_of_source && eq(&s.reference, &q)).find_map(|s| resolve(s, schema).and_then(column)) {
+            return Some(found);
+        }
+        // `schema.table.column`: the object named before the column.
+        let mut first = i - 2;
+        while first >= 2 && a.tokens[first - 1].kind == Kind::Dot && is_name(&a.tokens[first - 2]) {
+            first -= 2;
+        }
+        let parts: Vec<String> = (first..i - 1).step_by(2).map(|j| bare(&a.tokens[j])).collect();
+        let lookup = Source { reference: String::new(), parts, columns: Vec::new(), at: first, alias_at: None };
+        return resolve(&lookup, schema).and_then(column);
+    }
+    let owners: Vec<(&DbObject, &Column)> = sources.iter().filter_map(|s| resolve(s, schema).and_then(column)).collect();
+    match owners.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
 pub fn object_at<'s>(text: &str, caret: usize, schema: &'s Schema) -> Option<&'s DbObject> {
     let a = Analysis::new(text);
     let i = token_at(&a, utf16_to_byte(text, caret))?;

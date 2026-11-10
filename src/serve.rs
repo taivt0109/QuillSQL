@@ -12,6 +12,7 @@
 //! - `schema_context` {key, text, budget?} describes the database for an AI prompt.
 //! - `plan_target` {key, text} gives the batches, the objects used and why running it could write;
 //!   `plan_summary` {plans, maxLines?} turns showplan XML into text.
+//! - `column_at` {key, text, caret} gives the table column at the caret, for its card.
 //! - `exec_target` {text, caret} names the procedure an EXEC at the caret calls.
 //! - `set_options`, `reload_snippets`, `tool`, `outline`, `execution_warnings`, `object_at`,
 //!   `table_script` and `to_alter` serve the editor commands of the same names.
@@ -249,6 +250,13 @@ fn handle(request: &Value, state: &mut State) -> Result<Value, String> {
                 .filter(|w| (truncate || !w.contains("TRUNCATE")) && (drop || !w.contains("DROP")))
                 .collect();
             Ok(json!({ "warnings": warnings }))
+        }
+        "column_at" => {
+            let found = state.schemas.get(key).and_then(|s| info::column_at(str_field(request, "text").ok()?, usize_field(request, "caret").ok()?, s));
+            Ok(found.map_or(Value::Null, |(o, c)| {
+                json!({ "schema": o.schema, "table": o.name, "kind": o.kind, "name": c.name, "type": c.data_type, "nullable": c.nullable,
+                    "identity": c.identity, "computed": c.computed, "default": c.default, "description": c.description })
+            }))
         }
         "object_at" => {
             let found = state.schemas.get(key).and_then(|s| info::object_at(str_field(request, "text").ok()?, usize_field(request, "caret").ok()?, s));

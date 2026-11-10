@@ -154,6 +154,7 @@ namespace QuillSql.Vsix
             ["database metadata is still loading; try again in a moment"] = "metadata database đang nạp; thử lại sau giây lát",
             ["not connected, or the login type is not supported for metadata"] = "chưa kết nối, hoặc kiểu đăng nhập không hỗ trợ đọc metadata",
             ["put the caret on a table, view, procedure or function."] = "hãy đặt con trỏ lên một bảng, view, procedure hoặc function.",
+            ["put the caret on a table, view, procedure, function or column."] = "hãy đặt con trỏ lên một bảng, view, procedure, function hoặc cột.",
             ["could not script {0}."] = "không tạo được script cho {0}.",
             ["script of {0} opened in a new window."] = "script của {0} đã mở trong cửa sổ mới.",
             ["could not read the definition of {0}."] = "không đọc được định nghĩa của {0}.",

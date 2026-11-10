@@ -244,6 +244,28 @@ namespace QuillSql.Vsix
     }
 
     [DataContract]
+    internal sealed class ColumnAtReply
+    {
+        [DataMember(Name = "result")] public ColumnRef Result { get; set; }
+    }
+
+    /// <summary>A table or view column, from the metadata, for its card.</summary>
+    [DataContract]
+    internal sealed class ColumnRef
+    {
+        [DataMember(Name = "schema")] public string Schema { get; set; }
+        [DataMember(Name = "table")] public string Table { get; set; }
+        [DataMember(Name = "kind")] public string Kind { get; set; }
+        [DataMember(Name = "name")] public string Name { get; set; }
+        [DataMember(Name = "type")] public string Type { get; set; }
+        [DataMember(Name = "nullable")] public bool Nullable { get; set; }
+        [DataMember(Name = "identity")] public bool Identity { get; set; }
+        [DataMember(Name = "computed")] public bool Computed { get; set; }
+        [DataMember(Name = "default")] public string Default { get; set; }
+        [DataMember(Name = "description")] public string Description { get; set; }
+    }
+
+    [DataContract]
     internal sealed class ObjectRef
     {
         [DataMember(Name = "schema")] public string Schema { get; set; }

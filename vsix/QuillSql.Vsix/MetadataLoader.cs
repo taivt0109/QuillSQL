@@ -17,7 +17,7 @@ SELECT name FROM sys.schemas WHERE schema_id < 16384 ORDER BY name;
 -- Not HAS_DBACCESS: it opens every AUTO_CLOSE database, which takes minutes on servers with many.
 SELECT name FROM sys.databases WHERE state = 0 ORDER BY name;
 -- With the description (MS_Description) people give objects, columns and parameters.
-SELECT o.object_id, s.name, o.name, o.type, CONVERT(nvarchar(1000), ep.value)
+SELECT o.object_id, s.name, o.name, o.type, CONVERT(nvarchar(4000), ep.value)
 FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
 LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = 'MS_Description'
 WHERE o.type IN ('U', 'V', 'P', 'PC', 'FN', 'FS', 'IF', 'TF', 'FT', 'SN') AND o.is_ms_shipped = 0
@@ -28,7 +28,7 @@ FROM sys.system_objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
 WHERE (o.type = 'V' AND s.name IN ('sys', 'INFORMATION_SCHEMA'))
    OR (o.type IN ('P', 'X', 'PC', 'FN', 'FS', 'IF', 'TF', 'FT') AND s.name = 'sys');
 SELECT c.object_id, c.name, TYPE_NAME(c.user_type_id), c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity, c.is_computed, dc.definition,
-    CONVERT(nvarchar(1000), ep.value)
+    CONVERT(nvarchar(4000), ep.value)
 FROM sys.columns c JOIN sys.objects o ON o.object_id = c.object_id
 LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
 LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'

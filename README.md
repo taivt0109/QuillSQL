@@ -32,7 +32,7 @@ runs on the command line and in CI.
 | **Refactoring** | Qualify object names, add or remove `AS`, smart rename, encapsulate as a stored procedure, inline an `EXEC`. Each is one Undo step. |
 | **Code analysis** | 54 rules underline problems as you type (`SELECT *`, `= NULL`, `UPDATE` without `WHERE`, deprecated syntax...). Fix them all with one command. |
 | **AI with Claude** | Write SQL from a sentence, explain or review a script, and analyze execution plans and Query Store with real indexes and row counts. |
-| **Object cards** | Rest the mouse on a table to see its columns, keys, indexes, partitions and script; F12 scripts it. |
+| **Object cards** | Rest the mouse on a table to see its columns, keys, indexes, partitions and script, or on a column to see its type and description; F12 scripts it. |
 | **Safety at a glance** | Color the tab and editor of production connections; ask before `DELETE` or `UPDATE` without `WHERE`; highlight every use of a name. |
 | **Database tools** | Find procedures and views that reference objects that no longer exist; search the history of every query you ran. |
 | **Your way** | An Options window for every behavior, keyboard shortcuts for every command, English or Vietnamese. |
@@ -371,6 +371,10 @@ step. Optional settings in
   of objects are underlined like links: **Ctrl+click** opens the card pinned, so it stays open
   while you read it, type or move around, until you close it with ✕ or Esc. The pin button on a
   hovered card does the same.
+- **Column cards**: rest the mouse on a column (`c.Status`, `dbo.Customers.Status`, or a name only
+  one table of the statement has) for its table, type, `NULL` / `NOT NULL`, identity, default and
+  description (`MS_Description`). A long description wraps at the card's width and scrolls past
+  about a dozen lines; it can be selected and copied, and the card can be pinned like an object's.
 - **Run with care**: running a `DELETE` or `UPDATE` without `WHERE` asks first, with Cancel as the
   default answer. `TRUNCATE TABLE` and `DROP` can be added in Options.
 - **Highlighting**: every use of the variable, alias or name under the caret is highlighted.

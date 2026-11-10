@@ -502,6 +502,58 @@ FROM sys.parameters WHERE object_id = @id AND parameter_id > 0 ORDER BY paramete
             return panel;
         }
 
+        /// <summary>
+        /// A column's card: its table, type and description. A long description wraps at the card's
+        /// width and scrolls past a few lines; it can be selected and copied.
+        /// </summary>
+        public static UIElement ColumnCard(ColumnRef c)
+        {
+            // Room on the right for the pin and close buttons.
+            var title = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 44, 3) };
+            title.Children.Add(Theme.Badge("COLUMN", Theme.Green, 9.5));
+            title.Children.Add(new TextBlock { Text = c.Schema + "." + c.Table + ".", FontSize = 14, Opacity = 0.7, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            title.Children.Add(new TextBlock { Text = c.Name, FontSize = 14, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+            var facts = new List<string> { c.Type, c.Nullable ? "NULL" : "NOT NULL" };
+            if (c.Identity)
+            {
+                facts.Add("IDENTITY");
+            }
+            if (c.Computed)
+            {
+                facts.Add(Loc.T("computed"));
+            }
+            if (!string.IsNullOrEmpty(c.Default))
+            {
+                facts.Add("DEFAULT " + c.Default);
+            }
+            var panel = new StackPanel { Margin = new Thickness(4), MinWidth = 300, MaxWidth = 520 };
+            TextOptions.SetTextFormattingMode(panel, TextFormattingMode.Display);
+            panel.Children.Add(title);
+            panel.Children.Add(new TextBlock { Text = string.Join("  ·  ", facts), FontFamily = Theme.Mono, Opacity = 0.75, TextWrapping = TextWrapping.Wrap });
+            var description = (c.Description ?? "").Replace("\r\n", "\n").Trim();
+            if (description.Length > 0)
+            {
+                panel.Children.Add(new Border { Height = 1, Background = Theme.Line, Margin = new Thickness(0, 8, 0, 8) });
+                var text = new TextBox
+                {
+                    Text = description,
+                    IsReadOnly = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    BorderThickness = new Thickness(0),
+                    Background = Brushes.Transparent,
+                    Padding = new Thickness(0),
+                    MaxHeight = 240,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                };
+                // The default text box style is black text; follow the tooltip's colors instead.
+                text.SetResourceReference(Control.ForegroundProperty, Microsoft.VisualStudio.PlatformUI.EnvironmentColors.ToolTipTextBrushKey);
+                text.SetResourceReference(System.Windows.Controls.Primitives.TextBoxBase.CaretBrushProperty, Microsoft.VisualStudio.PlatformUI.EnvironmentColors.ToolTipTextBrushKey);
+                panel.Children.Add(text);
+            }
+            return panel;
+        }
+
         /// <summary>A card with the object's columns, indexes, partitions and script.</summary>
         public static UIElement Card(ObjectDetails d)
         {

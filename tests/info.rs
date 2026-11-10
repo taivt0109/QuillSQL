@@ -56,3 +56,34 @@ fn schema_context_lists_used_objects_or_all_tables() {
     let short = quillsql::info::schema_context("", &s, 40);
     assert!(short.ends_with("... and 1 more objects not listed.\n"), "{short}");
 }
+
+#[test]
+fn finds_the_column_at_the_caret_with_its_description() {
+    let s: Schema = serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo",
+        "objects": [
+            {"schema": "dbo", "name": "Customers", "kind": "table", "columns": [
+                {"name": "CustomerId", "type": "int"},
+                {"name": "Status", "type": "tinyint", "default": "((0))", "description": "0 = new\n1 = active\n2 = closed, kept for the reports"}]},
+            {"schema": "dbo", "name": "Orders", "kind": "table", "columns": [{"name": "CustomerId", "type": "int"}, {"name": "Total", "type": "money"}]}
+        ]
+    }))
+    .unwrap();
+    let column = |sql: &str| {
+        let (text, caret) = at(sql);
+        quillsql::info::column_at(&text, caret, &s).map(|(o, c)| format!("{}.{}.{}", o.schema, o.name, c.name))
+    };
+    assert_eq!(column("select c.Sta|tus from Customers c").as_deref(), Some("dbo.Customers.Status"));
+    assert_eq!(column("select Sta|tus from Customers").as_deref(), Some("dbo.Customers.Status"));
+    assert_eq!(column("select dbo.Customers.Sta|tus from dbo.Customers").as_deref(), Some("dbo.Customers.Status"));
+    assert_eq!(column("select o.Customer|Id from Customers c join Orders o on o.CustomerId = c.CustomerId").as_deref(), Some("dbo.Orders.CustomerId"));
+    // In two tables and not qualified: which one is not known.
+    assert_eq!(column("select Customer|Id from Customers c join Orders o on o.CustomerId = c.CustomerId"), None);
+    // The table itself, an alias before its dot, a keyword: not columns.
+    assert_eq!(column("select * from Custo|mers"), None);
+    assert_eq!(column("select c|.Status from Customers c"), None);
+    assert_eq!(column("sel|ect Status from Customers"), None);
+    // Quick Info shows the description too.
+    let (text, caret) = at("select Sta|tus from Customers");
+    assert_eq!(hover(&text, caret, Some(&s)).unwrap(), "column dbo.Customers.Status tinyint NOT NULL\n0 = new\n1 = active\n2 = closed, kept for the reports");
+}

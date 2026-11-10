@@ -58,7 +58,7 @@ namespace QuillSql.Vsix
                 EditorContext.Status("connect the query window first: the card is read from the database.");
                 return;
             }
-            Lookup(view, position, target, true, true, () => EditorContext.Status("put the caret on a table, view, procedure or function."));
+            Lookup(view, position, target, true, true, () => ShowColumn(view, position, true, true, () => EditorContext.Status("put the caret on a table, view, procedure, function or column.")));
         }
 
         private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_' || c == '#' || c == '$';
@@ -77,7 +77,8 @@ namespace QuillSql.Vsix
                 EditorContext.Status("open a query window connected with Windows or SQL Server authentication first.");
                 return true;
             }
-            Lookup(view, view.Caret.Position.BufferPosition.Position, target, false, false, () => EditorContext.Status("put the caret on a table, view, procedure or function."));
+            var caret = view.Caret.Position.BufferPosition.Position;
+            Lookup(view, caret, target, false, false, () => ShowColumn(view, caret, false, false, () => EditorContext.Status("put the caret on a table, view, procedure, function or column.")));
             return true;
         }
 
@@ -99,7 +100,49 @@ namespace QuillSql.Vsix
             {
                 return;
             }
-            Lookup(view, position, target, true, false, otherwise);
+            Lookup(view, position, target, true, false, () => ShowColumn(view, position, true, false, otherwise));
+        }
+
+        /// <summary>The card of the table or view column at `position`; calls `notFound` when there is none.</summary>
+        private static void ShowColumn(IWpfTextView view, int position, bool mouse, bool pinned, Action notFound)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var key = Commands.MetadataKey(out _);
+            var snapshot = view.TextSnapshot;
+            var text = snapshot.GetText();
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await TaskScheduler.Default;
+                var reply = EngineProcess.Shared.Request("column_at", "\"key\":" + Json.Str(key) + ",\"text\":" + Json.Str(text) + ",\"caret\":" + position);
+                var column = reply == null ? null : Json.Parse<ColumnAtReply>(reply)?.Result;
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (view.IsClosed || view.TextSnapshot != snapshot)
+                {
+                    return;
+                }
+                if (column == null)
+                {
+                    notFound();
+                    return;
+                }
+                Open(view, ObjectScripts.ColumnCard(column), WordAt(text, position), mouse, pinned);
+                Log.Verbose("column card: " + column.Schema + "." + column.Table + "." + column.Name);
+            }).FileAndForget("quillsql/columncard");
+        }
+
+        private static Span WordAt(string text, int position)
+        {
+            var start = position;
+            while (start > 0 && IsWordChar(text[start - 1]))
+            {
+                start--;
+            }
+            var end = position;
+            while (end < text.Length && IsWordChar(text[end]))
+            {
+                end++;
+            }
+            return new Span(start, end - start);
         }
 
         private static void Lookup(IWpfTextView view, int position, ConnectionTarget target, bool mouse, bool pinned, Action notFound)
@@ -122,20 +165,10 @@ namespace QuillSql.Vsix
                     notFound();
                     return;
                 }
-                var start = position;
-                while (start > 0 && IsWordChar(text[start - 1]))
-                {
-                    start--;
-                }
-                var end = position;
-                while (end < text.Length && IsWordChar(text[end]))
-                {
-                    end++;
-                }
                 // Show the title at once; a large table or a remote server can take a while to describe.
                 var fullName = found.Schema + "." + found.Name;
                 var details = ObjectScripts.Cached(target, fullName);
-                var host = Open(view, details != null ? ObjectScripts.Card(details) : ObjectScripts.Loading(found.Schema, found.Name, found.Kind), new Span(start, end - start), mouse, pinned);
+                var host = Open(view, details != null ? ObjectScripts.Card(details) : ObjectScripts.Loading(found.Schema, found.Name, found.Kind), WordAt(text, position), mouse, pinned);
                 if (details == null)
                 {
                     await TaskScheduler.Default;

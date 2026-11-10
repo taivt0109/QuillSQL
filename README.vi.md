@@ -35,7 +35,7 @@ QuillSQL miễn phí, mã nguồn mở. Engine viết bằng Rust, chạy nhanh,
 | **Refactor** | Thêm schema/alias cho tên, thêm hoặc bỏ `AS`, đổi tên thông minh, gói thành stored procedure, inline một lệnh `EXEC`. Mỗi thao tác hoàn tác được bằng một lần Undo. |
 | **Phân tích code** | 54 rule gạch chân lỗi ngay khi gõ (`SELECT *`, `= NULL`, `UPDATE` không có `WHERE`, cú pháp lỗi thời…). Sửa tất cả bằng một lệnh. |
 | **AI với Claude** | Viết SQL từ một câu mô tả, giải thích hoặc review script, phân tích execution plan và Query Store dựa trên index và số dòng thật. |
-| **Thẻ object** | Rê chuột lên bảng để xem cột, khóa, index, partition và script; F12 để script bảng đó. |
+| **Thẻ object** | Rê chuột lên bảng để xem cột, khóa, index, partition và script, hoặc lên một cột để xem kiểu và mô tả của cột; F12 để script bảng đó. |
 | **Nhận biết nhanh** | Tô màu tab và editor của kết nối production; hỏi lại trước khi chạy `DELETE` hoặc `UPDATE` không có `WHERE`; tô sáng mọi chỗ dùng cùng một tên. |
 | **Công cụ database** | Tìm procedure và view đang tham chiếu tới object không còn tồn tại; tìm lại mọi query bạn đã chạy. |
 | **So sánh schema và dữ liệu** | So sánh schema hoặc dữ liệu của hai database, xem từng khác biệt, rồi chạy script làm chúng giống nhau. Có trong SSMS, dạng app riêng, và trong CI qua command line. |
@@ -304,6 +304,7 @@ Cài đặt tùy chọn nằm trong `%LOCALAPPDATA%\QuillSQL\ai.json`, ví dụ 
 
   `match` được tìm trong chuỗi "server / database", không phân biệt hoa thường; quy tắc khớp cụ thể nhất (dài nhất) được dùng, nên màu của một database thắng màu của server, và màu server thắng màu theo từ.
 - **Thẻ object:** rê chuột lên bảng, view, procedure hoặc function (hoặc nhấn Ctrl+B, Ctrl+K) để xem thẻ gồm số dòng, dung lượng, các cột (khóa, identity, default, khóa ngoại), index và nơi lưu, cùng tab **Script** có nút Sao chép và Mở. Bảng có partition được ghi rõ ở đầu thẻ: cột partition, partition function, `RANGE LEFT`/`RIGHT`, scheme, và tab **Partition** liệt kê khoảng giá trị, số dòng và filegroup của từng partition. **F12** mở script trong cửa sổ mới, gồm cả partition function và scheme. Giữ **Ctrl** thì tên object được gạch chân như link: **Ctrl+click** mở thẻ ở chế độ ghim, thẻ giữ nguyên trong lúc bạn đọc, gõ hay di chuyển, đến khi bấm ✕ hoặc Esc. Nút ghim trên thẻ khi rê chuột cũng làm như vậy.
+- **Thẻ cột:** rê chuột lên một cột (`c.Status`, `dbo.Customers.Status`, hoặc tên cột mà chỉ một bảng trong câu lệnh có) để xem bảng, kiểu dữ liệu, `NULL` / `NOT NULL`, identity, default và mô tả (`MS_Description`). Mô tả dài tự xuống dòng theo bề rộng thẻ và có thanh cuộn khi dài quá khoảng chục dòng; bôi đen để copy được, và ghim thẻ được như thẻ object.
 - **Chạy an toàn:** chạy `DELETE` hoặc `UPDATE` không có `WHERE` sẽ được hỏi lại trước, mặc định là Hủy. Có thể bật thêm cho `TRUNCATE TABLE` và `DROP` trong Options.
 - **Tô sáng:** mọi chỗ dùng biến, alias hoặc tên tại con trỏ được tô sáng.
 
