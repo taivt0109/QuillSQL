@@ -50,6 +50,8 @@ namespace QuillSql.Vsix
                 MaxHeight = 300,
                 MinWidth = 420,
                 MaxWidth = 560,
+                // Beside a taller definition the list stays at the top, under the caret.
+                VerticalAlignment = VerticalAlignment.Top,
                 BorderThickness = new Thickness(0),
                 Padding = new Thickness(0, 2, 0, 2),
                 FontSize = 12,
