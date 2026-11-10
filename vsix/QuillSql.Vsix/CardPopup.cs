@@ -58,7 +58,7 @@ namespace QuillSql.Vsix
                 EditorContext.Status("connect the query window first: the card is read from the database.");
                 return;
             }
-            Lookup(view, position, target, true, true, () => ShowColumn(view, position, true, true, () => EditorContext.Status("put the caret on a table, view, procedure, function or column.")));
+            ShowColumn(view, position, true, true, () => Lookup(view, position, target, true, true, () => EditorContext.Status("put the caret on a table, view, procedure, function or column.")));
         }
 
         private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_' || c == '#' || c == '$';
@@ -78,7 +78,7 @@ namespace QuillSql.Vsix
                 return true;
             }
             var caret = view.Caret.Position.BufferPosition.Position;
-            Lookup(view, caret, target, false, false, () => ShowColumn(view, caret, false, false, () => EditorContext.Status("put the caret on a table, view, procedure, function or column.")));
+            ShowColumn(view, caret, false, false, () => Lookup(view, caret, target, false, false, () => EditorContext.Status("put the caret on a table, view, procedure, function or column.")));
             return true;
         }
 
@@ -100,7 +100,8 @@ namespace QuillSql.Vsix
             {
                 return;
             }
-            Lookup(view, position, target, true, false, () => ShowColumn(view, position, true, false, otherwise));
+            // A column first: `c.Name` is the column, though its alias names the table.
+            ShowColumn(view, position, true, false, () => Lookup(view, position, target, true, false, otherwise));
         }
 
         /// <summary>The card of the table or view column at `position`; calls `notFound` when there is none.</summary>
@@ -320,6 +321,47 @@ namespace QuillSql.Vsix
             _pinned = pinned;
             popup.IsOpen = true;
             return host;
+        }
+
+        /// <summary>For the tests: the open card's text, " | " between its parts; a picture of it goes to `path`.</summary>
+        public static string Snapshot(string path)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            if (!IsOpen || !(_open.Child is FrameworkElement frame))
+            {
+                return "closed";
+            }
+            var parts = new System.Collections.Generic.List<string>();
+            void walk(DependencyObject o)
+            {
+                if (o is TextBlock b && !string.IsNullOrWhiteSpace(b.Text) && b.FontFamily != Theme.Icons)
+                {
+                    parts.Add(b.Text);
+                }
+                else if (o is TextBox t)
+                {
+                    parts.Add(t.Text);
+                    return;
+                }
+                for (var i = 0; i < VisualTreeHelper.GetChildrenCount(o); i++)
+                {
+                    walk(VisualTreeHelper.GetChild(o, i));
+                }
+            }
+            walk(frame);
+            if (!string.IsNullOrEmpty(path) && frame.ActualWidth > 0)
+            {
+                var dpi = VisualTreeHelper.GetDpi(frame);
+                var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(frame.ActualWidth * dpi.DpiScaleX), (int)Math.Ceiling(frame.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+                bitmap.Render(frame);
+                var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+                using (var file = System.IO.File.Create(path))
+                {
+                    encoder.Save(file);
+                }
+            }
+            return string.Join(" | ", parts);
         }
 
         private static TextBlock CornerButton(string glyph, string tip)

@@ -161,6 +161,20 @@ namespace QuillSql.Vsix
                     var controller = view == null ? null : CompletionController.ForView(view);
                     return controller?.TipState() ?? "no editor";
                 }
+                case "card":
+                {
+                    // card|picture.png: the card at the caret, as text; a picture of it goes to the path.
+                    if (!CompletionController.ShowCard(EditorContext.Active()?.View))
+                    {
+                        return "no editor";
+                    }
+                    for (var i = 0; i < 40 && !CardPopup.IsOpen; i++)
+                    {
+                        await Task.Delay(250);
+                    }
+                    await Task.Delay(1500);
+                    return CardPopup.Snapshot(argument);
+                }
                 case "save":
                     SessionKeeper.Save();
                     return "ok";

@@ -20,6 +20,7 @@ static class HookDriver
     static StreamReader reader;
     static StreamWriter writer;
     static int failures;
+    static bool keep;
 
     static string Send(string command)
     {
@@ -73,6 +74,8 @@ static class HookDriver
     {
         Console.OutputEncoding = new UTF8Encoding(false);
         var ide = a[0];
+        // --keep: check the column card, then leave SSMS open with a query to look at.
+        keep = a.Length > 1 && a[1] == "--keep";
         // Windows kept by earlier test runs (each ends by killing SSMS) are not this run's.
         var sessions = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuillSQL", "Sessions-test");
         if (Directory.Exists(sessions)) Directory.Delete(sessions, true);
@@ -96,6 +99,19 @@ static class HookDriver
             Check("a new window says when its suggestions are ready", ready.Contains("suggestions ready") && ready.Contains("objects"), ready);
 
             Func<string, string, string> typed = (start0, text) => { Send("set|" + start0); Send("type|" + text); return Send("text"); };
+
+            // The card of a column, with its long description (MS_Description).
+            Send("set|select c.Na|me from dbo.Customers c");
+            var card = Send("card|" + Path.Combine(Path.GetTempPath(), "quillsql-e2e", "column-card.png"));
+            Check("column card with its description", card.Contains("COLUMN") && card.Contains("nvarchar(100)") && card.Contains("CRM"), card);
+            Send("key|esc");
+            if (keep)
+            {
+                // Left open to look at: a query to rest the mouse on.
+                Send("set|SELECT c.CustomerId, c.Name, c.Created\r\nFROM dbo.Customers AS c\r\nJOIN sales.Orders AS o ON o.CustomerId = c.CustomerId\r\nWHERE o.Total > 10;");
+                Console.WriteLine(failures == 0 ? "ALL PASSED" : failures + " FAILED");
+                return failures == 0 ? 0 : 1;
+            }
 
             var t = typed("", "select * from dbo.Customers c where c.Name = 'from x' or c.Name is null;");
             Check("keywords in upper case, strings alone", t == "SELECT * FROM dbo.Customers c WHERE c.Name = 'from x' OR c.Name IS NULL;", t);
@@ -171,7 +187,7 @@ static class HookDriver
         }
         finally
         {
-            try { ssms?.Kill(); } catch { }
+            if (!keep) try { ssms?.Kill(); } catch { }
         }
     }
 }

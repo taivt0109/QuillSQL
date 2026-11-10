@@ -1,4 +1,4 @@
-IF DB_ID('QuillTest') IS NOT NULL BEGIN ALTER DATABASE QuillTest SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE QuillTest; END
+﻿IF DB_ID('QuillTest') IS NOT NULL BEGIN ALTER DATABASE QuillTest SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE QuillTest; END
 GO
 CREATE DATABASE QuillTest;
 GO
@@ -24,4 +24,12 @@ AS
 BEGIN
     SELECT TOP (@Max) o.OrderId, o.Total FROM sales.Orders AS o WHERE o.CustomerId = @CustomerId;
 END
+GO
+EXEC sys.sp_addextendedproperty @name = N'MS_Description', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'Customers', @level2type = N'COLUMN', @level2name = N'Name',
+    @value = N'Tên hiển thị của khách hàng, dùng trên hoá đơn, email và màn hình chăm sóc khách hàng.
+Quy tắc:
+- Cá nhân: họ và tên đầy đủ, viết hoa chữ cái đầu.
+- Doanh nghiệp: tên pháp lý theo giấy phép kinh doanh, không viết tắt.
+- NULL khi khách hàng được tạo từ kênh nhập liệu nhanh và chưa bổ sung thông tin.
+Ghi chú: cột này được đồng bộ từ CRM mỗi 15 phút qua job dbo.usp_SyncCustomers; không cập nhật tay trên production. Khi CRM đổi tên khách hàng, giá trị cũ được lưu vào bảng lịch sử để đối chiếu hoá đơn đã xuất. Độ dài tối đa 100 ký tự; tên dài hơn bị cắt và ghi cảnh báo vào log đồng bộ. Các báo cáo doanh thu theo khách hàng nhóm theo CustomerId, không theo cột này, vì tên có thể trùng hoặc thay đổi theo thời gian.';
 GO
