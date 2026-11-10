@@ -162,6 +162,17 @@ Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc
 
 Tab và Enter còn viết luôn những gì từ đó cần, con trỏ đặt sẵn ở chỗ điền giá trị: `IN (|)`, `EXISTS (|)`, `LIKE '|'`, `BETWEEN | AND `, `NVARCHAR(|)`. Sau `c.Name = `, cột kiểu chữ, ngày giờ hoặc GUID có sẵn giá trị đứng đầu và được chọn: `N'|'` cho chuỗi Unicode, `'|'` cho các kiểu còn lại. Phím cách, dấu phẩy và `(` chỉ chèn chữ trơn. Snippet chỉ được gợi ý ở chỗ có thể bắt đầu câu lệnh, hoặc sau `(`.
 
+Danh sách còn dựa vào cột:
+
+- sau `GROUP BY `, các cột không nằm trong hàm tổng hợp của SELECT đứng đầu và được chọn sẵn: `SELECT c.Name, COUNT(*) ... GROUP BY ` + Tab ra `c.Name`;
+- sau `INSERT INTO t (a, b) SELECT `, đúng các cột đó theo thứ tự, kèm alias của bảng nguồn;
+- sau `c.Status = ` hoặc `c.Status IN (`, các giá trị mà ràng buộc CHECK của bảng cho phép; `1` và `0` cho cột bit, `GETDATE()` (hoặc `SYSDATETIME()`, `CAST(GETDATE() AS date)`) cho cột ngày;
+- biến trùng tên với cột hoặc tham số đứng đầu: `@CustomerId` sau `o.CustomerId = ` và sau `EXEC p @CustomerId = `; `DECLARE @CustomerId ` gợi ý kiểu mà các cột cùng tên trong database đang dùng (`INT`), cột trong `CREATE TABLE` cũng vậy;
+- trong `WHERE`, `ON` và `HAVING`, cột khoá chính, khoá ngoại và cột có index đứng trước;
+- sau cột không cho phép NULL, IS NULL xếp cuối (trừ khi có outer join); sau cột không phải kiểu chữ, LIKE xếp cuối;
+- khi không có khoá ngoại, điều kiện JOIN được đoán theo tên: `o.CustomerId = c.Id`, kể cả tên bảng số nhiều hoặc có tiền tố (`tblCategories` và `CategoryId`);
+- gõ sai một chữ (`cusotmer`) vẫn ra `Customers` khi không còn mục nào khớp đúng; mục đó không được chọn sẵn.
+
 Danh sách học theo những gì bạn chọn. Trong các gợi ý khớp như nhau và cùng loại, mục chọn nhiều và gần đây
 đứng trước (keyword hay dùng không vượt lên trên cột), nên gõ `s` sẽ ra `SET` trước `SELECT` nếu bạn dùng `SET` nhiều hơn. Gõ đủ cả từ thì từ
 đó vẫn đứng đầu, còn điều kiện JOIN và các câu lệnh được viết sẵn vẫn giữ chỗ. Keyword, hàm, kiểu

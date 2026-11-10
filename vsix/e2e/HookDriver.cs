@@ -135,6 +135,10 @@ static class HookDriver
             Check("IN + Tab writes the parentheses", t.EndsWith("c.CustomerId IN (1)"), t);
             typed("", "select * from dbo.Customers c where c.Name = "); Send("key|tab"); Send("type|x"); t = Send("text");
             Check("a text column's value is quoted", t.EndsWith("c.Name = N'x'"), t);
+            typed("", "select * from dbo.Tickets t where t.State = "); Send("key|tab"); t = Send("text");
+            Check("the values a CHECK allows", t.EndsWith("t.State = 'Closed'"), t);
+            typed("", "select c.Name, count(*) from dbo.Customers c group by "); Send("key|tab"); t = Send("text");
+            Check("GROUP BY lists the select list", t.EndsWith("BY c.Name"), t);
 
             Send("set|select | from dbo.Customers AS c"); Send("type|Na"); Send("key|enter"); t = Send("text");
             Check("column written with its table's alias", t == "select c.Name from dbo.Customers AS c", t);

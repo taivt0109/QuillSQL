@@ -700,7 +700,7 @@ fn tab_writes_what_the_word_takes() {
     assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId I|"), "IN ($CURSOR$)");
     assert_eq!(first("SELECT * FROM dbo.Customers WHERE Name L|"), "LIKE '$CURSOR$'");
     assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId B|"), "BETWEEN $CURSOR$ AND ");
-    assert_eq!(first("SELECT * FROM dbo.Customers WHERE NOT EXIS|"), "EXISTS ($CURSOR$)");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE NOT EX|"), "EXISTS ($CURSOR$)");
     assert_eq!(first("DECLARE @x NVARCH|"), "NVARCHAR($CURSOR$)");
     assert_eq!(first("DECLARE @x I|"), "INT");
     // After a comparison, a literal of the column's type, selected.
@@ -731,4 +731,143 @@ fn snippets_only_where_a_statement_begins() {
 ss|").contains(&"ssf".to_string()));
     assert!(labels("SELECT * FROM dbo.Customers WHERE CustomerId IN (ss|").contains(&"ssf".to_string()));
     assert!(!labels("SELECT * FROM dbo.Customers WHERE ss|").contains(&"ssf".to_string()));
+}
+
+/// Tables with keys, indexes, a CHECK constraint and no foreign keys.
+fn shop() -> Schema {
+    serde_json::from_value(json!({
+        "database": "Shop", "defaultSchema": "dbo", "schemas": ["dbo"],
+        "objects": [
+            {"schema": "dbo", "name": "Customers", "kind": "table", "columns": [
+                {"name": "Id", "type": "int", "key": true, "indexed": true}, {"name": "Name", "type": "nvarchar(100)"},
+                {"name": "City", "type": "nvarchar(50)", "nullable": true}, {"name": "Email", "type": "varchar(200)", "indexed": true},
+                {"name": "Active", "type": "bit"}, {"name": "Joined", "type": "date"}]},
+            {"schema": "dbo", "name": "Orders", "kind": "table", "checks": ["([Status]='Done' OR [Status]='New')"], "columns": [
+                {"name": "Id", "type": "int", "key": true}, {"name": "CustomerId", "type": "int"},
+                {"name": "Status", "type": "varchar(10)"}, {"name": "Total", "type": "money"}]},
+            {"schema": "dbo", "name": "tblCategories", "kind": "table", "columns": [{"name": "Id", "type": "int", "key": true}]},
+            {"schema": "dbo", "name": "Products", "kind": "table", "columns": [
+                {"name": "ProductId", "type": "int", "key": true}, {"name": "CategoryId", "type": "int"}]},
+            {"schema": "dbo", "name": "Archive", "kind": "table", "columns": [{"name": "Name", "type": "nvarchar(100)"}, {"name": "City", "type": "nvarchar(50)"}]}
+        ]
+    }))
+    .unwrap()
+}
+
+fn shop_run(sql: &str) -> quillsql::complete::Completion {
+    let caret = sql.find('|').unwrap();
+    let text = sql.replace('|', "");
+    complete(&text, text[..caret].encode_utf16().count(), Some(&shop()))
+}
+
+fn shop_labels(sql: &str) -> Vec<String> {
+    shop_run(sql).items.into_iter().filter(|i| i.kind != "picker").map(|i| i.label).collect()
+}
+
+fn values(sql: &str) -> Vec<String> {
+    shop_run(sql).items.into_iter().filter(|i| i.kind == "value").map(|i| i.insert).collect()
+}
+
+#[test]
+fn group_by_lists_what_is_not_aggregated() {
+    let r = shop_run("SELECT c.Name, c.City AS Town, YEAR(c.Joined) y, COUNT(*) n, SUM(o.Total) FROM dbo.Customers c JOIN dbo.Orders o ON o.CustomerId = c.Id GROUP BY |");
+    assert_eq!(r.items.first().map(|i| i.insert.as_str()), Some("c.Name, c.City, YEAR(c.Joined)"));
+    assert_eq!(r.selected, Some(0));
+    // In a subquery, its own select list.
+    let r = shop_run("SELECT * FROM (SELECT DISTINCT TOP (5) Name, MAX(Total) m FROM dbo.Orders GROUP BY |");
+    assert_eq!(r.items.first().map(|i| i.insert.as_str()), Some("Name"));
+    // Nothing to group: the usual list.
+    assert!(shop_run("SELECT COUNT(*) FROM dbo.Orders GROUP BY |").items.iter().all(|i| i.kind != "body"));
+}
+
+#[test]
+fn joins_guessed_from_names_without_foreign_keys() {
+    let ins = |sql: &str| shop_run(sql).items.into_iter().map(|i| i.insert).collect::<Vec<_>>();
+    let joins = ins("SELECT * FROM dbo.Customers c JOIN |");
+    assert!(joins.contains(&"dbo.Orders AS o ON o.CustomerId = c.Id".to_string()), "{joins:?}");
+    let back = ins("SELECT * FROM dbo.Orders o JOIN |");
+    assert!(back.contains(&"dbo.Customers AS c ON c.Id = o.CustomerId".to_string()), "{back:?}");
+    // Without the prefix and in the singular: tblCategories is referred to by CategoryId.
+    let on = shop_labels("SELECT * FROM dbo.Products p JOIN dbo.tblCategories c ON |");
+    assert_eq!(on.first().map(String::as_str), Some("c.Id = p.CategoryId"), "{on:?}");
+}
+
+#[test]
+fn operators_fit_the_column() {
+    // A column that cannot be null: IS NULL last; a number: LIKE last.
+    let l = shop_labels("SELECT * FROM dbo.Customers c WHERE c.Id |");
+    assert_eq!(l.last().map(String::as_str), Some("NOT LIKE"), "{l:?}");
+    assert!(l.iter().position(|x| x == "IS NULL") > l.iter().position(|x| x == "NOT BETWEEN"), "{l:?}");
+    // One that can: as before.
+    assert_eq!(shop_labels("SELECT * FROM dbo.Customers c WHERE c.City |")[..3], ["IN", "IS NULL", "IS NOT NULL"]);
+    // An outer join can make any column null.
+    let l = shop_labels("SELECT * FROM dbo.Customers c LEFT JOIN dbo.Orders o ON o.CustomerId = c.Id WHERE o.Id |");
+    assert_eq!(l[..3], ["IN", "IS NULL", "IS NOT NULL"]);
+    // Values of the type.
+    assert_eq!(values("SELECT * FROM dbo.Customers c WHERE c.Active = |"), ["0", "1"]);
+    assert_eq!(values("SELECT * FROM dbo.Customers c WHERE c.Joined >= |"), ["'$CURSOR$'", "CAST(GETDATE() AS date)"]);
+}
+
+#[test]
+fn variables_of_the_name_come_first() {
+    let r = shop_run("DECLARE @CustomerId int = 1, @Name nvarchar(100);
+SELECT * FROM dbo.Orders o WHERE o.CustomerId = |");
+    assert_eq!(r.items.first().map(|i| i.label.as_str()), Some("@CustomerId"));
+    assert_eq!(r.selected, Some(0));
+    // Before the literal of a text column, and when typing `@`.
+    let r = shop_run("DECLARE @Name nvarchar(100);
+UPDATE dbo.Customers SET Name = |");
+    assert_eq!(r.items.iter().take(2).map(|i| i.label.as_str()).collect::<Vec<_>>(), ["@Name", "N''"]);
+    let r = shop_run("DECLARE @a int, @Name nvarchar(100);
+SELECT * FROM dbo.Customers c WHERE c.Name = @|");
+    assert_eq!(r.items.first().map(|i| i.label.as_str()), Some("@Name"));
+    // A parameter given a variable of its name.
+    let r = shop_run("DECLARE @CustomerId int = 1;
+EXEC dbo.p @CustomerId = |");
+    assert_eq!(r.items.first().map(|i| i.label.as_str()), Some("@CustomerId"));
+    // The type of the columns of that name.
+    assert_eq!(shop_run("DECLARE @Email |").items.first().map(|i| i.insert.as_str()), Some("VARCHAR(200)"));
+    assert_eq!(shop_run("CREATE TABLE #t (Name |").items.first().map(|i| i.insert.as_str()), Some("NVARCHAR(100)"));
+    assert_eq!(shop_run("DECLARE @x I|").items.first().map(|i| i.insert.as_str()), Some("INT"));
+}
+
+#[test]
+fn keys_and_indexes_first_in_conditions() {
+    let l = shop_labels("SELECT * FROM dbo.Customers c WHERE c.|");
+    assert_eq!(l[..2], ["Id", "Email"], "{l:?}");
+    // In the select list, by name as before.
+    assert_eq!(shop_labels("SELECT c.| FROM dbo.Customers c")[..2], ["Active", "City"]);
+}
+
+#[test]
+fn a_typo_still_finds_the_name() {
+    let r = shop_run("SELECT * FROM cusotmer|");
+    assert_eq!(r.items.first().map(|i| i.label.as_str()), Some("Customers"));
+    assert_eq!(r.selected, None);
+    // Not while a name matches as typed.
+    assert!(!shop_labels("SELECT * FROM dbo.Orders o WHERE o.Tota|").contains(&"Joined".to_string()));
+}
+
+#[test]
+fn insert_select_lists_the_insert_columns() {
+    let r = shop_run("INSERT INTO dbo.Archive (Name, City)
+SELECT | FROM dbo.Customers c");
+    assert_eq!(r.items.first().map(|i| i.insert.as_str()), Some("c.Name, c.City"));
+    assert_eq!(r.selected, Some(0));
+    let r = shop_run("INSERT INTO dbo.Archive (Name, City) SELECT |");
+    assert_eq!(r.items.first().map(|i| i.insert.as_str()), Some("Name, City"));
+}
+
+#[test]
+fn check_constraint_values() {
+    assert_eq!(values("SELECT * FROM dbo.Orders o WHERE o.Status = |"), ["'Done'", "'New'"]);
+    assert_eq!(values("SELECT * FROM dbo.Orders o WHERE o.Status IN (|"), ["'Done'", "'New'"]);
+    assert_eq!(values("UPDATE dbo.Orders SET Status = |"), ["'Done'", "'New'"]);
+}
+
+#[test]
+fn exists_where_a_condition_starts() {
+    assert_eq!(labels("SELECT * FROM dbo.Customers WHERE NOT EX|").first().map(String::as_str), Some("EXISTS"));
+    assert_eq!(labels("SELECT * FROM dbo.Customers WHERE EX|").first().map(String::as_str), Some("EXISTS"));
+    assert_eq!(labels("SELECT EX|").first().map(String::as_str), Some("EXP"));
 }

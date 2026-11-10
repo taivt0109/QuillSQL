@@ -27,11 +27,19 @@ SELECT o.object_id, s.name, o.name, o.type, NULL
 FROM sys.system_objects o JOIN sys.schemas s ON s.schema_id = o.schema_id
 WHERE (o.type = 'V' AND s.name IN ('sys', 'INFORMATION_SCHEMA'))
    OR (o.type IN ('P', 'X', 'PC', 'FN', 'FS', 'IF', 'TF', 'FT') AND s.name = 'sys');
+-- With whether the column is in the primary key, or the first of an index.
 SELECT c.object_id, c.name, TYPE_NAME(c.user_type_id), c.max_length, c.precision, c.scale, c.is_nullable, c.is_identity, c.is_computed, dc.definition,
-    CONVERT(nvarchar(4000), ep.value)
+    CONVERT(nvarchar(4000), ep.value), ISNULL(ix.in_key, 0), ISNULL(ix.leads, 0)
 FROM sys.columns c JOIN sys.objects o ON o.object_id = c.object_id
 LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id
 LEFT JOIN sys.extended_properties ep ON ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
+LEFT JOIN (
+    SELECT ic.object_id, ic.column_id, MAX(CASE WHEN i.is_primary_key = 1 THEN 1 ELSE 0 END) AS in_key,
+        MAX(CASE WHEN ic.key_ordinal = 1 THEN 1 ELSE 0 END) AS leads
+    FROM sys.index_columns ic JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+    WHERE ic.key_ordinal > 0
+    GROUP BY ic.object_id, ic.column_id
+) ix ON ix.object_id = c.object_id AND ix.column_id = c.column_id
 WHERE o.is_ms_shipped = 0 AND o.type IN ('U', 'V', 'IF', 'TF', 'FT')
 ORDER BY c.object_id, c.column_id;
 SELECT object_id, name, type, max_length, precision, scale, is_output, description FROM (
@@ -54,6 +62,7 @@ JOIN sys.objects rt ON rt.object_id = fk.referenced_object_id
 JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
 JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
 ORDER BY fk.object_id, fkc.constraint_column_id;
+SELECT parent_object_id, definition FROM sys.check_constraints WHERE is_disabled = 0;
 -- Azure SQL Database has no sys.servers (nor linked servers): an empty list there.
 IF OBJECT_ID('sys.servers') IS NOT NULL EXEC('SELECT name FROM sys.servers WHERE is_linked = 1 ORDER BY name');
 ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
@@ -77,6 +86,7 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
             public string Description;
             public readonly List<string> Columns = new List<string>();
             public readonly List<string> Params = new List<string>();
+            public readonly List<string> Checks = new List<string>();
         }
 
         internal static string KindOf(string type)
@@ -153,7 +163,8 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
                             o.Columns.Add("{\"name\":" + Json.Str(r.GetString(1)) + ",\"type\":" + Json.Str(type)
                                 + ",\"nullable\":" + Bool(r.GetBoolean(6)) + ",\"identity\":" + Bool(r.GetBoolean(7)) + ",\"computed\":" + Bool(r.GetBoolean(8))
                                 + (r.IsDBNull(9) ? "" : ",\"default\":" + Json.Str(r.GetString(9)))
-                                + (r.IsDBNull(10) ? "" : ",\"description\":" + Json.Str(r.GetString(10))) + "}");
+                                + (r.IsDBNull(10) ? "" : ",\"description\":" + Json.Str(r.GetString(10)))
+                                + (r.GetInt32(11) == 1 ? ",\"key\":true" : "") + (r.GetInt32(12) == 1 ? ",\"indexed\":true" : "") + "}");
                         }
                     }
                     r.NextResult();
@@ -176,6 +187,11 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
                         }
                         key.Columns.Add(Json.Str(r.GetString(5)));
                         key.RefColumns.Add(Json.Str(r.GetString(6)));
+                    }
+                    r.NextResult();
+                    while (r.Read())
+                    {
+                        if (objects.TryGetValue(r.GetInt32(0), out var o) && !r.IsDBNull(1)) o.Checks.Add(Json.Str(r.GetString(1)));
                     }
                     r.NextResult();
                     while (r.Read()) linked.Add(r.GetString(0));
@@ -201,7 +217,9 @@ ELSE SELECT CAST(name AS sysname) AS name FROM sys.objects WHERE 1 = 0;";
                   .Append(",\"kind\":").Append(Json.Str(o.Kind))
                   .Append(o.Description == null ? "" : ",\"description\":" + Json.Str(o.Description))
                   .Append(",\"columns\":[").Append(string.Join(",", o.Columns)).Append(']')
-                  .Append(",\"params\":[").Append(string.Join(",", o.Params)).Append("]}");
+                  .Append(",\"params\":[").Append(string.Join(",", o.Params)).Append(']')
+                  .Append(o.Checks.Count == 0 ? "" : ",\"checks\":[" + string.Join(",", o.Checks) + "]")
+                  .Append('}');
             }
             sb.Append("],\"foreignKeys\":[");
             first = true;

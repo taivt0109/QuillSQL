@@ -170,6 +170,24 @@ Tab and Enter also write what the word takes, the caret where the value goes: `I
 column offers its literal first, selected: `N'|'` for Unicode text, `'|'` for the others. Space,
 comma and `(` insert the word alone. Snippets are offered where a statement can begin, or after `(`.
 
+The list also follows the columns:
+
+- after `GROUP BY `, the select list's columns that are not aggregated, first and selected:
+  `SELECT c.Name, COUNT(*) ... GROUP BY ` + Tab gives `c.Name`;
+- after `INSERT INTO t (a, b) SELECT `, the same columns in their order, with the source's alias;
+- after `c.Status = ` or `c.Status IN (`, the values the table's CHECK constraints allow; `1` and `0`
+  for a bit, `GETDATE()` (or `SYSDATETIME()`, `CAST(GETDATE() AS date)`) for a date;
+- a variable of the column's or parameter's name first: `@CustomerId` after `o.CustomerId = ` and
+  after `EXEC p @CustomerId = `; `DECLARE @CustomerId ` offers the type the database's columns of
+  that name have (`INT`), and so does a column in `CREATE TABLE`;
+- in `WHERE`, `ON` and `HAVING`, primary key, foreign key and indexed columns first;
+- after a column that cannot be null, IS NULL comes last (not with an outer join); after one that
+  is not text, LIKE does;
+- with no foreign key, the join condition is guessed from the names: `o.CustomerId = c.Id`, also for
+  plural or prefixed table names (`tblCategories` and `CategoryId`);
+- a name typed with a typo (`cusotmer`) still finds `Customers` when nothing matches as typed; it
+  is not selected.
+
 The list learns from what you pick: among matches equally good and of the same kind, the
 suggestions picked often and lately come first (a keyword picked often never passes a column), so `s` gives `SET` before `SELECT` if you use it more. Typing the whole word
 still puts that word first, and the join conditions and written statements keep their place.
