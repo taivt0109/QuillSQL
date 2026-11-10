@@ -88,7 +88,7 @@ daily check off, create `%LOCALAPPDATA%\QuillSQL\settings.json` containing
 | Ctrl+B, Ctrl+R | Smart rename |
 | Ctrl+B, Ctrl+C | Insert semicolons |
 | Ctrl+B, Ctrl+U / Ctrl+B, Ctrl+L | UPPERCASE / lowercase keywords |
-| Ctrl+B, Ctrl+E | Execute the statement at the caret |
+| Shift+F5 or Ctrl+B, Ctrl+E | Execute the statement at the caret |
 | Ctrl+B, Ctrl+B | Execute the batch at the caret |
 | Ctrl+B, Ctrl+T | Summarize the script (go to any statement) |
 | Ctrl+B, Ctrl+S | Insert snippet |

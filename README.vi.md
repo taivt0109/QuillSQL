@@ -95,7 +95,7 @@ SSMS không cho thay extension khi đang chạy, nên bản cập nhật đượ
 | Ctrl+B, Ctrl+R | Đổi tên thông minh |
 | Ctrl+B, Ctrl+C | Chèn dấu chấm phẩy |
 | Ctrl+B, Ctrl+U / Ctrl+B, Ctrl+L | Viết HOA / viết thường từ khóa |
-| Ctrl+B, Ctrl+E | Chạy câu lệnh tại con trỏ |
+| Shift+F5 hoặc Ctrl+B, Ctrl+E | Chạy câu lệnh tại con trỏ |
 | Ctrl+B, Ctrl+B | Chạy batch tại con trỏ |
 | Ctrl+B, Ctrl+T | Tóm tắt script (nhảy tới câu lệnh bất kỳ) |
 | Ctrl+B, Ctrl+S | Chèn snippet |

@@ -381,7 +381,7 @@ namespace QuillSql.Vsix
             ["Also ask before DROP TABLE and DROP DATABASE"] = "Hỏi cả trước DROP TABLE và DROP DATABASE",
             ["The question's default answer is Cancel, so pressing Enter by mistake does not run the query."] = "Câu hỏi mặc định chọn Hủy, nên lỡ nhấn Enter cũng không chạy query.",
             ["Run part of a script"] = "Chạy một phần script",
-            ["Execute Current Statement (Ctrl+B, Ctrl+E) runs the statement at the caret; Execute Current Batch (Ctrl+B, Ctrl+B) runs the batch between GO lines."] = "Chạy câu lệnh tại con trỏ (Ctrl+B, Ctrl+E); chạy batch giữa các dòng GO tại con trỏ (Ctrl+B, Ctrl+B).",
+            ["Execute Current Statement (Shift+F5 or Ctrl+B, Ctrl+E) runs the statement at the caret; Execute Current Batch (Ctrl+B, Ctrl+B) runs the batch between GO lines."] = "Chạy câu lệnh tại con trỏ (Shift+F5 hoặc Ctrl+B, Ctrl+E); chạy batch giữa các dòng GO tại con trỏ (Ctrl+B, Ctrl+B).",
             ["Query windows whose \"server / database\" contains the text get a colored document tab. The most specific match wins: a database before its server, a server before a word. Tip: right-click a server or database in Object Explorer to color it."] = "Cửa sổ query có \"server / database\" chứa đoạn chữ này sẽ được tô màu tab. Dòng khớp cụ thể nhất được dùng: database trước server, server trước một từ. Mẹo: chuột phải vào server hoặc database trong Object Explorer để đặt màu.",
             ["Server or database contains"] = "Server hoặc database chứa",
             ["Color (#RRGGBB)"] = "Màu (#RRGGBB)",

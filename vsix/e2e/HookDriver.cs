@@ -100,6 +100,11 @@ static class HookDriver
 
             Func<string, string, string> typed = (start0, text) => { Send("set|" + start0); Send("type|" + text); return Send("text"); };
 
+            // Shift+F5 runs the statement at the caret, as in other SQL tools, with no other command on it.
+            var shiftF5 = Send("bindings|Shift+F5");
+            Console.WriteLine("Shift+F5: " + shiftF5.Replace("\n", "; "));
+            Check("Shift+F5 runs the statement at the caret", shiftF5.Contains("QuillSQL.ExecuteCurrentStatement"), shiftF5);
+
             // The card of a column, with its long description (MS_Description).
             Send("set|select c.Na|me from dbo.Customers c");
             var card = Send("card|" + Path.Combine(Path.GetTempPath(), "quillsql-e2e", "column-card.png"));

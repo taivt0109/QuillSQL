@@ -538,6 +538,7 @@
     <KeyBinding guid="guidQuillSqlCmdSet" id="UppercaseCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="U" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="LowercaseCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="L" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="ExecuteStatementCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="E" mod2="Control" />
+    <KeyBinding guid="guidQuillSqlCmdSet" id="ExecuteStatementCommandId" editor="guidVSStd97" key1="VK_F5" mod1="Shift" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="ExecuteBatchCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="B" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="SummarizeCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="T" mod2="Control" />
     <KeyBinding guid="guidQuillSqlCmdSet" id="OptionsCommandId" editor="guidVSStd97" key1="B" mod1="Control" key2="O" mod2="Control" />

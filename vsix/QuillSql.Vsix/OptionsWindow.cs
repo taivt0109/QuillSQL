@@ -555,7 +555,7 @@ namespace QuillSql.Vsix
                 Check("Also ask before DROP TABLE and DROP DATABASE", s.WarnDrop, v => s.WarnDrop = v),
                 Note("The question's default answer is Cancel, so pressing Enter by mistake does not run the query."),
                 Heading("Run part of a script"),
-                Note("Execute Current Statement (Ctrl+B, Ctrl+E) runs the statement at the caret; Execute Current Batch (Ctrl+B, Ctrl+B) runs the batch between GO lines."));
+                Note("Execute Current Statement (Shift+F5 or Ctrl+B, Ctrl+E) runs the statement at the caret; Execute Current Batch (Ctrl+B, Ctrl+B) runs the batch between GO lines."));
         }
 
         private UIElement Colors()
@@ -831,7 +831,7 @@ namespace QuillSql.Vsix
                 new[] { "Qualify object names", "Ctrl+B, Ctrl+Q" },
                 new[] { "Smart rename", "Ctrl+B, Ctrl+R" },
                 new[] { "Insert semicolons", "Ctrl+B, Ctrl+C" },
-                new[] { "Execute current statement", "Ctrl+B, Ctrl+E" },
+                new[] { "Execute current statement", "Shift+F5 or Ctrl+B, Ctrl+E" },
                 new[] { "Execute current batch", "Ctrl+B, Ctrl+B" },
                 new[] { "Summarize script", "Ctrl+B, Ctrl+T" },
                 new[] { "Insert snippet", "Ctrl+B, Ctrl+S" },

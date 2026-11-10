@@ -175,6 +175,32 @@ namespace QuillSql.Vsix
                     await Task.Delay(1500);
                     return CardPopup.Snapshot(argument);
                 }
+                case "bindings":
+                {
+                    // bindings|Shift+F5: the commands bound to the keys, as "scope::keys name" lines.
+                    var found = new System.Collections.Generic.List<string>();
+                    foreach (EnvDTE.Command c in EditorContext.Dte.Commands)
+                    {
+                        object[] bindings;
+                        try
+                        {
+                            bindings = c.Bindings as object[];
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+                        foreach (var b in bindings ?? new object[0])
+                        {
+                            var text = b as string ?? "";
+                            if (text.EndsWith("::" + argument, StringComparison.OrdinalIgnoreCase))
+                            {
+                                found.Add(text + " " + c.Name);
+                            }
+                        }
+                    }
+                    return string.Join("\n", found);
+                }
                 case "save":
                     SessionKeeper.Save();
                     return "ok";
