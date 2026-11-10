@@ -154,14 +154,14 @@ Khi gõ, danh sách gợi ý hiện ra:
 - cột trong `INSERT INTO t (`; biến đã khai báo trong script sau `@`;
 - cột của bảng tạm và biến bảng mà script tạo ra (`CREATE TABLE #t`, `DECLARE @t TABLE`, `SELECT ... INTO #t`);
 - object của database khác trên cùng server sau `OtherDb.` và `OtherDb.dbo.`, kèm cột; linked server sau `FROM`;
-- chỉ những từ có thể đứng tiếp theo: sau `c.Name ` là toán tử và mệnh đề (AND, LIKE, IS, ORDER BY...), sau `INNER` là JOIN, sau `IS` là NULL, sau `ORDER BY c.Name ` là ASC và DESC, kiểu dữ liệu sau `CAST(x AS` và `DECLARE @x`, table hint trong `WITH (`, query hint trong `OPTION (`, và các câu lệnh ở đầu một câu lệnh;
+- chỉ những từ có thể đứng tiếp theo: sau `WHERE c.Name ` là toán tử (IN, IS, LIKE, BETWEEN), sau `WHERE c.Name = 1 ` là AND, OR, các mệnh đề và câu lệnh tiếp theo, sau `UPDATE t ` là SET, sau `IN (` là SELECT, sau `INNER` là JOIN, sau `IS` là NULL, sau `ORDER BY c.Name ` là ASC và DESC, kiểu dữ liệu sau `CAST(x AS` và `DECLARE @x`, table hint trong `WITH (`, query hint trong `OPTION (`, và các câu lệnh ở đầu một câu lệnh; ở chỗ cần một giá trị thì không gợi ý câu lệnh, trừ SELECT của truy vấn con;
 - trong DDL và phân quyền: những gì theo sau `ALTER TABLE t`, cột của bảng sau `ALTER COLUMN`, trong `CREATE INDEX ... ON t (` và `INCLUDE (`, tùy chọn cột trong `CREATE TABLE`, object sau `GRANT ... ON`; `WHEN MATCHED THEN` và các hành động trong MERGE;
 - sau `EXEC name a, `: các tham số chưa truyền.
 
 Mục đầu tiên chỉ được chọn sẵn khi chữ bạn gõ khớp chắc chắn: trọn từ, phần đầu, hoặc chữ cái đầu của từng phần (`cid` cho CustomerId); với hàm có sẵn, ba chữ nằm trong tên cũng tính (`add` cho DATEADD). Nếu không thì không mục nào được chọn và Enter, Tab giữ nghĩa thông thường. Mục bạn đã chọn cho mấy chữ đó sẽ được chọn sẵn ở lần sau.
 
-Danh sách học theo những gì bạn chọn. Trong các gợi ý khớp như nhau, mục chọn nhiều và gần đây
-đứng trước, nên gõ `s` sẽ ra `SET` trước `SELECT` nếu bạn dùng `SET` nhiều hơn. Gõ đủ cả từ thì từ
+Danh sách học theo những gì bạn chọn. Trong các gợi ý khớp như nhau và cùng loại, mục chọn nhiều và gần đây
+đứng trước (keyword hay dùng không vượt lên trên cột), nên gõ `s` sẽ ra `SET` trước `SELECT` nếu bạn dùng `SET` nhiều hơn. Gõ đủ cả từ thì từ
 đó vẫn đứng đầu, còn điều kiện JOIN và các câu lệnh được viết sẵn vẫn giữ chỗ. Keyword, hàm, kiểu
 dữ liệu và snippet tính chung cho mọi database; bảng, view, cột và procedure tính riêng từng
 database. Sau một tháng, một lần chọn chỉ còn tính một nửa. Tắt trong **Options > Suggestions**,

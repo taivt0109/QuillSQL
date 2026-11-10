@@ -150,10 +150,11 @@ As you type, a list offers:
   `DECLARE @t TABLE`, `SELECT ... INTO #t`);
 - objects of another database of the server after `OtherDb.` and `OtherDb.dbo.`, with their
   columns; linked servers after `FROM`;
-- only the words that can come next: after `c.Name ` the operators and clauses (AND, LIKE, IS,
-  ORDER BY...), after `INNER` JOIN, after `IS` NULL, after `ORDER BY c.Name ` ASC and DESC, data types
+- only the words that can come next: after `WHERE c.Name ` its operators (IN, IS, LIKE, BETWEEN),
+  after `WHERE c.Name = 1 ` AND, OR, the next clauses and statements, after `UPDATE t ` SET, after
+  `IN (` SELECT, after `INNER` JOIN, after `IS` NULL, after `ORDER BY c.Name ` ASC and DESC, data types
   after `CAST(x AS` and `DECLARE @x`, table hints in `WITH (`, query hints in `OPTION (`, and the
-  statements where one starts;
+  statements where one starts; where a value goes, no statement but a subquery's SELECT;
 - in DDL and permissions: what follows `ALTER TABLE t`, the table's columns after `ALTER COLUMN`,
   in `CREATE INDEX ... ON t (` and `INCLUDE (`, column options in `CREATE TABLE`, objects after
   `GRANT ... ON`; `WHEN MATCHED THEN` and its actions in MERGE;
@@ -164,8 +165,8 @@ or the initials of its parts (`cid` for CustomerId); for a built-in function, th
 name too (`add` for DATEADD). Otherwise nothing is selected and Enter and
 Tab keep their usual meaning. The item picked for some letters is selected first the next time.
 
-The list learns from what you pick: among matches equally good, the suggestions picked often and
-lately come first, so `s` gives `SET` before `SELECT` if you use it more. Typing the whole word
+The list learns from what you pick: among matches equally good and of the same kind, the
+suggestions picked often and lately come first (a keyword picked often never passes a column), so `s` gives `SET` before `SELECT` if you use it more. Typing the whole word
 still puts that word first, and the join conditions and written statements keep their place.
 Keywords, functions, data types and snippets count in every database; tables, views, columns and
 procedures in their own. A pick counts half as much after a month. **Options > Suggestions** turns

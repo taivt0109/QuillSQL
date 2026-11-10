@@ -165,11 +165,6 @@ fn camel_match(parts: &[Vec<char>], needle: &[char]) -> bool {
 }
 const MAX_ITEMS: usize = 300;
 
-const STATEMENT_KEYWORDS: &[&str] = &[
-    "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH", "DECLARE", "SET", "EXEC", "IF",
-    "BEGIN", "END", "WHILE", "RETURN", "CREATE", "ALTER", "DROP", "TRUNCATE", "PRINT", "USE",
-];
-
 /// Keywords inside conditions, select lists and the clauses that follow them.
 const EXPRESSION_KEYWORDS: &[&str] = &[
     "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END", "AS",
@@ -194,6 +189,12 @@ const STATEMENT_START: &[&str] = &[
 const CONDITION_NEXT: &[&str] = &["AND", "OR", "IS", "IN", "LIKE", "BETWEEN", "NOT"];
 
 const CASE_NEXT: &[&str] = &["THEN", "WHEN", "ELSE", "END", "AND", "OR", "IS", "IN", "LIKE", "BETWEEN", "NOT"];
+
+/// What may follow an operand that is not yet compared: `WHERE Id |`.
+const OPERAND_NEXT: &[&str] = &["IN", "IS", "LIKE", "BETWEEN", "NOT"];
+
+/// What may follow a comparison: `WHERE Id = 1 |`.
+const AFTER_COMPARISON: &[&str] = &["AND", "OR"];
 
 /// What may follow a condition in WHERE, ON or HAVING, besides more of it.
 const AFTER_CONDITION: &[&str] = &["GROUP BY", "ORDER BY", "HAVING", "UNION", "UNION ALL", "EXCEPT", "INTERSECT", "OPTION"];
@@ -451,6 +452,11 @@ fn opener(head: &[Token], from: usize, to: usize) -> Option<usize> {
 fn ends_operand(head: &[Token], i: usize) -> bool {
     match head[i].kind {
         Kind::Number | Kind::Str | Kind::Variable | Kind::RParen | Kind::Bracket | Kind::Quoted => true,
+        // `SELECT *` and `t.*`: a `*` with no operand before it is every column, not a product.
+        Kind::Op if head[i].text == "*" => {
+            let before = (0..i).rev().find(|&j| !head[j].is_comment());
+            before.is_none_or(|j| head[j].kind == Kind::Dot || !ends_operand(head, j))
+        }
         Kind::Word => {
             let w = head[i].text.to_ascii_uppercase();
             !is_reserved(&w) || matches!(w.as_str(), "NULL" | "ASC" | "DESC" | "CURRENT_TIMESTAMP" | "CURRENT_USER" | "SESSION_USER" | "SYSTEM_USER")
@@ -484,6 +490,24 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
         return Some(ddl);
     }
 
+    // `UPDATE t |` and `UPDATE TOP (10) t |` go on with SET.
+    if is_name(&head[p]) && !(head[p].kind == Kind::Word && is_reserved(&pw)) {
+        let mut j = p;
+        while j >= lo + 2 && head[j - 1].kind == Kind::Dot && is_name(&head[j - 2]) {
+            j -= 2;
+        }
+        let mut b = prev(j);
+        if let Some(r) = b.filter(|&r| head[r].kind == Kind::RParen)
+            && let Some(o) = opener(head, lo, r)
+            && word(prev(o)) == "TOP"
+        {
+            b = prev(o).and_then(prev);
+        }
+        if word(b) == "UPDATE" {
+            return words(&["SET", "WITH"]);
+        }
+    }
+
     match head[p].kind {
         Kind::Word => match pw.as_str() {
             "INNER" if in_from => return words(&["JOIN"]),
@@ -512,6 +536,8 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
             "SET" if p == first_at => return Some(Next::Words(SET_OPTIONS.to_vec(), true)),
             "AS" if opener(head, lo, p).is_some_and(|o| matches!(word(prev(o)).as_str(), "CAST" | "TRY_CAST")) => return Some(Next::Types(Vec::new())),
             "AS" if routine && opener(head, lo, p).is_none() => return words(STATEMENT_START),
+            "AS" if matches!(first.as_str(), "CREATE" | "ALTER") && ups.iter().any(|w| w == "VIEW") && opener(head, lo, p).is_none() => return words(&["SELECT", "WITH"]),
+            "FOR" if qw == "CURSOR" => return words(&["SELECT", "WITH"]),
             _ => {}
         },
         Kind::LParen => match word(prev(p)).as_str() {
@@ -519,6 +545,7 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
             "OPTION" => return words(QUERY_HINTS),
             "OVER" => return words(&["PARTITION BY", "ORDER BY"]),
             "EXISTS" => return words(&["SELECT"]),
+            "IN" => return Some(Next::Words(vec!["SELECT"], true)),
             "CONVERT" | "TRY_CONVERT" => return Some(Next::Types(Vec::new())),
             _ => {}
         },
@@ -570,17 +597,23 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
         let b = prev(o);
         let condition = b.is_none_or(|b| head[b].kind == Kind::LParen)
             || matches!(word(b).as_str(), "WHERE" | "AND" | "OR" | "NOT" | "ON" | "HAVING" | "WHEN" | "IF" | "WHILE");
+        if condition && !case_open && !compares(head, lo, p) {
+            return words(OPERAND_NEXT);
+        }
         if condition {
-            out.extend(CONDITION_NEXT);
+            out.extend(if case_open { CONDITION_NEXT } else { AFTER_COMPARISON });
         }
         return if out.is_empty() { None } else { Some(Next::Words(out, false)) };
     }
     match clause {
         "WHERE" | "ON" | "HAVING" => {
+            if !case_open && !compares(head, lo, p) {
+                return words(OPERAND_NEXT);
+            }
             if first == "MERGE" {
                 out.extend(["WHEN MATCHED THEN", "WHEN NOT MATCHED THEN", "WHEN NOT MATCHED BY SOURCE THEN"]);
             }
-            out.extend(CONDITION_NEXT);
+            out.extend(if case_open { CONDITION_NEXT } else { AFTER_COMPARISON });
             if clause == "ON" {
                 out.extend(AFTER_JOIN_CONDITION);
             }
@@ -593,7 +626,10 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
         "INSERT" | "INTO" if head[p].kind == Kind::RParen => return words(&["VALUES", "SELECT", "OUTPUT", "EXEC", "DEFAULT VALUES"]),
         "SET" | "VALUES" | "" => {
             if matches!(first.as_str(), "IF" | "WHILE") {
-                out.extend(CONDITION_NEXT);
+                if !case_open && !compares(head, lo, p) {
+                    return words(OPERAND_NEXT);
+                }
+                out.extend(if case_open { CONDITION_NEXT } else { AFTER_COMPARISON });
                 out.push("BEGIN");
             }
         }
@@ -601,6 +637,50 @@ fn next_words(head: &[Token], k: usize, stmt_start: usize, clause: &str) -> Opti
     }
     out.extend(STATEMENT_START);
     Some(Next::Words(out, false))
+}
+
+/// Whether the condition ending at token `p` compares something (`a = 1`, `a IN (...)`, `a IS NULL`,
+/// `EXISTS (...)`, `(a = 1)`); `a` alone still needs its operator.
+fn compares(head: &[Token], lo: usize, p: usize) -> bool {
+    let word = |i: usize| if head[i].kind == Kind::Word { head[i].text.to_ascii_uppercase() } else { String::new() };
+    let comparison = |i: usize| head[i].kind == Kind::Op && !head[i].text.is_empty() && head[i].text.chars().all(|c| matches!(c, '=' | '<' | '>' | '!'));
+    let tests = |w: &str| matches!(w, "IN" | "IS" | "LIKE" | "BETWEEN" | "EXISTS");
+    let starts = |w: &str| matches!(w, "WHERE" | "ON" | "HAVING" | "AND" | "OR" | "NOT" | "WHEN" | "IF" | "WHILE");
+    let mut depth = 0;
+    // A condition in parentheses: `(a = 1) |`.
+    let mut grouped = false;
+    for j in (lo..=p).rev() {
+        match head[j].kind {
+            Kind::RParen => depth += 1,
+            Kind::LParen if depth == 0 => break,
+            Kind::LParen => depth -= 1,
+            _ if head[j].is_comment() => {}
+            _ if depth > 0 => grouped |= comparison(j) || tests(&word(j)),
+            _ if comparison(j) || tests(&word(j)) => return true,
+            _ => {
+                let w = word(j);
+                // `BETWEEN 1 AND 2`: the AND is the BETWEEN's.
+                if w == "AND" {
+                    let mut d = 0;
+                    for i in (lo..j).rev() {
+                        match head[i].kind {
+                            Kind::RParen => d += 1,
+                            Kind::LParen if d == 0 => break,
+                            Kind::LParen => d -= 1,
+                            _ if d > 0 => {}
+                            _ if word(i) == "BETWEEN" => return true,
+                            _ if starts(&word(i)) || comparison(i) => break,
+                            _ => {}
+                        }
+                    }
+                }
+                if starts(&w) {
+                    break;
+                }
+            }
+        }
+    }
+    grouped
 }
 
 /// Whether the name before token `k` is an alias already written after a table: `t x` or `t AS x`.
@@ -1778,7 +1858,9 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
                     let insert = if NILADIC.contains(&f.name.as_str()) { f.name.clone() } else { format!("{}()", f.name) };
                     items.push(Item { label: f.name.clone(), insert, kind: "function", detail: "built-in function".into() });
                 }
-                for kw in STATEMENT_KEYWORDS.iter().chain(EXPRESSION_KEYWORDS) {
+                // Where a value goes no statement begins, but a subquery may: `(SELECT`.
+                let statements: &[&str] = if prev_word.as_ref().is_some_and(|(kind, _)| *kind == Kind::LParen) { &["SELECT", "WITH"] } else { &[] };
+                for kw in statements.iter().chain(EXPRESSION_KEYWORDS) {
                     items.push(Item { label: kw.to_string(), insert: kw.to_string(), kind: "keyword", detail: String::new() });
                 }
             }
@@ -1873,13 +1955,13 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
     }
     let likely = |it: &Item| if it.kind == "column" { usize::MAX } else { likely.iter().position(|w| w.eq_ignore_ascii_case(&it.label)).unwrap_or(usize::MAX) };
 
-    // How often the user picked it: first among matches of the same quality, after the whole word
-    // and the statement-writing items.
+    // How often the user picked it: first among matches of the same quality and kind, after the
+    // whole word and the statement-writing items; a word picked often never passes a column.
     let used = |it: &Item| std::cmp::Reverse(options.usage.get(&crate::usage::item_key(it.kind, &it.label)).copied().unwrap_or(0));
 
     // Rank: prefix matches, then substring matches; then by kind, how likely, and name.
-    // (written items or the whole word first, how often picked, kind)
-    type Rank = (u8, std::cmp::Reverse<u32>, u8);
+    // (written items or the whole word first, kind, how often picked)
+    type Rank = (u8, u8, std::cmp::Reverse<u32>);
     let mut scored: Vec<(u8, Rank, bool, usize, Item)> = items
         .into_iter()
         .filter_map(|it| {
@@ -1900,7 +1982,7 @@ pub fn complete_across(text: &str, caret_utf16: usize, schema: Option<&Schema>, 
             // gives it its proper case instead of a longer name that starts with it.
             let exact = !needle.is_empty() && label == needle;
             let rank = if exact { 0 } else { rank(it.kind, context) };
-            let rank = if rank == 0 { (0, std::cmp::Reverse(0), 0) } else { (1, used(&it), rank) };
+            let rank = if rank == 0 { (0, 0, std::cmp::Reverse(0)) } else { (1, rank, used(&it)) };
             Some((quality, rank, system, likely(&it), it))
         })
         .collect();

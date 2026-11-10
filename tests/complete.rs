@@ -653,3 +653,42 @@ fn what_the_user_picks_often_comes_first() {
     let r = labels("select * from ", &[("table", "Orders", 10)]);
     assert_eq!(r.first().map(String::as_str), Some("Orders"), "{r:?}");
 }
+
+#[test]
+fn only_what_the_syntax_allows_next() {
+    let first = |sql: &str| labels(sql).first().cloned().unwrap_or_default();
+    // UPDATE goes on with SET.
+    assert_eq!(labels("UPDATE dbo.Customers S|"), ["SET"]);
+    assert_eq!(first("UPDATE c S|"), "SET");
+    // An operand alone needs an operator, not a statement.
+    let after_operand = labels("SELECT * FROM dbo.Customers WHERE CustomerId I|");
+    assert_eq!(after_operand, ["IN", "IS"], "{after_operand:?}");
+    let joined = labels("SELECT * FROM dbo.Customers c JOIN sales.Orders o ON o.CustomerId I|");
+    assert_eq!(joined, ["IN", "IS"], "{joined:?}");
+    // A whole condition goes on with AND, OR, a clause or the next statement.
+    let complete = labels("SELECT * FROM dbo.Customers WHERE CustomerId = 1 I|");
+    assert!(complete.contains(&"INSERT".to_string()) && !complete.contains(&"IN".to_string()), "{complete:?}");
+    let between = labels("SELECT * FROM dbo.Customers WHERE CustomerId BETWEEN 1 AND 2 O|");
+    assert!(between.contains(&"OR".to_string()) && between.contains(&"ORDER BY".to_string()), "{between:?}");
+    // Where a value is expected, no statement but a subquery's SELECT.
+    let value = labels("SELECT * FROM dbo.Customers WHERE I|");
+    assert!(!value.contains(&"INSERT".to_string()) && !value.contains(&"IF".to_string()), "{value:?}");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId IN (S|"), "SELECT");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE EXISTS (S|"), "SELECT");
+    assert_eq!(first("CREATE VIEW dbo.v AS S|"), "SELECT");
+    assert_eq!(first("DECLARE c CURSOR FOR S|"), "SELECT");
+    // What still goes on as before.
+    assert_eq!(first("SELECT * F|"), "FROM");
+    assert_eq!(first("SELECT Name F|"), "FROM");
+    assert_eq!(first("IF @x = 1 B|"), "BEGIN");
+    assert_eq!(labels("IF @x I|"), ["IN", "IS"]);
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE (CustomerId = 1) A|"), "AND");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId IS NULL O|"), "OR");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE CustomerId IN (1, 2) A|"), "AND");
+    assert_eq!(first("SELECT * FROM dbo.Customers WHERE NOT EXISTS (SELECT 1) A|"), "AND");
+    // A word picked often stays among its kind: columns come first where a value goes.
+    let options = quillsql::complete::CompleteOptions { usage: [(quillsql::usage::item_key("keyword", "NOT"), 50)].into_iter().collect(), ..Default::default() };
+    let text = "SELECT * FROM dbo.Customers WHERE N";
+    let r: Vec<String> = quillsql::complete::complete_full(text, text.len(), Some(&schema()), &[], options).items.into_iter().map(|i| i.label).collect();
+    assert_eq!(r.first().map(String::as_str), Some("Name"), "{r:?}");
+}
